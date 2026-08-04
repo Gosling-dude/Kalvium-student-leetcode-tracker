@@ -52,5 +52,9 @@ EXPOSE 4000
 
 # Migrations are applied at start-up rather than baked into the image, so a fresh
 # volume converges on its own and a redeploy against an existing database is a no-op.
-# Seeding is idempotent and never resets an existing admin password.
-CMD ["sh", "-c", "npx prisma migrate deploy --schema apps/api/prisma/schema.prisma && npx tsx apps/api/prisma/seed.ts || true && node apps/api/dist/main.js"]
+#
+# The parentheses matter. `a && b || true && c` parses as `((a && b) || true) && c`,
+# which swallows a FAILED MIGRATION and starts the API against an unmigrated database.
+# Only the seed is allowed to fail (it is idempotent and non-essential); a migration
+# failure must stop the container so the problem is visible.
+CMD ["sh", "-c", "npx prisma migrate deploy --schema apps/api/prisma/schema.prisma && (npx tsx apps/api/prisma/seed.ts || echo 'seed skipped') && node apps/api/dist/main.js"]

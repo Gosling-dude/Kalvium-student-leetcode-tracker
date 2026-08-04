@@ -77,9 +77,11 @@ exists partly for this reason).
   logging are implemented, and Slack/Discord work through a generic webhook transport.
   Email, WhatsApp and Telegram have no transport class yet — the `/notifications/channels`
   endpoint reports which are actually implemented rather than implying all five work.
-- **Student profile page.** The API returns the full profile (level, achievements,
-  heatmap, recent history, notes); the frontend links to `/students/[id]` but that route
-  is not built. This is the largest frontend gap.
+- **Recompute is fire-and-forget.** `POST /admin/recompute` returns `202` immediately and
+  runs in the background, because at 250 students × 30 days it is tens of thousands of
+  writes and cannot complete inside an HTTP request. Unlike `POST /sync` it has no job
+  row, so progress is not trackable — watch the system log for the completion entry.
+  Giving it a `SyncJob`-style record is the natural next improvement.
 - **Tests.** The domain core and the provider layer are covered (126 tests). API
   integration and E2E tests are not written — they need a live database, which was the
   blocker described above.

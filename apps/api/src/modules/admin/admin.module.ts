@@ -7,6 +7,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Module,
   Param,
   ParseUUIDPipe,
@@ -25,6 +27,7 @@ import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringModule } from '../scoring/scoring.module';
 import { RollupService } from '../scoring/rollup.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
+import { AuditService } from '../audit/audit.service';
 
 class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
@@ -58,6 +61,7 @@ export class AdminController {
     private readonly time: ProgramTimeService,
     private readonly rollup: RollupService,
     private readonly scoringConfig: ScoringConfigService,
+    private readonly audit: AuditService,
   ) {}
 
   // --- Batches -------------------------------------------------------------
@@ -192,16 +196,33 @@ export class AdminController {
   // --- Recomputation -------------------------------------------------------
 
   @Post('recompute')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Audit('SCORES_RECOMPUTED', 'System')
   @ApiOperation({
     summary: 'Rebuild all derived state for a date range from the submission mirror',
+    description:
+      'Runs in the background and returns immediately. At 250 students over 30 days ' +
+      'this is tens of thousands of writes and takes minutes — far longer than an ' +
+      'HTTP request should be held open. Watch the system log for completion.',
   })
-  async recompute(@Body() dto: RecomputeDto) {
+  recompute(@Body() dto: RecomputeDto) {
     const to = dto.to ?? this.time.today();
     // Default to the last 30 days: recomputing all history on a mis-click would be a
     // long, surprising operation.
     const from = dto.from ?? this.time.addDays(to, -29);
-    return this.rollup.recomputeRange(from, to);
+
+    // Detached deliberately. Awaiting it would exceed any sane request timeout and the
+    // client would see a dead connection while the work continued regardless.
+    void this.rollup
+      .recomputeRange(from, to)
+      .then((result) =>
+        this.audit.log('INFO', 'AdminController', `Recompute finished for ${from}…${to}`, result),
+      )
+      .catch((error: Error) =>
+        this.audit.log('ERROR', 'AdminController', `Recompute failed: ${error.message}`),
+      );
+
+    return { accepted: true, from, to, note: 'Running in the background.' };
   }
 
   @Post('leaderboard/reset')

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, Upload } from 'lucide-react';
@@ -203,7 +204,12 @@ export default function StudentsPage() {
                     className="transition hover:bg-[var(--color-surface-sunken)]"
                   >
                     <Td>
-                      <p className="truncate font-medium">{student.name}</p>
+                      <Link
+                        href={`/students/${student.id}`}
+                        className="truncate font-medium hover:text-[var(--color-brand)]"
+                      >
+                        {student.name}
+                      </Link>
                       <p className="truncate text-xs text-[var(--color-fg-subtle)]">
                         {student.email}
                       </p>

@@ -18,6 +18,11 @@
     "rootDir": "./src",
     "baseUrl": "./",
     "incremental": true,
+    // The build info MUST live inside outDir. `nest build` sets deleteOutDir, so a
+    // build-info file kept outside dist survives the wipe, convinces tsc that the
+    // already-deleted outputs are current, and produces a dist missing most of its
+    // files — which only fails at runtime, long after a green build.
+    "tsBuildInfoFile": "./dist/.tsbuildinfo",
     "skipLibCheck": true,
     "strict": true,
     "strictNullChecks": true,

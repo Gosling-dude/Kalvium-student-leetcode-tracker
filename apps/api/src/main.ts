@@ -15,11 +15,25 @@ async function bootstrap(): Promise<void> {
 
   app.setGlobalPrefix(config.apiPrefix);
 
+  // Swagger UI is served from this origin and needs inline script/style to render.
+  // Helmet's default CSP blocks both, so a deployment with SWAGGER_ENABLED=true would
+  // otherwise ship docs that render as a blank page. Rather than turning CSP off, the
+  // policy is widened by exactly what Swagger needs — and only while docs are enabled.
   app.use(
     helmet({
-      // Swagger UI needs inline styles/scripts; disabling CSP entirely would be worse,
-      // so it is relaxed only where the docs are served from.
-      contentSecurityPolicy: config.env === 'production' ? undefined : false,
+      contentSecurityPolicy: config.swaggerEnabled
+        ? {
+            directives: {
+              defaultSrc: ["'self'"],
+              scriptSrc: ["'self'", "'unsafe-inline'"],
+              styleSrc: ["'self'", "'unsafe-inline'"],
+              imgSrc: ["'self'", 'data:', 'https://validator.swagger.io'],
+              connectSrc: ["'self'"],
+              objectSrc: ["'none'"],
+              frameAncestors: ["'none'"],
+            },
+          }
+        : undefined,
       crossOriginEmbedderPolicy: false,
     }),
   );
