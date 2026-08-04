@@ -1,0 +1,101 @@
+# DSA Tracker — full stack.
+#
+#   docker compose up -d
+#
+# Brings up Postgres, Redis, the API (with its migrations applied and the database
+# seeded) and the web client. Nothing external is required — no hosted auth provider,
+# no third-party API keys.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dsa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dsa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dsa_password}
+      POSTGRES_DB: ${POSTGRES_DB:-dsa_tracker}
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # The API waits on this, so it must test a real query rather than just the port.
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-dsa} -d ${POSTGRES_DB:-dsa_tracker}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: dsa-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: dsa-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dsa}:${POSTGRES_PASSWORD:-dsa_password}@postgres:5432/${POSTGRES_DB:-dsa_tracker}?schema=public
+      REDIS_URL: redis://redis:6379
+      QUEUE_DRIVER: ${QUEUE_DRIVER:-bullmq}
+      # Both MUST be overridden for a real deployment — the API refuses to boot in
+      # production if either still holds a placeholder value.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET in .env}
+      PROGRAM_TIMEZONE: ${PROGRAM_TIMEZONE:-Asia/Kolkata}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@kalvium.com}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe!2026}
+      SYNC_CRON: ${SYNC_CRON:-0 */3 * * *}
+    ports:
+      - '${API_PORT:-4000}:4000'
+    healthcheck:
+      test:
+        ['CMD', 'node', '-e', "fetch('http://localhost:4000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Next inlines NEXT_PUBLIC_* at build time, so it must be an build arg
+        # rather than only a runtime environment variable.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api/v1}
+    container_name: dsa-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000/api/v1}
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+
+volumes:
+  postgres_data:
+  redis_data:

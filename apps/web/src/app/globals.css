@@ -1,0 +1,188 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Both themes are defined explicitly rather than deriving dark from light, because a
+ * mentor dashboard is read at 9am in a bright room and at 11pm in a dark one, and
+ * "dark mode" done by inversion produces muddy, low-contrast tables.
+ *
+ * Every foreground/background pair here clears WCAG AA for body text.
+ */
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f6f7f9;
+  --color-border: #e3e6ea;
+  --color-border-strong: #cdd2d9;
+  --color-fg: #0f1720;
+  --color-fg-muted: #5b6672;
+  --color-fg-subtle: #808b98;
+
+  --color-brand: #4f46e5;
+  --color-brand-fg: #ffffff;
+  --color-brand-soft: #eef2ff;
+
+  --color-success: #15803d;
+  --color-success-soft: #dcfce7;
+  --color-warning: #b45309;
+  --color-warning-soft: #fef3c7;
+  --color-danger: #b91c1c;
+  --color-danger-soft: #fee2e2;
+  --color-info: #0369a1;
+  --color-info-soft: #e0f2fe;
+
+  --color-easy: #15803d;
+  --color-medium: #b45309;
+  --color-hard: #be123c;
+
+  --radius-card: 0.75rem;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  /* Follow the OS by default… */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      color-scheme: dark;
+      --color-surface: #0b0f14;
+      --color-surface-raised: #141a22;
+      --color-surface-sunken: #070a0e;
+      --color-border: #232c37;
+      --color-border-strong: #33404f;
+      --color-fg: #e9eef5;
+      --color-fg-muted: #9dabbb;
+      --color-fg-subtle: #6c7c8d;
+
+      --color-brand: #818cf8;
+      --color-brand-fg: #0b0f14;
+      --color-brand-soft: #1e2130;
+
+      --color-success: #4ade80;
+      --color-success-soft: #10281a;
+      --color-warning: #fbbf24;
+      --color-warning-soft: #2a1f0a;
+      --color-danger: #f87171;
+      --color-danger-soft: #2c1214;
+      --color-info: #38bdf8;
+      --color-info-soft: #0a2233;
+
+      --color-easy: #4ade80;
+      --color-medium: #fbbf24;
+      --color-hard: #fb7185;
+    }
+  }
+
+  /* …but an explicit toggle always wins, in both directions. */
+  :root[data-theme='dark'] {
+    color-scheme: dark;
+    --color-surface: #0b0f14;
+    --color-surface-raised: #141a22;
+    --color-surface-sunken: #070a0e;
+    --color-border: #232c37;
+    --color-border-strong: #33404f;
+    --color-fg: #e9eef5;
+    --color-fg-muted: #9dabbb;
+    --color-fg-subtle: #6c7c8d;
+
+    --color-brand: #818cf8;
+    --color-brand-fg: #0b0f14;
+    --color-brand-soft: #1e2130;
+
+    --color-success: #4ade80;
+    --color-success-soft: #10281a;
+    --color-warning: #fbbf24;
+    --color-warning-soft: #2a1f0a;
+    --color-danger: #f87171;
+    --color-danger-soft: #2c1214;
+    --color-info: #38bdf8;
+    --color-info-soft: #0a2233;
+
+    --color-easy: #4ade80;
+    --color-medium: #fbbf24;
+    --color-hard: #fb7185;
+  }
+
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background: var(--color-surface-sunken);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Never remove focus rings — keyboard users navigate these tables constantly. */
+  :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-brand);
+    color: var(--color-brand-fg);
+  }
+}
+
+@layer utilities {
+  .card {
+    background: var(--color-surface-raised);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-card);
+  }
+
+  /* Wide tables scroll inside their own container; the page body never scrolls sideways. */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--color-surface-sunken) 25%,
+      var(--color-border) 37%,
+      var(--color-surface-sunken) 63%
+    );
+    background-size: 400% 100%;
+    animation: shimmer 1.4s ease infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: 100% 50%;
+    }
+    100% {
+      background-position: 0 50%;
+    }
+  }
+
+  .animate-rise {
+    animation: rise 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-rise,
+    .skeleton {
+      animation: none;
+    }
+  }
+}

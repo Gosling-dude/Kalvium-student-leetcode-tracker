@@ -1,0 +1,786 @@
+// DSA Tracker — production schema.
+//
+// Design notes that matter for correctness:
+//
+//  * Day bucketing is stored as a `dayKey` string (`YYYY-MM-DD`) in the *program*
+//    timezone, never as a timestamp. Storing a DATE would re-introduce the server's
+//    timezone into every comparison; the string is unambiguous and indexes well.
+//
+//  * `Submission` is a permanent local mirror of every submission we ever observe.
+//    LeetCode's `recentAcSubmissionList` returns at most 20 rows, so history outside
+//    that window is unrecoverable from the API. We never re-derive history — we append
+//    to the mirror and recompute everything downstream from it.
+//
+//  * Every aggregate (`DailyStatus`, leaderboards, achievements) is a *cache* that can
+//    be rebuilt from `Submission` + `Assignment` + `ScoringConfig`. That is what makes
+//    "recalculate scores" and admin-editable formulas safe to run at any time.
+//
+//  * Idempotency: unique constraints on (student, providerSubmissionId) and
+//    (student, dayKey) mean a sync can be re-run any number of times without
+//    double-counting.
+
+generator client {
+  provider        = "prisma-client-js"
+  binaryTargets   = ["native"]
+  previewFeatures = []
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums — values mirror the string unions in @dsa/shared exactly.
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  MENTOR
+  VIEWER
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum ProblemStatus {
+  ACCEPTED
+  ATTEMPTED_NOT_ACCEPTED
+  NOT_ATTEMPTED
+  UNKNOWN
+}
+
+enum StudentStatus {
+  ACTIVE
+  INACTIVE
+  DROPPED
+  PAUSED
+}
+
+/// Why a student's data looks the way it does. Distinguishes "genuinely solved
+/// nothing" from "we could not read this profile" — a distinction mentors need.
+enum SyncStatus {
+  OK
+  NEVER_SYNCED
+  USER_NOT_FOUND
+  PROFILE_PRIVATE
+  RATE_LIMITED
+  PROVIDER_ERROR
+  TIMEOUT
+}
+
+enum SyncJobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+  CANCELLED
+}
+
+enum SyncTrigger {
+  MANUAL
+  CRON
+  RETRY
+  IMPORT
+  API
+}
+
+enum SyncMode {
+  FULL
+  INCREMENTAL
+  RETRY_FAILED
+  SINGLE_STUDENT
+}
+
+enum LeaderboardPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  ALL_TIME
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+enum NotificationChannel {
+  EMAIL
+  SLACK
+  DISCORD
+  WHATSAPP
+  TELEGRAM
+}
+
+enum NotificationEvent {
+  ASSIGNMENT_MISSED
+  STREAK_BROKEN
+  LEADERBOARD_UPDATED
+  SYNC_COMPLETED
+  SYNC_FAILED
+  ACHIEVEMENT_UNLOCKED
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         UserRole  @default(MENTOR)
+  avatarUrl    String?
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  mentoredGroups Group[]        @relation("GroupMentor")
+  assignments    Assignment[]   @relation("AssignmentAuthor")
+  notes          MentorNote[]
+  auditLogs      AuditLog[]
+  refreshTokens  RefreshToken[]
+  apiKeys        ApiKey[]
+  syncJobs       SyncJob[]
+
+  @@index([role])
+  @@index([isActive])
+  @@map("users")
+}
+
+/// Refresh tokens are persisted (hashed) so that logout and "revoke all sessions"
+/// are real operations rather than client-side gestures.
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  name       String
+  /// Only the hash is stored; the plaintext key is shown once at creation.
+  keyHash    String    @unique
+  prefix     String
+  scopes     String[]  @default([])
+  createdById String?  @db.Uuid
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([prefix])
+  @@map("api_keys")
+}
+
+// ---------------------------------------------------------------------------
+// Cohort structure
+// ---------------------------------------------------------------------------
+
+model Batch {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String    @unique
+  startDate DateTime?
+  endDate   DateTime?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  students Student[]
+  groups   Group[]
+
+  @@index([isActive])
+  @@map("batches")
+}
+
+model Group {
+  id       String  @id @default(uuid()) @db.Uuid
+  name     String
+  batchId  String? @db.Uuid
+  mentorId String? @db.Uuid
+  color    String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batch    Batch?                   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  mentor   User?                    @relation("GroupMentor", fields: [mentorId], references: [id], onDelete: SetNull)
+  students Student[]
+  entries  GroupLeaderboardEntry[]
+
+  /// Group names are unique per batch, not globally — "Group 1" may exist in
+  /// several batches, which is exactly how mentors name them in practice.
+  @@unique([batchId, name])
+  @@index([mentorId])
+  @@map("groups")
+}
+
+model Student {
+  id                String        @id @default(uuid()) @db.Uuid
+  name              String
+  email             String        @unique
+  phone             String?
+  /// Stored lowercase; LeetCode usernames are case-insensitive for lookup but the
+  /// API echoes back the canonical casing, which we keep in `leetcodeDisplayName`.
+  leetcodeUsername  String        @unique
+  leetcodeDisplayName String?
+  status            StudentStatus @default(ACTIVE)
+  avatarUrl         String?
+
+  batchId String? @db.Uuid
+  groupId String? @db.Uuid
+
+  /// Denormalised aggregates, refreshed after each sync. Always derivable from
+  /// `Submission` + `DailyStatus`; cached here so list views need no joins.
+  currentStreak   Int @default(0)
+  longestStreak   Int @default(0)
+  totalSolved     Int @default(0)
+  totalScore      Int @default(0)
+  easySolved      Int @default(0)
+  mediumSolved    Int @default(0)
+  hardSolved      Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batch         Batch?              @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  group         Group?              @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  submissions   Submission[]
+  dailyStatuses DailyStatus[]
+  syncState     StudentSyncState?
+  notes         MentorNote[]
+  achievements  StudentAchievement[]
+  entries       LeaderboardEntry[]
+  notifications NotificationLog[]
+
+  @@index([groupId])
+  @@index([batchId])
+  @@index([status])
+  @@index([name])
+  @@map("students")
+}
+
+// ---------------------------------------------------------------------------
+// Problems & assignments
+// ---------------------------------------------------------------------------
+
+/// Cached LeetCode problem metadata. Fetched once per problem and refreshed lazily —
+/// titles and difficulty effectively never change, acceptance rate drifts slowly.
+model Problem {
+  id                 String     @id @default(uuid()) @db.Uuid
+  titleSlug          String     @unique
+  title              String
+  /// LeetCode's internal id and the number shown on the site — they differ.
+  questionId         String?
+  questionFrontendId String?
+  difficulty         Difficulty
+  acceptanceRate     Float?
+  isPaidOnly         Boolean    @default(false)
+  topicTags          String[]   @default([])
+  /// Empty in practice: company tags are premium-gated and the public GraphQL
+  /// endpoint returns null. Kept so a future authenticated provider can fill it.
+  companyTags        String[]   @default([])
+  url                String
+  metadataFetchedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignmentProblems AssignmentProblem[]
+  submissions        Submission[]
+  problemStatuses    DailyProblemStatus[]
+
+  @@index([difficulty])
+  @@map("problems")
+}
+
+model Assignment {
+  id     String @id @default(uuid()) @db.Uuid
+  /// `YYYY-MM-DD` in the program timezone. One assignment per program day.
+  dayKey String @unique
+
+  title       String?
+  topic       String?
+  notes       String?
+  /// Overall difficulty label for the day; individual problems carry their own.
+  difficulty  Difficulty?
+  isPublished Boolean     @default(true)
+
+  createdById String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy     User?               @relation("AssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  problems      AssignmentProblem[]
+  dailyStatuses DailyStatus[]
+
+  @@index([dayKey])
+  @@map("assignments")
+}
+
+model AssignmentProblem {
+  id           String @id @default(uuid()) @db.Uuid
+  assignmentId String @db.Uuid
+  problemId    String @db.Uuid
+  /// 1-based slot (Problem 1 … Problem 4).
+  position     Int
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  problem    Problem    @relation(fields: [problemId], references: [id], onDelete: Restrict)
+
+  @@unique([assignmentId, position])
+  @@unique([assignmentId, problemId])
+  @@index([problemId])
+  @@map("assignment_problems")
+}
+
+// ---------------------------------------------------------------------------
+// Submission mirror — the system's source of truth
+// ---------------------------------------------------------------------------
+
+/// Every submission observed for a student, accepted or not.
+///
+/// `titleSlug` is denormalised and always present, while `problemId` is optional:
+/// students solve far more problems than we assign, and resolving metadata for every
+/// one would multiply provider calls for no benefit. We link to `Problem` only when
+/// the slug matches something we track.
+model Submission {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @db.Uuid
+  problemId String? @db.Uuid
+
+  /// LeetCode's submission id — the idempotency key for the mirror.
+  providerSubmissionId String
+  provider             String @default("leetcode")
+
+  titleSlug   String
+  title       String
+  status      ProblemStatus @default(ACCEPTED)
+  language    String?
+  /// Runtime and memory are not exposed by the public submission-list queries;
+  /// nullable so an authenticated provider can populate them later without a migration.
+  runtime     String?
+  memory      String?
+
+  submittedAt DateTime
+  /// Program-day bucket of `submittedAt`, precomputed so day queries never
+  /// re-derive timezone maths in SQL.
+  dayKey      String
+
+  createdAt DateTime @default(now())
+
+  student Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  problem Problem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+
+  /// Makes re-running a sync a no-op instead of a duplicate.
+  @@unique([studentId, provider, providerSubmissionId])
+  @@index([studentId, dayKey])
+  @@index([studentId, titleSlug])
+  @@index([studentId, submittedAt])
+  @@index([titleSlug])
+  @@index([dayKey])
+  @@map("submissions")
+}
+
+/// Per-student sync bookkeeping: the incremental cursor plus why the last attempt
+/// looked the way it did.
+model StudentSyncState {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @unique @db.Uuid
+
+  /// Newest submission timestamp already mirrored. The incremental sync stops
+  /// walking the provider's list once it reaches this point.
+  lastSubmissionAt   DateTime?
+  lastProviderSubmissionId String?
+  lastSyncedAt       DateTime?
+  lastSuccessAt      DateTime?
+  status             SyncStatus @default(NEVER_SYNCED)
+  lastError          String?
+  consecutiveFailures Int       @default(0)
+  totalSyncs         Int        @default(0)
+  /// Cached from the provider's aggregate stats — the student's all-time totals.
+  providerTotalSolved Int?
+  providerEasySolved  Int?
+  providerMediumSolved Int?
+  providerHardSolved   Int?
+  providerRanking      Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([lastSyncedAt])
+  @@map("student_sync_states")
+}
+
+// ---------------------------------------------------------------------------
+// Derived daily state
+// ---------------------------------------------------------------------------
+
+/// One row per student per program day. A rebuildable cache — recomputing it from
+/// the submission mirror is always safe.
+model DailyStatus {
+  id           String  @id @default(uuid()) @db.Uuid
+  studentId    String  @db.Uuid
+  dayKey       String
+  assignmentId String? @db.Uuid
+
+  assignedCount Int @default(0)
+  solvedCount   Int @default(0)
+
+  score          Int  @default(0)
+  /// Labelled `ScoreComponent[]`, so the UI can explain a score without recomputing it.
+  scoreBreakdown Json?
+
+  /// When the student finished the *whole* assignment; null if they did not.
+  completedAt       DateTime?
+  /// Minute-of-day of `completedAt` in program time — the leaderboard tiebreaker.
+  completionMinute  Int?
+  firstSolvedAt     DateTime?
+  lastSolvedAt      DateTime?
+
+  isPerfect     Boolean    @default(false)
+  streakAtDay   Int        @default(0)
+  syncStatus    SyncStatus @default(NEVER_SYNCED)
+  /// Set when a mentor overrides the automatic result.
+  isOverridden  Boolean    @default(false)
+  overrideNote  String?
+  overriddenById String?   @db.Uuid
+
+  computedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  student        Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assignment     Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  problemStatuses DailyProblemStatus[]
+
+  @@unique([studentId, dayKey])
+  @@index([dayKey])
+  @@index([dayKey, solvedCount])
+  @@index([studentId])
+  @@index([dayKey, score])
+  @@map("daily_statuses")
+}
+
+/// Per-problem outcome within a day. Denormalised from `Submission` so the mentor
+/// dashboard's five tables — including "which questions are missing" — are a single
+/// indexed read rather than 250 × 4 correlated lookups.
+model DailyProblemStatus {
+  id            String        @id @default(uuid()) @db.Uuid
+  dailyStatusId String        @db.Uuid
+  problemId     String        @db.Uuid
+  position      Int
+  status        ProblemStatus @default(NOT_ATTEMPTED)
+  solvedAt      DateTime?
+  language      String?
+  runtime       String?
+  memory        String?
+  attempts      Int           @default(0)
+
+  dailyStatus DailyStatus @relation(fields: [dailyStatusId], references: [id], onDelete: Cascade)
+  problem     Problem     @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@unique([dailyStatusId, problemId])
+  @@index([problemId])
+  @@index([status])
+  @@map("daily_problem_statuses")
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboards (materialised snapshots)
+// ---------------------------------------------------------------------------
+
+/// Snapshots rather than live queries: ranks must be stable for a given period so
+/// "you moved up 3 places" is meaningful, and so a leaderboard can be shown instantly
+/// without recomputing 250 students' scores on every page load.
+model LeaderboardEntry {
+  id        String            @id @default(uuid()) @db.Uuid
+  period    LeaderboardPeriod
+  /// `2026-08-04`, `2026-W32`, `2026-08`, or `ALL` depending on `period`.
+  periodKey String
+  studentId String            @db.Uuid
+
+  rank             Int
+  previousRank     Int?
+  score            Int     @default(0)
+  solvedCount      Int     @default(0)
+  currentStreak    Int     @default(0)
+  completionMinute Int?
+  consistency      Float   @default(0)
+  isTied           Boolean @default(false)
+
+  computedAt DateTime @default(now())
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([period, periodKey, studentId])
+  @@index([period, periodKey, rank])
+  @@index([studentId])
+  @@map("leaderboard_entries")
+}
+
+model GroupLeaderboardEntry {
+  id        String            @id @default(uuid()) @db.Uuid
+  period    LeaderboardPeriod
+  periodKey String
+  groupId   String            @db.Uuid
+
+  rank              Int
+  previousRank      Int?
+  memberCount       Int   @default(0)
+  averageCompletion Float @default(0)
+  totalSolved       Int   @default(0)
+  averageStreak     Float @default(0)
+  averageScore      Float @default(0)
+  isTied            Boolean @default(false)
+
+  computedAt DateTime @default(now())
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([period, periodKey, groupId])
+  @@index([period, periodKey, rank])
+  @@map("group_leaderboard_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Scoring configuration
+// ---------------------------------------------------------------------------
+
+/// The scoring formula as data. Exactly one row is active; older rows are retained
+/// so a recomputation can be explained ("scored under formula v3").
+model ScoringConfig {
+  id       String  @id @default(uuid()) @db.Uuid
+  version  Int     @unique @default(autoincrement())
+  name     String
+  isActive Boolean @default(false)
+
+  /// Full `ScoringConfig` shape from @dsa/shared. Stored as JSON because the formula's
+  /// structure (bonus tiers) is itself editable — columns would force a migration
+  /// every time an admin added a tier.
+  config Json
+
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("scoring_configs")
+}
+
+// ---------------------------------------------------------------------------
+// Sync engine
+// ---------------------------------------------------------------------------
+
+model SyncJob {
+  id      String        @id @default(uuid()) @db.Uuid
+  status  SyncJobStatus @default(QUEUED)
+  mode    SyncMode      @default(INCREMENTAL)
+  trigger SyncTrigger   @default(MANUAL)
+  dayKey  String?
+
+  totalStudents     Int @default(0)
+  processedStudents Int @default(0)
+  succeededStudents Int @default(0)
+  failedStudents    Int @default(0)
+  newSubmissions    Int @default(0)
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  durationMs Int?
+  error      String?
+  /// Per-student failure detail, so "retry failed" knows exactly what to retry.
+  errorDetail Json?
+
+  triggeredById String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  triggeredBy User?          @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
+  items       SyncJobItem[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([dayKey])
+  @@map("sync_jobs")
+}
+
+model SyncJobItem {
+  id        String     @id @default(uuid()) @db.Uuid
+  syncJobId String     @db.Uuid
+  studentId String     @db.Uuid
+  status    SyncStatus @default(NEVER_SYNCED)
+  newSubmissions Int   @default(0)
+  attempts  Int        @default(0)
+  error     String?
+  durationMs Int?
+  processedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  syncJob SyncJob @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+
+  @@unique([syncJobId, studentId])
+  @@index([syncJobId, status])
+  @@map("sync_job_items")
+}
+
+// ---------------------------------------------------------------------------
+// Gamification
+// ---------------------------------------------------------------------------
+
+/// Achievement *rules* live in code (`@dsa/shared`); this table records only when a
+/// student first unlocked one, which is the part that cannot be recomputed.
+model StudentAchievement {
+  id          String   @id @default(uuid()) @db.Uuid
+  studentId   String   @db.Uuid
+  code        String
+  unlockedAt  DateTime @default(now())
+  notifiedAt  DateTime?
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, code])
+  @@index([code])
+  @@map("student_achievements")
+}
+
+// ---------------------------------------------------------------------------
+// Mentor workflow, auditing, notifications, settings
+// ---------------------------------------------------------------------------
+
+model MentorNote {
+  id        String  @id @default(uuid()) @db.Uuid
+  studentId String  @db.Uuid
+  authorId  String? @db.Uuid
+  body      String
+  /// Private notes are visible only to their author and admins.
+  isPrivate Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  author  User?   @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([studentId])
+  @@map("mentor_notes")
+}
+
+model AuditLog {
+  id         String  @id @default(uuid()) @db.Uuid
+  actorId    String? @db.Uuid
+  actorName  String?
+  action     String
+  entityType String
+  entityId   String?
+  summary    String
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model SystemLog {
+  id       String   @id @default(uuid()) @db.Uuid
+  level    LogLevel @default(INFO)
+  context  String
+  message  String
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([level])
+  @@index([context])
+  @@index([createdAt])
+  @@map("system_logs")
+}
+
+/// Channel configuration for the notification abstraction. No transport is shipped
+/// enabled by default — the architecture is in place, credentials are not.
+model NotificationChannelConfig {
+  id        String              @id @default(uuid()) @db.Uuid
+  channel   NotificationChannel @unique
+  isEnabled Boolean             @default(false)
+  /// Webhook URLs, API tokens, sender addresses — shape varies per channel.
+  config    Json?
+  events    NotificationEvent[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_channel_configs")
+}
+
+model NotificationLog {
+  id        String              @id @default(uuid()) @db.Uuid
+  channel   NotificationChannel
+  event     NotificationEvent
+  status    NotificationStatus  @default(PENDING)
+  studentId String?             @db.Uuid
+  recipient String?
+  payload   Json?
+  error     String?
+  sentAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  student Student? @relation(fields: [studentId], references: [id], onDelete: SetNull)
+
+  @@index([channel, status])
+  @@index([createdAt])
+  @@map("notification_logs")
+}
+
+/// Free-form application settings (program timezone, sync schedule, feature flags).
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}

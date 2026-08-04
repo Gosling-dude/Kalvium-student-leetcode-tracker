@@ -1,0 +1,33 @@
+{
+  "name": "dsa-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSA Tracker — LeetCode progress tracking platform for Kalvium mentors",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "npm run build -w @dsa/shared && npm run build -w @dsa/api && npm run build -w @dsa/web",
+    "build:shared": "npm run build -w @dsa/shared",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w @dsa/api\" \"npm run dev -w @dsa/web\"",
+    "dev:api": "npm run dev -w @dsa/api",
+    "dev:web": "npm run dev -w @dsa/web",
+    "test": "npm run test -w @dsa/shared && npm run test -w @dsa/api",
+    "typecheck": "npm run typecheck -w @dsa/shared && npm run typecheck -w @dsa/api && npm run typecheck -w @dsa/web",
+    "lint": "npm run lint -w @dsa/api && npm run lint -w @dsa/web",
+    "db:migrate": "npm run db:migrate -w @dsa/api",
+    "db:generate": "npm run db:generate -w @dsa/api",
+    "db:seed": "npm run db:seed -w @dsa/api",
+    "db:studio": "npm run db:studio -w @dsa/api",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}
