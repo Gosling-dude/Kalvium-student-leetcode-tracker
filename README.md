@@ -91,6 +91,23 @@ something.
 
 ---
 
+## Deploying to Render
+
+This repo ships a Render Blueprint (`render.yaml`) that provisions the full stack —
+managed Postgres, the API and frontend as Web Services, and the sync/rollup jobs as
+Render Cron Jobs (so scheduled syncs keep firing even when an idle web service is
+suspended). The API runs with `SYNC_ENABLED=false` because that scheduled work moves to
+the cron jobs.
+
+**The full, ordered checklist is in [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md).**
+Two things to know before you start:
+
+- `NEXT_PUBLIC_API_URL` is compiled into the frontend at **build** time — deploy the API
+  first, then set it on the web service and **redeploy the web service**.
+- **Never set `PORT`** on Render; it is injected, and both apps already read it.
+
+---
+
 ## Architecture
 
 ```
