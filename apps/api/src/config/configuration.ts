@@ -46,6 +46,14 @@ export interface AppConfig {
 
   sync: { cron: string; enabled: boolean; rollupCron: string };
 
+  /**
+   * Shared secret for the internal cron endpoints (`/internal/sync`, `/internal/rollup`).
+   * These are triggered by GitHub Actions instead of an in-process scheduler, so they
+   * are reachable without a user session and must be gated by a bearer secret. `null`
+   * means the endpoints reject every request (fail closed).
+   */
+  cron: { secret: string | null };
+
   provider: {
     endpoint: string;
     requestsPerSecond: number;
@@ -195,6 +203,8 @@ export function loadConfiguration(): AppConfig {
       enabled: toBool(process.env.SYNC_ENABLED, true),
       rollupCron: process.env.ROLLUP_CRON ?? '30 0 * * *',
     },
+
+    cron: { secret: process.env.CRON_SECRET || null },
 
     provider: {
       endpoint: process.env.LEETCODE_GRAPHQL_ENDPOINT ?? 'https://leetcode.com/graphql',

@@ -94,6 +94,49 @@ export class SyncService implements OnModuleInit {
     return this.toSummary(job);
   }
 
+  /**
+   * Start a sync and resolve only once it reaches a terminal status.
+   *
+   * `start()` returns as soon as the job is dispatched; with the `inline` driver the
+   * work then runs on a detached promise. A caller that must know the outcome — a cron
+   * trigger, or the internal HTTP endpoint answering a GitHub Action — polls the job row
+   * here rather than depending on shutdown-hook ordering to drain in-flight work.
+   *
+   * Returns `null` when there is nothing to sync (e.g. no active students yet), which is
+   * an expected state before the first import, not an error.
+   */
+  async runToCompletion(
+    options: StartSyncOptions = {},
+    waitMs = 25 * 60 * 1000,
+    pollIntervalMs = 3000,
+  ): Promise<SyncJobSummary | null> {
+    let job: SyncJobSummary;
+    try {
+      job = await this.start(options);
+    } catch (error) {
+      if (error instanceof NotFoundException) {
+        this.logger.warn(`Sync did not start: ${(error as Error).message}`);
+        return null;
+      }
+      throw error;
+    }
+
+    const terminal = new Set(['COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED', 'CANCELLED']);
+    const deadline = Date.now() + waitMs;
+
+    for (;;) {
+      const current = await this.findJob(job.id);
+      if (terminal.has(current.status)) return current;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Sync job ${job.id} did not finish within ${Math.round(waitMs / 60000)} minutes ` +
+            `(last status: ${current.status}, ${current.processedStudents}/${current.totalStudents}).`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+  }
+
   /** Execute a queued job. Invoked by the queue driver, never called directly. */
   async execute(payload: SyncJobPayload): Promise<void> {
     const job = await this.prisma.syncJob.findUnique({

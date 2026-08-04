@@ -91,20 +91,49 @@ something.
 
 ---
 
-## Deploying to Render
+## Deployment — a fully free stack ($0)
 
-This repo ships a Render Blueprint (`render.yaml`) that provisions the full stack —
-managed Postgres, the API and frontend as Web Services, and the sync/rollup jobs as
-Render Cron Jobs (so scheduled syncs keep firing even when an idle web service is
-suspended). The API runs with `SYNC_ENABLED=false` because that scheduled work moves to
-the cron jobs.
+The app deploys across free tiers, with no paid infrastructure:
 
-**The full, ordered checklist is in [docs/DEPLOY_RENDER.md](docs/DEPLOY_RENDER.md).**
-Two things to know before you start:
+| Layer | Platform | Guide |
+|---|---|---|
+| Frontend (Next.js) | **Vercel** (Free) | [docs/DEPLOY_VERCEL.md](docs/DEPLOY_VERCEL.md) |
+| Backend (NestJS) | **Render** Free Web Service | [docs/DEPLOY_RENDER_FREE.md](docs/DEPLOY_RENDER_FREE.md) |
+| Database | **Neon** PostgreSQL (Free) | [docs/DEPLOY_NEON.md](docs/DEPLOY_NEON.md) |
+| Scheduled sync / rollup | **GitHub Actions** → internal HTTP endpoints | `.github/workflows/` |
+| Repo & CI | **GitHub** | — |
 
-- `NEXT_PUBLIC_API_URL` is compiled into the frontend at **build** time — deploy the API
-  first, then set it on the web service and **redeploy the web service**.
-- **Never set `PORT`** on Render; it is injected, and both apps already read it.
+**How the schedule works without a paid cron:** a Free Web Service can be suspended when
+idle, so the schedule lives in GitHub Actions. On cron, they `POST` to the backend's
+internal endpoints — `/api/v1/internal/sync` (every 3h) and `/api/v1/internal/rollup`
+(nightly) — authenticated with `Authorization: Bearer <CRON_SECRET>`. The in-process
+scheduler is turned off in production (`SYNC_ENABLED=false`) so work never runs twice.
+
+Deploy order: **Neon → Render (backend) → set `CORS_ORIGINS` → Vercel (frontend) → GitHub
+Secrets**. Two build-time gotchas: `NEXT_PUBLIC_API_URL` is baked into the frontend at
+build (redeploy Vercel if it changes), and **never set `PORT`** (Render injects it).
+
+### Environment variables
+
+| Variable | Where | Required | Description |
+|---|---|---|---|
+| `DATABASE_URL` | Backend | ✅ | Neon PostgreSQL connection string (pooled, `sslmode=require`). |
+| `NEXT_PUBLIC_API_URL` | Frontend (Vercel) | ✅ | Backend base URL incl. prefix, e.g. `https://api.onrender.com/api/v1`. Build-time. |
+| `JWT_ACCESS_SECRET` | Backend | ✅ | ≥32 chars, random. Signs access tokens. |
+| `JWT_REFRESH_SECRET` | Backend | ✅ | ≥32 chars, random, **different** from the access secret. |
+| `CRON_SECRET` | Backend **and** GitHub | ✅ | Shared bearer secret for the internal cron endpoints. Must match. |
+| `CORS_ORIGINS` | Backend | ✅ | Comma-separated allowed origins, e.g. the Vercel URL. |
+| `NODE_ENV` | Backend | ✅ | `production`. |
+| `PORT` | Backend | ⛔ | **Do not set** — Render injects it; the app reads it. |
+| `SYNC_ENABLED` | Backend | ✅ | `false` in production (GitHub Actions drive the schedule). |
+| `QUEUE_DRIVER` | Backend | ✅ | `inline` (no Redis on the free stack). |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | Backend | ✅ | First admin; change the password after first login. |
+| `PROGRAM_TIMEZONE` | Backend | ✅ | e.g. `Asia/Kolkata`. All day boundaries resolve here. |
+| `SWAGGER_ENABLED` | Backend | ➖ | `false` by default in production; `true` to expose `/api/v1/docs`. |
+
+GitHub Actions secrets (Repo → Settings → Secrets and variables → Actions): `BACKEND_URL`
+(the Render base URL, no `/api/v1`) and `CRON_SECRET` (same value as the backend).
+See [.env.example](.env.example) for the complete local list.
 
 ---
 

@@ -1,0 +1,78 @@
+name: Nightly Rollup
+
+# Replaces the platform cron job. Recomputes the day that just closed (leaderboards,
+# streaks, aggregates) and prunes expired tokens/old logs, by calling the backend's
+# internal endpoint with the shared CRON_SECRET.
+#
+# The backend resolves "yesterday" in PROGRAM_TIMEZONE, so this must fire just after the
+# program day ends. 19:00 UTC == 00:30 Asia/Kolkata. Adjust if PROGRAM_TIMEZONE changes.
+on:
+  schedule:
+    - cron: '0 19 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: nightly-rollup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollup:
+    name: Trigger nightly rollup
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate required secrets
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -z "${BACKEND_URL:-}" ] && { echo "::error::BACKEND_URL secret is not set"; missing=1; }
+          [ -z "${CRON_SECRET:-}" ] && { echo "::error::CRON_SECRET secret is not set"; missing=1; }
+          [ "$missing" -eq 1 ] && exit 1
+          echo "Secrets present."
+
+      - name: POST /internal/rollup (with retries)
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+          url="${base}/api/v1/internal/rollup"
+          echo "Calling ${url}"
+
+          attempts=5
+          delay=10
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::Attempt ${i}/${attempts}"
+            http_code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' \
+              --connect-timeout 30 --max-time 600 \
+              -X POST "${url}" \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "Content-Type: application/json" || echo "000")
+            echo "HTTP ${http_code}"
+            echo "Response body:"; cat /tmp/body.txt || true; echo
+            echo "::endgroup::"
+
+            if [ "$http_code" = "200" ]; then
+              echo "Rollup triggered successfully."
+              exit 0
+            fi
+            if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+              echo "::error::Unauthorized (${http_code}). Check the CRON_SECRET secret matches the backend."
+              exit 1
+            fi
+            if [ "$i" -lt "$attempts" ]; then
+              echo "Retrying in ${delay}s..."
+              sleep "$delay"
+              delay=$((delay * 2))
+            fi
+          done
+
+          echo "::error::Rollup failed after ${attempts} attempts."
+          exit 1

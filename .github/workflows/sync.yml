@@ -1,0 +1,82 @@
+name: Scheduled LeetCode Sync
+
+# Replaces the platform cron job. Triggers an incremental submission sync by calling the
+# backend's internal endpoint with the shared CRON_SECRET.
+#
+# LeetCode's public submission list returns only the 20 most recent entries, so a
+# once-a-day sync can permanently miss submissions from very active students. This runs
+# every 3 hours for that reason. Cron here is UTC.
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+# Never let two syncs overlap: a slow run must not be lapped by the next schedule.
+concurrency:
+  group: scheduled-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Trigger incremental sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate required secrets
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -z "${BACKEND_URL:-}" ] && { echo "::error::BACKEND_URL secret is not set"; missing=1; }
+          [ -z "${CRON_SECRET:-}" ] && { echo "::error::CRON_SECRET secret is not set"; missing=1; }
+          [ "$missing" -eq 1 ] && exit 1
+          echo "Secrets present."
+
+      - name: POST /internal/sync (with retries)
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          # Strip any trailing slash so we build a clean URL.
+          base="${BACKEND_URL%/}"
+          url="${base}/api/v1/internal/sync"
+          echo "Calling ${url}"
+
+          attempts=5
+          delay=10
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::Attempt ${i}/${attempts}"
+            # --max-time covers a full free-tier cold start (~50s) plus the sync itself.
+            http_code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' \
+              --connect-timeout 30 --max-time 900 \
+              -X POST "${url}" \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "Content-Type: application/json" || echo "000")
+            echo "HTTP ${http_code}"
+            echo "Response body:"; cat /tmp/body.txt || true; echo
+            echo "::endgroup::"
+
+            if [ "$http_code" = "200" ]; then
+              echo "Sync triggered successfully."
+              exit 0
+            fi
+            # 401/403 are configuration errors — retrying will not help. Fail loudly now.
+            if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+              echo "::error::Unauthorized (${http_code}). Check the CRON_SECRET secret matches the backend."
+              exit 1
+            fi
+            if [ "$i" -lt "$attempts" ]; then
+              echo "Retrying in ${delay}s..."
+              sleep "$delay"
+              delay=$((delay * 2))
+            fi
+          done
+
+          echo "::error::Sync failed after ${attempts} attempts."
+          exit 1

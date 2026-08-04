@@ -27,6 +27,7 @@ import { ReportsModule } from './modules/reports/reports.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { HealthModule } from './modules/health/health.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { InternalModule } from './modules/internal/internal.module';
 
 /**
  * Typed configuration and the program clock, available everywhere without an import.
@@ -75,6 +76,7 @@ class CoreModule {}
     AdminModule,
     NotificationsModule,
     HealthModule,
+    InternalModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
