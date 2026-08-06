@@ -37,7 +37,7 @@ exists partly for this reason).
 
 - **Domain core** — timezone-correct day bucketing, scoring with configurable weights
   and bonus tiers, streaks (daily/weekly/monthly, longest, break detection), competition
-  ranking with the earliest-completion tiebreak, group aggregation, XP/levels,
+  ranking with the earliest-completion tiebreak, squad aggregation, XP/levels,
   13 achievements, heatmap intensity. Fully unit-tested.
 - **Provider abstraction** — interface, typed error taxonomy, token-bucket rate limiter
   with bounded concurrency, exponential backoff with full jitter, LeetCode
@@ -56,12 +56,12 @@ exists partly for this reason).
   history.
 - **Dashboard & mentor view** — every headline statistic in the brief, the five
   "solved N" tables with missing questions and a real reason for every zero.
-- **Leaderboards** — student and group, daily/weekly/monthly, badges, rank deltas, ties.
-- **Analytics** — daily/weekly/monthly trends, difficulty and topic breakdowns, group
+- **Leaderboards** — student and squad, daily/weekly/monthly, badges, rank deltas, ties.
+- **Analytics** — daily/weekly/monthly trends, difficulty and topic breakdowns, squad
   comparison, top improvers, bottom performers, heatmap endpoint. Charts use a palette
   validated for colour-vision deficiency against this app's own light and dark surfaces.
-- **Reports & export** — daily, weekly, monthly, group, attendance; CSV, XLSX, PDF, JSON.
-- **Admin** — batches, groups, mentor list, scoring formula versioning/activation,
+- **Reports & export** — daily, weekly, monthly, squad, attendance; CSV, XLSX, PDF, JSON.
+- **Admin** — batches, squads, mentor list, scoring formula versioning/activation,
   recompute, leaderboard reset, cache flush, settings, audit and system logs.
 - **Frontend** — 9 routes, dark mode, command palette (⌘K), skeletons, empty and error
   states, toasts, responsive tables, accessible focus and progress semantics.

@@ -29,16 +29,16 @@ export default function StudentsPage() {
 
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
-  const [groupId, setGroupId] = useState('');
+  const [squadId, setSquadId] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
 
   const filters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
 
   const students = useQuery({
-    queryKey: ['students', { page, search, groupId, syncStatus }],
+    queryKey: ['students', { page, search, squadId, syncStatus }],
     queryFn: () =>
-      api.students({ page, pageSize: 25, search, groupId, syncStatus, sortBy: 'name' }),
+      api.students({ page, pageSize: 25, search, squadId, syncStatus, sortBy: 'name' }),
   });
 
   const importMutation = useMutation({
@@ -140,18 +140,18 @@ export default function StudentsPage() {
           />
 
           <select
-            value={groupId}
+            value={squadId}
             onChange={(event) => {
-              setGroupId(event.target.value);
+              setSquadId(event.target.value);
               setPage(1);
             }}
-            aria-label="Filter by group"
+            aria-label="Filter by squad"
             className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none"
           >
-            <option value="">All groups</option>
-            {filters.data?.groups.map((group) => (
-              <option key={group.id} value={group.id}>
-                {group.name} ({group.studentCount})
+            <option value="">All squads</option>
+            {filters.data?.squads.map((squad) => (
+              <option key={squad.id} value={squad.id}>
+                {squad.name} ({squad.studentCount})
               </option>
             ))}
           </select>
@@ -189,7 +189,7 @@ export default function StudentsPage() {
               <thead>
                 <tr>
                   <Th>Student</Th>
-                  <Th>Group</Th>
+                  <Th>Squad</Th>
                   <Th>Batch</Th>
                   <Th>LeetCode</Th>
                   <Th>Streak</Th>
@@ -214,7 +214,7 @@ export default function StudentsPage() {
                         {student.email}
                       </p>
                     </Td>
-                    <Td className="text-[var(--color-fg-muted)]">{student.groupName ?? '—'}</Td>
+                    <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
                     <Td className="text-[var(--color-fg-muted)]">{student.batchName ?? '—'}</Td>
                     <Td>
                       <a

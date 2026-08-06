@@ -133,13 +133,13 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
       />
 
       {bucket.students.length === 0 ? (
-        <EmptyState title="Nobody in this group" description="No students landed here today." />
+        <EmptyState title="Nobody in this squad" description="No students landed here today." />
       ) : (
         <TableShell>
           <thead>
             <tr>
               <Th>Student</Th>
-              <Th>Group</Th>
+              <Th>Squad</Th>
               <Th>LeetCode</Th>
               {isComplete ? <Th>Completed</Th> : null}
               <Th>Streak</Th>
@@ -164,7 +164,7 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
                       </p>
                     </div>
                   </Td>
-                  <Td className="text-[var(--color-fg-muted)]">{student.groupName ?? '—'}</Td>
+                  <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
                   <Td>
                     <a
                       href={`https://leetcode.com/u/${student.leetcodeUsername}/`}

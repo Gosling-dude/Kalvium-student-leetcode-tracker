@@ -151,7 +151,7 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  mentoredGroups Group[]        @relation("GroupMentor")
+  mentoredSquads Squad[]        @relation("SquadMentor")
   assignments    Assignment[]   @relation("AssignmentAuthor")
   notes          MentorNote[]
   auditLogs      AuditLog[]
@@ -216,13 +216,13 @@ model Batch {
   updatedAt DateTime  @updatedAt
 
   students Student[]
-  groups   Group[]
+  squads   Squad[]
 
   @@index([isActive])
   @@map("batches")
 }
 
-model Group {
+model Squad {
   id       String  @id @default(uuid()) @db.Uuid
   name     String
   batchId  String? @db.Uuid
@@ -234,15 +234,20 @@ model Group {
   updatedAt DateTime @updatedAt
 
   batch    Batch?                   @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  mentor   User?                    @relation("GroupMentor", fields: [mentorId], references: [id], onDelete: SetNull)
+  mentor   User?                    @relation("SquadMentor", fields: [mentorId], references: [id], onDelete: SetNull)
   students Student[]
-  entries  GroupLeaderboardEntry[]
+  entries  SquadLeaderboardEntry[]
 
-  /// Group names are unique per batch, not globally — "Group 1" may exist in
+  /// Squad names are unique per batch, not globally — "Squad 74" may exist in
   /// several batches, which is exactly how mentors name them in practice.
+  ///
+  /// Caveat worth knowing: Postgres treats NULLs as distinct, so this constraint
+  /// does *not* stop two batch-less squads sharing a name. Every writer
+  /// (`StudentImportService`, `prisma/seed-students.ts`) therefore looks a squad up
+  /// by `(name, batchId)` before creating one.
   @@unique([batchId, name])
   @@index([mentorId])
-  @@map("groups")
+  @@map("squads")
 }
 
 model Student {
@@ -258,7 +263,7 @@ model Student {
   avatarUrl         String?
 
   batchId String? @db.Uuid
-  groupId String? @db.Uuid
+  squadId String? @db.Uuid
 
   /// Denormalised aggregates, refreshed after each sync. Always derivable from
   /// `Submission` + `DailyStatus`; cached here so list views need no joins.
@@ -274,7 +279,7 @@ model Student {
   updatedAt DateTime @updatedAt
 
   batch         Batch?              @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  group         Group?              @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  squad         Squad?              @relation(fields: [squadId], references: [id], onDelete: SetNull)
   submissions   Submission[]
   dailyStatuses DailyStatus[]
   syncState     StudentSyncState?
@@ -283,7 +288,7 @@ model Student {
   entries       LeaderboardEntry[]
   notifications NotificationLog[]
 
-  @@index([groupId])
+  @@index([squadId])
   @@index([batchId])
   @@index([status])
   @@index([name])
@@ -553,11 +558,11 @@ model LeaderboardEntry {
   @@map("leaderboard_entries")
 }
 
-model GroupLeaderboardEntry {
+model SquadLeaderboardEntry {
   id        String            @id @default(uuid()) @db.Uuid
   period    LeaderboardPeriod
   periodKey String
-  groupId   String            @db.Uuid
+  squadId   String            @db.Uuid
 
   rank              Int
   previousRank      Int?
@@ -570,11 +575,11 @@ model GroupLeaderboardEntry {
 
   computedAt DateTime @default(now())
 
-  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  squad Squad @relation(fields: [squadId], references: [id], onDelete: Cascade)
 
-  @@unique([period, periodKey, groupId])
+  @@unique([period, periodKey, squadId])
   @@index([period, periodKey, rank])
-  @@map("group_leaderboard_entries")
+  @@map("squad_leaderboard_entries")
 }
 
 // ---------------------------------------------------------------------------

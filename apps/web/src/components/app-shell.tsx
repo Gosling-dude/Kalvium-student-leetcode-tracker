@@ -315,7 +315,7 @@ function CommandPalette({
                 >
                   <span className="truncate">{student.name}</span>
                   <span className="shrink-0 text-xs text-[var(--color-fg-subtle)]">
-                    {student.groupName ?? student.leetcodeUsername}
+                    {student.squadName ?? student.leetcodeUsername}
                   </span>
                 </Command.Item>
               ))}

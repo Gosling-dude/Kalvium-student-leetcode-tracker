@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  aggregateGroup,
+  aggregateSquad,
   compareForRanking,
   rankEntries,
-  rankGroups,
+  rankSquads,
   rankImprovement,
   type RankableEntry,
 } from './ranking';
@@ -98,36 +98,36 @@ describe('rankEntries', () => {
   });
 });
 
-describe('aggregateGroup', () => {
-  it('averages rather than totals so unequal group sizes compare fairly', () => {
-    const small = aggregateGroup({
-      groupId: 'g1',
-      groupName: 'Alpha',
+describe('aggregateSquad', () => {
+  it('averages rather than totals so unequal squad sizes compare fairly', () => {
+    const small = aggregateSquad({
+      squadId: 'g1',
+      squadName: 'Alpha',
       assignedPerMember: 4,
       members: [
         entry({ id: 's1', score: 100, solvedCount: 4, currentStreak: 10, consistency: 100 }),
         entry({ id: 's2', score: 100, solvedCount: 4, currentStreak: 10, consistency: 100 }),
       ],
     });
-    const large = aggregateGroup({
-      groupId: 'g2',
-      groupName: 'Beta',
+    const large = aggregateSquad({
+      squadId: 'g2',
+      squadName: 'Beta',
       assignedPerMember: 4,
       members: Array.from({ length: 8 }, (_, i) =>
         entry({ id: `t${i}`, score: 50, solvedCount: 2, currentStreak: 2, consistency: 50 }),
       ),
     });
-    // Beta has 16 total solved vs Alpha's 8, but Alpha is clearly the stronger group.
+    // Beta has 16 total solved vs Alpha's 8, but Alpha is clearly the stronger squad.
     expect(large.totalSolved).toBeGreaterThan(small.totalSolved);
     expect(small.averageCompletion).toBe(100);
     expect(large.averageCompletion).toBe(50);
     expect(small.score).toBeGreaterThan(large.score);
   });
 
-  it('uses the median completion time so one early finisher cannot mask the group', () => {
-    const group = aggregateGroup({
-      groupId: 'g1',
-      groupName: 'Alpha',
+  it('uses the median completion time so one early finisher cannot mask the squad', () => {
+    const squad = aggregateSquad({
+      squadId: 'g1',
+      squadName: 'Alpha',
       assignedPerMember: 4,
       members: [
         entry({ id: 'a', completionMinuteOfDay: 60 }),
@@ -135,39 +135,39 @@ describe('aggregateGroup', () => {
         entry({ id: 'c', completionMinuteOfDay: 1410 }),
       ],
     });
-    expect(group.completionMinuteOfDay).toBe(1400);
+    expect(squad.completionMinuteOfDay).toBe(1400);
   });
 
-  it('survives an empty group without dividing by zero', () => {
-    const group = aggregateGroup({
-      groupId: 'g',
-      groupName: 'Empty',
+  it('survives an empty squad without dividing by zero', () => {
+    const squad = aggregateSquad({
+      squadId: 'g',
+      squadName: 'Empty',
       assignedPerMember: 4,
       members: [],
     });
-    expect(group.memberCount).toBe(0);
-    expect(group.averageCompletion).toBe(0);
-    expect(Number.isNaN(group.score)).toBe(false);
+    expect(squad.memberCount).toBe(0);
+    expect(squad.averageCompletion).toBe(0);
+    expect(Number.isNaN(squad.score)).toBe(false);
   });
 });
 
-describe('rankGroups', () => {
-  it('ranks groups by average performance', () => {
-    const ranked = rankGroups([
+describe('rankSquads', () => {
+  it('ranks squads by average performance', () => {
+    const ranked = rankSquads([
       {
-        groupId: 'g1',
-        groupName: 'Alpha',
+        squadId: 'g1',
+        squadName: 'Alpha',
         assignedPerMember: 4,
         members: [entry({ id: 'a', score: 100, solvedCount: 4 })],
       },
       {
-        groupId: 'g2',
-        groupName: 'Beta',
+        squadId: 'g2',
+        squadName: 'Beta',
         assignedPerMember: 4,
         members: [entry({ id: 'b', score: 25, solvedCount: 1 })],
       },
     ]);
-    expect(ranked[0]!.entry.groupId).toBe('g1');
+    expect(ranked[0]!.entry.squadId).toBe('g1');
     expect(ranked[0]!.rank).toBe(1);
   });
 });

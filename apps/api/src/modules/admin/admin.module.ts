@@ -1,5 +1,5 @@
 /**
- * Admin operations: batches, groups, scoring formula, recomputation, system health.
+ * Admin operations: batches, squads, scoring formula, recomputation, system health.
  */
 
 import {
@@ -33,7 +33,7 @@ class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
 }
 
-class UpsertGroupDto {
+class UpsertSquadDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
   @IsOptional() @IsUUID() batchId?: string;
   @IsOptional() @IsUUID() mentorId?: string;
@@ -70,7 +70,7 @@ export class AdminController {
   @ApiOperation({ summary: 'List batches' })
   listBatches() {
     return this.prisma.batch.findMany({
-      include: { _count: { select: { students: true, groups: true } } },
+      include: { _count: { select: { students: true, squads: true } } },
       orderBy: { name: 'asc' },
     });
   }
@@ -96,12 +96,12 @@ export class AdminController {
     return this.prisma.batch.delete({ where: { id } });
   }
 
-  // --- Groups --------------------------------------------------------------
+  // --- Squads --------------------------------------------------------------
 
-  @Get('groups')
-  @ApiOperation({ summary: 'List groups' })
-  listGroups() {
-    return this.prisma.group.findMany({
+  @Get('squads')
+  @ApiOperation({ summary: 'List squads' })
+  listSquads() {
+    return this.prisma.squad.findMany({
       include: {
         batch: { select: { name: true } },
         mentor: { select: { id: true, name: true } },
@@ -111,11 +111,11 @@ export class AdminController {
     });
   }
 
-  @Post('groups')
-  @Audit('GROUP_CREATED', 'Group')
-  @ApiOperation({ summary: 'Create a group' })
-  createGroup(@Body() dto: UpsertGroupDto) {
-    return this.prisma.group.create({
+  @Post('squads')
+  @Audit('SQUAD_CREATED', 'Squad')
+  @ApiOperation({ summary: 'Create a squad' })
+  createSquad(@Body() dto: UpsertSquadDto) {
+    return this.prisma.squad.create({
       data: {
         name: dto.name,
         batchId: dto.batchId ?? null,
@@ -125,11 +125,11 @@ export class AdminController {
     });
   }
 
-  @Patch('groups/:id')
-  @Audit('GROUP_UPDATED', 'Group')
-  @ApiOperation({ summary: 'Update a group, including its assigned mentor' })
-  updateGroup(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpsertGroupDto) {
-    return this.prisma.group.update({
+  @Patch('squads/:id')
+  @Audit('SQUAD_UPDATED', 'Squad')
+  @ApiOperation({ summary: 'Update a squad, including its assigned mentor' })
+  updateSquad(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpsertSquadDto) {
+    return this.prisma.squad.update({
       where: { id },
       data: {
         name: dto.name,
@@ -140,11 +140,11 @@ export class AdminController {
     });
   }
 
-  @Delete('groups/:id')
-  @Audit('GROUP_DELETED', 'Group')
-  @ApiOperation({ summary: 'Delete a group' })
-  deleteGroup(@Param('id', ParseUUIDPipe) id: string) {
-    return this.prisma.group.delete({ where: { id } });
+  @Delete('squads/:id')
+  @Audit('SQUAD_DELETED', 'Squad')
+  @ApiOperation({ summary: 'Delete a squad' })
+  deleteSquad(@Param('id', ParseUUIDPipe) id: string) {
+    return this.prisma.squad.delete({ where: { id } });
   }
 
   // --- Mentors -------------------------------------------------------------
@@ -161,7 +161,7 @@ export class AdminController {
         role: true,
         isActive: true,
         lastLoginAt: true,
-        _count: { select: { mentoredGroups: true } },
+        _count: { select: { mentoredSquads: true } },
       },
       orderBy: { name: 'asc' },
     });

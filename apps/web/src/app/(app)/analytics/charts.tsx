@@ -38,7 +38,7 @@ import {
 import type {
   AnalyticsPoint,
   DifficultyAnalytics,
-  GroupComparisonPoint,
+  SquadComparisonPoint,
 } from '@dsa/shared';
 
 /** Fixed order — a category keeps its hue no matter how many series survive a filter. */
@@ -257,13 +257,13 @@ export function DifficultyChart({ data }: { data: DifficultyAnalytics[] }) {
 }
 
 /**
- * Groups are a categorical dimension. Horizontal bars because group names are words,
+ * Squads are a categorical dimension. Horizontal bars because squad names are words,
  * not dates — rotated x-labels are far harder to read than a left-aligned list.
  *
- * Beyond eight groups the extras fold into the last slot rather than generating new
+ * Beyond eight squads the extras fold into the last slot rather than generating new
  * hues; the direct labels keep every bar identifiable regardless.
  */
-export function GroupComparisonChart({ data }: { data: GroupComparisonPoint[] }) {
+export function SquadComparisonChart({ data }: { data: SquadComparisonPoint[] }) {
   const ink = useInk();
   const rows = [...data]
     .sort((a, b) => b.averageCompletion - a.averageCompletion)
@@ -272,7 +272,7 @@ export function GroupComparisonChart({ data }: { data: GroupComparisonPoint[] })
   if (rows.length === 0) {
     return (
       <p className="py-10 text-center text-sm text-[var(--color-fg-muted)]">
-        No groups with members yet.
+        No squads with members yet.
       </p>
     );
   }
@@ -291,7 +291,7 @@ export function GroupComparisonChart({ data }: { data: GroupComparisonPoint[] })
         />
         <YAxis
           type="category"
-          dataKey="groupName"
+          dataKey="squadName"
           tick={{ fontSize: 11, fill: ink.muted }}
           tickLine={false}
           axisLine={false}
@@ -314,7 +314,7 @@ export function GroupComparisonChart({ data }: { data: GroupComparisonPoint[] })
         >
           {rows.map((row, index) => (
             <Cell
-              key={row.groupId}
+              key={row.squadId}
               fill={ink.categorical[index % ink.categorical.length] ?? ink.series}
               // 2px surface ring keeps adjacent fills from touching.
               stroke={ink.surface}

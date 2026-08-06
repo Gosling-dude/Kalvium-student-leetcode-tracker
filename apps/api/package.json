@@ -21,7 +21,9 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts",
+    "db:seed": "npm run db:seed:base && npm run db:seed:students",
+    "db:seed:base": "tsx prisma/seed.ts",
+    "db:seed:students": "tsx prisma/seed-students.ts",
     "db:reset": "prisma migrate reset --force",
     "smoke:provider": "tsx scripts/smoke-provider.ts"
   },

@@ -39,11 +39,11 @@ interface, never on the vendor.
 
 ```mermaid
 erDiagram
-  User ||--o{ Group : mentors
+  User ||--o{ Squad : mentors
   User ||--o{ Assignment : authors
-  Batch ||--o{ Group : contains
+  Batch ||--o{ Squad : contains
   Batch ||--o{ Student : contains
-  Group ||--o{ Student : contains
+  Squad ||--o{ Student : contains
 
   Student ||--o{ Submission : "mirrored from provider"
   Student ||--|| StudentSyncState : "cursor + status"
@@ -59,7 +59,7 @@ erDiagram
   DailyStatus ||--o{ DailyProblemStatus : "per-problem outcome"
   Assignment ||--o{ DailyStatus : scored
 
-  Group ||--o{ GroupLeaderboardEntry : ranked
+  Squad ||--o{ SquadLeaderboardEntry : ranked
   SyncJob ||--o{ SyncJobItem : "per student"
   ScoringConfig }o--|| User : "authored by"
 ```
@@ -69,9 +69,9 @@ erDiagram
 | Source of truth | Derived (rebuildable) |
 |---|---|
 | `Submission` — every submission ever observed | `DailyStatus`, `DailyProblemStatus` |
-| `Assignment` + `AssignmentProblem` | `LeaderboardEntry`, `GroupLeaderboardEntry` |
+| `Assignment` + `AssignmentProblem` | `LeaderboardEntry`, `SquadLeaderboardEntry` |
 | `ScoringConfig` | `Student.currentStreak / longestStreak / totalScore / totalSolved` |
-| `Student`, `Group`, `Batch`, `User` | Achievements, levels, heatmaps, all analytics |
+| `Student`, `Squad`, `Batch`, `User` | Achievements, levels, heatmaps, all analytics |
 
 `RollupService.recomputeRange(from, to)` rebuilds the entire right column from the left
 one. Nothing on the right is ever the only copy of a fact, which is what makes an
@@ -195,7 +195,7 @@ Non-DST and DST zones are both covered by tests, including a 23-hour spring-forw
 - **`packages/shared`** — 103 unit tests over the parts where correctness actually
   lives: day bucketing across DST and midnight boundaries, the canonical scoring table,
   bonus tiering, streak rules (in-progress today, neutral non-assignment days), ranking
-  tiebreaks and tie detection, group aggregation, level/XP inversion, achievements.
+  tiebreaks and tie detection, squad aggregation, level/XP inversion, achievements.
 - **`apps/api`** — the fake provider makes the sync engine testable without a network.
 - **Live contract** — `npm run smoke:provider -w @dsa/api` asserts LeetCode's actual
   behaviour and is the first thing to run when numbers look wrong.

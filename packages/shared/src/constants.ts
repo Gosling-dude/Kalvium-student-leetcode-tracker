@@ -106,7 +106,9 @@ export const IMPORT_COLUMN_ALIASES: Record<string, string[]> = {
   name: ['name', 'studentname', 'fullname', 'student'],
   email: ['email', 'emailid', 'emailaddress', 'mail'],
   batch: ['batch', 'batchname', 'cohort'],
-  group: ['group', 'groupname', 'team', 'pod'],
+  // `group`/`groupname` stay accepted: squads were called groups until 2026-08-06 and
+  // mentors' existing sheets still carry the old header.
+  squad: ['squad', 'squadname', 'squadno', 'squadnumber', 'group', 'groupname', 'team', 'pod'],
   leetcodeUsername: [
     'leetcodeusername',
     'leetcode',
@@ -129,7 +131,7 @@ export const API_ROUTES = {
   sync: '/api/v1/sync',
   reports: '/api/v1/reports',
   admin: '/api/v1/admin',
-  groups: '/api/v1/groups',
+  squads: '/api/v1/squads',
   batches: '/api/v1/batches',
   notifications: '/api/v1/notifications',
 } as const;

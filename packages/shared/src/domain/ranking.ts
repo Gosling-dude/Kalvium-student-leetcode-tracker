@@ -111,16 +111,16 @@ export function rankEntries<T extends RankableEntry>(entries: T[]): RankedEntry<
   return ranked;
 }
 
-export interface GroupAggregateInput {
-  groupId: string;
-  groupName: string;
+export interface SquadAggregateInput {
+  squadId: string;
+  squadName: string;
   members: RankableEntry[];
   /** Assigned problems per member over the window — the denominator for completion %. */
   assignedPerMember: number;
 }
 
-export interface GroupAggregate extends RankableEntry {
-  groupId: string;
+export interface SquadAggregate extends RankableEntry {
+  squadId: string;
   memberCount: number;
   averageCompletion: number;
   totalSolved: number;
@@ -129,12 +129,12 @@ export interface GroupAggregate extends RankableEntry {
 }
 
 /**
- * Roll a group up into a single rankable entry.
+ * Roll a squad up into a single rankable entry.
  *
- * Averages rather than totals, because groups are not guaranteed to be the same size
- * and ranking a 12-person group against an 8-person group on totals would be meaningless.
+ * Averages rather than totals, because squads are not guaranteed to be the same size
+ * and ranking a 12-person squad against an 8-person squad on totals would be meaningless.
  */
-export function aggregateGroup(input: GroupAggregateInput): GroupAggregate {
+export function aggregateSquad(input: SquadAggregateInput): SquadAggregate {
   const memberCount = input.members.length;
   const safeCount = memberCount > 0 ? memberCount : 1;
 
@@ -147,9 +147,9 @@ export function aggregateGroup(input: GroupAggregateInput): GroupAggregate {
   const averageCompletion =
     denominator > 0 ? Math.round((totalSolved / denominator) * 10000) / 100 : 0;
 
-  // Group completion time is the point at which the group's *typical* member finished:
+  // Squad completion time is the point at which the squad's *typical* member finished:
   // the median across members who actually completed. A mean would let one very early
-  // finisher mask a group that mostly finished at midnight.
+  // finisher mask a squad that mostly finished at midnight.
   const completionTimes = input.members
     .map((m) => m.completionMinuteOfDay)
     .filter((t): t is number => t !== null)
@@ -162,9 +162,9 @@ export function aggregateGroup(input: GroupAggregateInput): GroupAggregate {
   const averageScore = Math.round((totalScore / safeCount) * 100) / 100;
 
   return {
-    id: input.groupId,
-    groupId: input.groupId,
-    displayName: input.groupName,
+    id: input.squadId,
+    squadId: input.squadId,
+    displayName: input.squadName,
     memberCount,
     score: averageScore,
     averageScore,
@@ -178,8 +178,8 @@ export function aggregateGroup(input: GroupAggregateInput): GroupAggregate {
   };
 }
 
-export function rankGroups(inputs: GroupAggregateInput[]): RankedEntry<GroupAggregate>[] {
-  return rankEntries(inputs.map(aggregateGroup));
+export function rankSquads(inputs: SquadAggregateInput[]): RankedEntry<SquadAggregate>[] {
+  return rankEntries(inputs.map(aggregateSquad));
 }
 
 /**

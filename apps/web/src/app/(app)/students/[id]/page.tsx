@@ -74,7 +74,7 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
           <h1 className="text-xl font-semibold tracking-tight">{data.name}</h1>
           <p className="text-sm text-[var(--color-fg-muted)]">
             {data.email}
-            {data.groupName ? ` · ${data.groupName}` : ''}
+            {data.squadName ? ` · ${data.squadName}` : ''}
             {data.batchName ? ` · ${data.batchName}` : ''}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">

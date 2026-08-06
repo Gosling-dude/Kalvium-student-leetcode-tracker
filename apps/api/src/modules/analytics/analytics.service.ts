@@ -31,7 +31,7 @@ export class AnalyticsService {
       async (): Promise<AnalyticsOverview> => {
         const statuses = await this.prisma.dailyStatus.findMany({
           where: { dayKey: { gte: start, lte: end }, student: { status: 'ACTIVE' } },
-          include: { student: { select: { id: true, name: true, groupId: true } } },
+          include: { student: { select: { id: true, name: true, squadId: true } } },
         });
 
         const daily = this.buildDailySeries(statuses, start, end);
@@ -43,7 +43,7 @@ export class AnalyticsService {
           monthly: this.bucketBy(daily, (d) => this.time.monthKey(d.dayKey)),
           byDifficulty: await this.byDifficulty(start, end),
           byTopic: await this.byTopic(start, end),
-          groupComparison: await this.groupComparison(statuses),
+          squadComparison: await this.squadComparison(statuses),
           topImprovers: await this.improvers(start, end, 'TOP'),
           bottomPerformers: this.bottomPerformers(statuses),
         };
@@ -184,27 +184,27 @@ export class AnalyticsService {
       .slice(0, 20);
   }
 
-  private async groupComparison(
+  private async squadComparison(
     statuses: {
       solvedCount: number;
       assignedCount: number;
       score: number;
-      student: { id: string; groupId: string | null };
+      student: { id: string; squadId: string | null };
     }[],
   ) {
-    const groups = await this.prisma.group.findMany({ select: { id: true, name: true } });
+    const squads = await this.prisma.squad.findMany({ select: { id: true, name: true } });
 
-    return groups
-      .map((group) => {
-        const rows = statuses.filter((s) => s.student.groupId === group.id);
+    return squads
+      .map((squad) => {
+        const rows = statuses.filter((s) => s.student.squadId === squad.id);
         const members = new Set(rows.map((r) => r.student.id));
         const solved = rows.reduce((n, r) => n + r.solvedCount, 0);
         const assigned = rows.reduce((n, r) => n + r.assignedCount, 0);
         const score = rows.reduce((n, r) => n + r.score, 0);
 
         return {
-          groupId: group.id,
-          groupName: group.name,
+          squadId: squad.id,
+          squadName: squad.name,
           averageCompletion: completionPercentage(solved, assigned),
           averageScore:
             members.size > 0 ? Math.round((score / members.size) * 100) / 100 : 0,
@@ -212,7 +212,7 @@ export class AnalyticsService {
           memberCount: members.size,
         };
       })
-      .filter((group) => group.memberCount > 0)
+      .filter((squad) => squad.memberCount > 0)
       .sort((a, b) => b.averageCompletion - a.averageCompletion);
   }
 

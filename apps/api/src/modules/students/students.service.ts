@@ -28,7 +28,7 @@ const SORTABLE = [
 
 type StudentWithRelations = Student & {
   batch: { id: string; name: string } | null;
-  group: { id: string; name: string } | null;
+  squad: { id: string; name: string } | null;
   syncState: { status: string; lastSyncedAt: Date | null } | null;
 };
 
@@ -46,7 +46,7 @@ export class StudentsService {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.student.findMany({
         where,
-        include: { batch: true, group: true, syncState: true },
+        include: { batch: true, squad: true, syncState: true },
         orderBy: { [sortBy]: query.sortOrder },
         skip: query.skip,
         take: query.take,
@@ -65,7 +65,7 @@ export class StudentsService {
   async findOne(id: string): Promise<StudentSummary> {
     const student = await this.prisma.student.findUnique({
       where: { id },
-      include: { batch: true, group: true, syncState: true },
+      include: { batch: true, squad: true, syncState: true },
     });
     if (!student) throw new NotFoundException(`Student ${id} was not found`);
     return this.toSummary(student as StudentWithRelations);
@@ -79,11 +79,11 @@ export class StudentsService {
         phone: dto.phone ?? null,
         leetcodeUsername: dto.leetcodeUsername.toLowerCase(),
         batchId: dto.batchId ?? null,
-        groupId: dto.groupId ?? null,
+        squadId: dto.squadId ?? null,
         status: dto.status ?? 'ACTIVE',
         syncState: { create: { status: 'NEVER_SYNCED' } },
       },
-      include: { batch: true, group: true, syncState: true },
+      include: { batch: true, squad: true, syncState: true },
     });
     return this.toSummary(student as StudentWithRelations);
   }
@@ -105,7 +105,7 @@ export class StudentsService {
           ? { leetcodeUsername: dto.leetcodeUsername.toLowerCase() }
           : {}),
         ...(dto.batchId !== undefined ? { batchId: dto.batchId } : {}),
-        ...(dto.groupId !== undefined ? { groupId: dto.groupId } : {}),
+        ...(dto.squadId !== undefined ? { squadId: dto.squadId } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(usernameChanged
           ? {
@@ -124,7 +124,7 @@ export class StudentsService {
             }
           : {}),
       },
-      include: { batch: true, group: true, syncState: true },
+      include: { batch: true, squad: true, syncState: true },
     });
 
     return this.toSummary(student as StudentWithRelations);
@@ -143,12 +143,12 @@ export class StudentsService {
   /** Bulk reassignment — the operation mentors actually perform on a selection. */
   async bulkUpdate(
     ids: string[],
-    changes: { groupId?: string | null; batchId?: string | null; status?: string },
+    changes: { squadId?: string | null; batchId?: string | null; status?: string },
   ): Promise<number> {
     const result = await this.prisma.student.updateMany({
       where: { id: { in: ids } },
       data: {
-        ...(changes.groupId !== undefined ? { groupId: changes.groupId } : {}),
+        ...(changes.squadId !== undefined ? { squadId: changes.squadId } : {}),
         ...(changes.batchId !== undefined ? { batchId: changes.batchId } : {}),
         ...(changes.status !== undefined
           ? { status: changes.status as Student['status'] }
@@ -162,7 +162,7 @@ export class StudentsService {
   async getProfile(id: string, days = 120): Promise<StudentProfile> {
     const student = await this.prisma.student.findUnique({
       where: { id },
-      include: { batch: true, group: true, syncState: true },
+      include: { batch: true, squad: true, syncState: true },
     });
     if (!student) throw new NotFoundException(`Student ${id} was not found`);
 
@@ -286,12 +286,12 @@ export class StudentsService {
 
   /** Distinct values powering the filter dropdowns. */
   async getFilterOptions() {
-    const [batches, groups] = await this.prisma.$transaction([
+    const [batches, squads] = await this.prisma.$transaction([
       this.prisma.batch.findMany({
         orderBy: { name: 'asc' },
         include: { _count: { select: { students: true } } },
       }),
-      this.prisma.group.findMany({
+      this.prisma.squad.findMany({
         orderBy: { name: 'asc' },
         include: {
           batch: { select: { name: true } },
@@ -309,7 +309,7 @@ export class StudentsService {
         startDate: b.startDate?.toISOString() ?? null,
         isActive: b.isActive,
       })),
-      groups: groups.map((g) => ({
+      squads: squads.map((g) => ({
         id: g.id,
         name: g.name,
         batchId: g.batchId,
@@ -328,7 +328,7 @@ export class StudentsService {
     const search = query.search?.trim();
 
     return {
-      ...(query.groupId ? { groupId: query.groupId } : {}),
+      ...(query.squadId ? { squadId: query.squadId } : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.syncStatus ? { syncState: { status: query.syncStatus } } : {}),
@@ -339,7 +339,7 @@ export class StudentsService {
               { name: { contains: search, mode: 'insensitive' } },
               { email: { contains: search, mode: 'insensitive' } },
               { leetcodeUsername: { contains: search, mode: 'insensitive' } },
-              { group: { name: { contains: search, mode: 'insensitive' } } },
+              { squad: { name: { contains: search, mode: 'insensitive' } } },
               { batch: { name: { contains: search, mode: 'insensitive' } } },
             ],
           }
@@ -362,8 +362,8 @@ export class StudentsService {
       status: student.status,
       batchId: student.batchId,
       batchName: student.batch?.name ?? null,
-      groupId: student.groupId,
-      groupName: student.group?.name ?? null,
+      squadId: student.squadId,
+      squadName: student.squad?.name ?? null,
       avatarUrl: student.avatarUrl,
       syncStatus: (student.syncState?.status ?? 'NEVER_SYNCED') as SyncStatus,
       lastSyncedAt: student.syncState?.lastSyncedAt?.toISOString() ?? null,

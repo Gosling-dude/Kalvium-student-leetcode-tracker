@@ -69,7 +69,7 @@ export class StudentsController {
   }
 
   @Get('filters')
-  @ApiOperation({ summary: 'Batch and group options for filter controls' })
+  @ApiOperation({ summary: 'Batch and squad options for filter controls' })
   filters() {
     return this.students.getFilterOptions();
   }
@@ -134,11 +134,11 @@ export class StudentsController {
   @Post('bulk/update')
   @Roles('ADMIN', 'MENTOR')
   @Audit('STUDENTS_BULK_UPDATED', 'Student')
-  @ApiOperation({ summary: 'Reassign batch, group or status for many students' })
+  @ApiOperation({ summary: 'Reassign batch, squad or status for many students' })
   async bulkUpdate(@Body() dto: BulkUpdateStudentsDto) {
     return {
       updated: await this.students.bulkUpdate(dto.ids, {
-        groupId: dto.groupId,
+        squadId: dto.squadId,
         batchId: dto.batchId,
         status: dto.status,
       }),

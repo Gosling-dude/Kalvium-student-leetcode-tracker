@@ -50,3 +50,7 @@ tmp/
 .turbo/
 .cache/
 .eslintcache
+
+# Student roster — real names and email addresses. Never commit to a public repo.
+# Copy roster.example.csv, fill it in, and load with `npm run db:seed:students`.
+apps/api/prisma/roster.csv

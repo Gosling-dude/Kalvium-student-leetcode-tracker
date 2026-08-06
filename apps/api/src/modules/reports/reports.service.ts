@@ -49,7 +49,7 @@ export class ReportsService {
         bucket.students.map((student) => ({
           name: student.name,
           email: student.email,
-          group: student.groupName ?? '',
+          squad: student.squadName ?? '',
           batch: student.batchName ?? '',
           leetcodeUsername: student.leetcodeUsername,
           solved: student.solvedCount,
@@ -127,7 +127,7 @@ export class ReportsService {
 
     const students = await this.prisma.student.findMany({
       where: { id: { in: rows.map((r) => r.studentId) } },
-      include: { group: { select: { name: true } }, batch: { select: { name: true } } },
+      include: { squad: { select: { name: true } }, batch: { select: { name: true } } },
     });
     const byId = new Map(students.map((s) => [s.id, s]));
 
@@ -144,7 +144,7 @@ export class ReportsService {
             studentId: row.studentId,
             name: student?.name ?? 'Unknown',
             email: student?.email ?? '',
-            group: student?.group?.name ?? '',
+            squad: student?.squad?.name ?? '',
             batch: student?.batch?.name ?? '',
             solved,
             assigned,
@@ -158,9 +158,9 @@ export class ReportsService {
     };
   }
 
-  async groupReport(dayKey?: DayKey) {
+  async squadReport(dayKey?: DayKey) {
     const day = dayKey ?? this.time.today();
-    const rows = await this.leaderboard.getGroupLeaderboard('MONTHLY', day);
+    const rows = await this.leaderboard.getSquadLeaderboard('MONTHLY', day);
     return { dayKey: day, rows };
   }
 

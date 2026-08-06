@@ -240,18 +240,18 @@ export default function DashboardPage() {
 
         <Card className="p-5">
           <p className="text-xs font-medium uppercase tracking-wide text-[var(--color-fg-muted)]">
-            Top group
+            Top squad
           </p>
-          {data.topGroup ? (
+          {data.topSquad ? (
             <div className="mt-2 flex items-baseline justify-between gap-3">
-              <p className="truncate text-lg font-semibold">{data.topGroup.name}</p>
+              <p className="truncate text-lg font-semibold">{data.topSquad.name}</p>
               <p className="shrink-0 tabular-nums text-[var(--color-brand)]">
-                {formatPercent(data.topGroup.averageCompletion)}
+                {formatPercent(data.topSquad.averageCompletion)}
               </p>
             </div>
           ) : (
             <p className="mt-2 text-sm text-[var(--color-fg-subtle)]">
-              Group rankings appear after the first sync.
+              Squad rankings appear after the first sync.
             </p>
           )}
         </Card>

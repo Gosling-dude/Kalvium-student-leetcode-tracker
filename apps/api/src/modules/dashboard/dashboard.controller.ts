@@ -19,8 +19,8 @@ export class DashboardController {
   @Get('mentor/dashboard')
   @ApiOperation({ summary: 'The five "solved N" tables, each with missing questions and reasons' })
   @ApiQuery({ name: 'dayKey', required: false })
-  @ApiQuery({ name: 'groupId', required: false })
-  mentor(@Query('dayKey') dayKey?: string, @Query('groupId') groupId?: string) {
-    return this.dashboard.getMentorDashboard(dayKey, groupId);
+  @ApiQuery({ name: 'squadId', required: false })
+  mentor(@Query('dayKey') dayKey?: string, @Query('squadId') squadId?: string) {
+    return this.dashboard.getMentorDashboard(dayKey, squadId);
   }
 }

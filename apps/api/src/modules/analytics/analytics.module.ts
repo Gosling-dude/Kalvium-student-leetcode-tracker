@@ -10,7 +10,7 @@ export class AnalyticsController {
   constructor(private readonly analytics: AnalyticsService) {}
 
   @Get('overview')
-  @ApiOperation({ summary: 'Trends, difficulty and topic breakdowns, group comparison' })
+  @ApiOperation({ summary: 'Trends, difficulty and topic breakdowns, squad comparison' })
   @ApiQuery({ name: 'from', required: false, example: '2026-07-06' })
   @ApiQuery({ name: 'to', required: false, example: '2026-08-04' })
   overview(@Query('from') from?: string, @Query('to') to?: string) {

@@ -88,7 +88,7 @@ export const REPORT_TYPES = [
   'DAILY',
   'WEEKLY',
   'MONTHLY',
-  'GROUP',
+  'SQUAD',
   'MENTOR',
   'ATTENDANCE',
   'HEATMAP',

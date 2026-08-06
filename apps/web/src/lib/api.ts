@@ -14,7 +14,7 @@ import type {
   AssignmentSummary,
   AuthUser,
   DashboardStats,
-  GroupLeaderboardRow,
+  SquadLeaderboardRow,
   ImportResult,
   LeaderboardRow,
   LoginResponse,
@@ -195,8 +195,8 @@ export const api = {
 
   dashboard: (dayKey?: string) => apiFetch<DashboardStats>(`/dashboard${qs({ dayKey })}`),
 
-  mentorDashboard: (dayKey?: string, groupId?: string) =>
-    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, groupId })}`),
+  mentorDashboard: (dayKey?: string, squadId?: string) =>
+    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, squadId })}`),
 
   students: (params: Record<string, string | number | undefined>) =>
     apiFetch<Paginated<StudentSummary>>(`/students${qs(params)}`),
@@ -206,7 +206,7 @@ export const api = {
   studentFilters: () =>
     apiFetch<{
       batches: { id: string; name: string; studentCount: number }[];
-      groups: { id: string; name: string; batchName: string | null; studentCount: number }[];
+      squads: { id: string; name: string; batchName: string | null; studentCount: number }[];
     }>('/students/filters'),
 
   createStudent: (body: unknown) =>
@@ -241,8 +241,8 @@ export const api = {
   leaderboard: (params: Record<string, string | number | undefined>) =>
     apiFetch<LeaderboardRow[]>(`/leaderboard${qs(params)}`),
 
-  groupLeaderboard: (params: Record<string, string | number | undefined>) =>
-    apiFetch<GroupLeaderboardRow[]>(`/leaderboard/groups${qs(params)}`),
+  squadLeaderboard: (params: Record<string, string | number | undefined>) =>
+    apiFetch<SquadLeaderboardRow[]>(`/leaderboard/squads${qs(params)}`),
 
   analytics: (from?: string, to?: string) =>
     apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to })}`),

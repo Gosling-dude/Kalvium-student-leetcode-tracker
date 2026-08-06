@@ -22,6 +22,7 @@
     "db:migrate": "npm run db:migrate -w @dsa/api",
     "db:generate": "npm run db:generate -w @dsa/api",
     "db:seed": "npm run db:seed -w @dsa/api",
+    "db:seed:students": "npm run db:seed:students -w @dsa/api",
     "db:studio": "npm run db:studio -w @dsa/api",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down"

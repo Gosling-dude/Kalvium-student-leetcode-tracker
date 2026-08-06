@@ -19,7 +19,15 @@ GitHub Actions.
      npm ci --include=dev && npm run build:shared && npm run db:generate -w @dsa/api && npm run db:migrate -w @dsa/api && npm run db:seed -w @dsa/api && npm run build -w @dsa/api
      ```
      (`--include=dev` keeps build tools even with `NODE_ENV=production`; the chain also
-     applies the migration and seeds the admin so the DB is ready on first boot.)
+     applies migrations and seeds so the DB is ready on first boot.)
+
+     `db:seed` runs two steps: the admin account plus scoring formula, then the roster
+     loader. In production the 60-student demo cohort is never seeded.
+
+     The roster step is a **no-op on Render**: `roster.csv` is gitignored (real names
+     and emails, public repo), so it is not in the build's checkout and the loader skips
+     quietly with exit 0. Load the roster into Neon separately — see
+     [DEPLOY_NEON.md](DEPLOY_NEON.md#5-load-the-roster).
    - **Start Command:**
      ```
      npm run start -w @dsa/api

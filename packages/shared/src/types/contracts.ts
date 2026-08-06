@@ -56,7 +56,7 @@ export interface BatchSummary {
   isActive: boolean;
 }
 
-export interface GroupSummary {
+export interface SquadSummary {
   id: string;
   name: string;
   batchId: string | null;
@@ -76,8 +76,8 @@ export interface StudentSummary {
   status: StudentStatus;
   batchId: string | null;
   batchName: string | null;
-  groupId: string | null;
-  groupName: string | null;
+  squadId: string | null;
+  squadName: string | null;
   avatarUrl: string | null;
   syncStatus: SyncStatus;
   lastSyncedAt: string | null;
@@ -143,7 +143,7 @@ export interface DashboardStats {
   averageProblemsSolved: number;
   streakChampion: { studentId: string; name: string; streak: number } | null;
   topPerformer: { studentId: string; name: string; score: number } | null;
-  topGroup: { groupId: string; name: string; averageCompletion: number } | null;
+  topSquad: { squadId: string; name: string; averageCompletion: number } | null;
   lastSyncAt: string | null;
   lastSyncStatus: SyncJobStatus | null;
   /** Students whose data could not be trusted this sync, by reason. */
@@ -182,7 +182,7 @@ export interface MentorBucketRow {
   studentId: string;
   name: string;
   email: string;
-  groupName: string | null;
+  squadName: string | null;
   batchName: string | null;
   leetcodeUsername: string;
   solvedCount: number;
@@ -215,7 +215,7 @@ export interface LeaderboardRow {
   isTied: boolean;
   studentId: string;
   name: string;
-  groupName: string | null;
+  squadName: string | null;
   batchName: string | null;
   avatarUrl: string | null;
   solvedCount: number;
@@ -229,10 +229,10 @@ export interface LeaderboardRow {
   rankDelta: number | null;
 }
 
-export interface GroupLeaderboardRow {
+export interface SquadLeaderboardRow {
   rank: number;
   isTied: boolean;
-  groupId: string;
+  squadId: string;
   name: string;
   memberCount: number;
   averageCompletion: number;
@@ -297,9 +297,9 @@ export interface DifficultyAnalytics {
   completionPercent: number;
 }
 
-export interface GroupComparisonPoint {
-  groupId: string;
-  groupName: string;
+export interface SquadComparisonPoint {
+  squadId: string;
+  squadName: string;
   averageCompletion: number;
   averageScore: number;
   averageStreak: number;
@@ -313,7 +313,7 @@ export interface AnalyticsOverview {
   monthly: { label: string; completionPercent: number; averageScore: number }[];
   byDifficulty: DifficultyAnalytics[];
   byTopic: TopicAnalytics[];
-  groupComparison: GroupComparisonPoint[];
+  squadComparison: SquadComparisonPoint[];
   topImprovers: { studentId: string; name: string; delta: number }[];
   bottomPerformers: { studentId: string; name: string; completionPercent: number }[];
 }
@@ -360,9 +360,9 @@ export interface ImportResult {
   updated: number;
   skipped: number;
   errors: ImportRowError[];
-  /** Batches and groups auto-created because the sheet referenced them. */
+  /** Batches and squads auto-created because the sheet referenced them. */
   createdBatches: string[];
-  createdGroups: string[];
+  createdSquads: string[];
 }
 
 export interface AuditLogEntry {

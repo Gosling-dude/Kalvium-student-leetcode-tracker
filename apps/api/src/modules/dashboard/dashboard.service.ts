@@ -41,7 +41,7 @@ export class DashboardService {
                 id: true,
                 name: true,
                 status: true,
-                groupId: true,
+                squadId: true,
                 currentStreak: true,
                 syncState: { select: { status: true } },
               },
@@ -82,7 +82,7 @@ export class DashboardService {
         (a, b) => b.student.currentStreak - a.student.currentStreak,
       )[0];
       const topPerformer = [...active].sort((a, b) => b.score - a.score)[0];
-      const topGroup = await this.findTopGroup(day);
+      const topSquad = await this.findTopSquad(day);
 
       return {
         dayKey: day,
@@ -109,7 +109,7 @@ export class DashboardService {
                 score: topPerformer.score,
               }
             : null,
-        topGroup,
+        topSquad,
         lastSyncAt: lastJob?.finishedAt?.toISOString() ?? null,
         lastSyncStatus: (lastJob?.status as DashboardStats['lastSyncStatus']) ?? null,
         unreliableSyncCounts: unreliable,
@@ -125,9 +125,9 @@ export class DashboardService {
    * not work is a conversation for the mentor. Collapsing both into "Reason Unknown"
    * makes the table actively misleading, so we resolve it wherever we can.
    */
-  async getMentorDashboard(dayKey?: DayKey, groupId?: string): Promise<MentorDashboard> {
+  async getMentorDashboard(dayKey?: DayKey, squadId?: string): Promise<MentorDashboard> {
     const day = dayKey ?? this.time.today();
-    const cacheKey = `mentor:${day}:${groupId ?? 'all'}`;
+    const cacheKey = `mentor:${day}:${squadId ?? 'all'}`;
 
     return this.cache.remember(cacheKey, CACHE_TTL.dashboard, async () => {
       const assignment = await this.assignments.findByDay(day);
@@ -136,12 +136,12 @@ export class DashboardService {
       const statuses = await this.prisma.dailyStatus.findMany({
         where: {
           dayKey: day,
-          student: { status: 'ACTIVE', ...(groupId ? { groupId } : {}) },
+          student: { status: 'ACTIVE', ...(squadId ? { squadId } : {}) },
         },
         include: {
           student: {
             include: {
-              group: { select: { name: true } },
+              squad: { select: { name: true } },
               batch: { select: { name: true } },
               syncState: { select: { status: true, lastError: true } },
             },
@@ -168,7 +168,7 @@ export class DashboardService {
           studentId: status.studentId,
           name: status.student.name,
           email: status.student.email,
-          groupName: status.student.group?.name ?? null,
+          squadName: status.student.squad?.name ?? null,
           batchName: status.student.batch?.name ?? null,
           leetcodeUsername: status.student.leetcodeUsername,
           solvedCount: status.solvedCount,
@@ -235,16 +235,16 @@ export class DashboardService {
     return 'No submissions recorded for today';
   }
 
-  private async findTopGroup(dayKey: DayKey): Promise<DashboardStats['topGroup']> {
-    const entry = await this.prisma.groupLeaderboardEntry.findFirst({
+  private async findTopSquad(dayKey: DayKey): Promise<DashboardStats['topSquad']> {
+    const entry = await this.prisma.squadLeaderboardEntry.findFirst({
       where: { period: 'DAILY', periodKey: dayKey, rank: 1 },
-      include: { group: { select: { name: true } } },
+      include: { squad: { select: { name: true } } },
     });
 
     if (!entry) return null;
     return {
-      groupId: entry.groupId,
-      name: entry.group.name,
+      squadId: entry.squadId,
+      name: entry.squad.name,
       averageCompletion: entry.averageCompletion,
     };
   }

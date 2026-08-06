@@ -4,7 +4,7 @@ import {
   levelForXp,
   topBadges,
   type DayKey,
-  type GroupLeaderboardRow,
+  type SquadLeaderboardRow,
   type LeaderboardRow,
 } from '@dsa/shared';
 
@@ -25,11 +25,11 @@ export class LeaderboardService {
   async getLeaderboard(
     period: Period,
     dayKey?: DayKey,
-    options: { groupId?: string; batchId?: string; limit?: number } = {},
+    options: { squadId?: string; batchId?: string; limit?: number } = {},
   ): Promise<LeaderboardRow[]> {
     const day = dayKey ?? this.time.today();
     const periodKey = this.periodKey(period, day);
-    const cacheKey = `leaderboard:${period}:${periodKey}:${options.groupId ?? 'all'}:${
+    const cacheKey = `leaderboard:${period}:${periodKey}:${options.squadId ?? 'all'}:${
       options.batchId ?? 'all'
     }:${options.limit ?? 'all'}`;
 
@@ -40,14 +40,14 @@ export class LeaderboardService {
           periodKey,
           student: {
             status: 'ACTIVE',
-            ...(options.groupId ? { groupId: options.groupId } : {}),
+            ...(options.squadId ? { squadId: options.squadId } : {}),
             ...(options.batchId ? { batchId: options.batchId } : {}),
           },
         },
         include: {
           student: {
             include: {
-              group: { select: { name: true } },
+              squad: { select: { name: true } },
               batch: { select: { name: true } },
             },
           },
@@ -63,7 +63,7 @@ export class LeaderboardService {
           isTied: entry.isTied,
           studentId: student.id,
           name: student.name,
-          groupName: student.group?.name ?? null,
+          squadName: student.squad?.name ?? null,
           batchName: student.batch?.name ?? null,
           avatarUrl: student.avatarUrl,
           solvedCount: entry.solvedCount,
@@ -94,53 +94,53 @@ export class LeaderboardService {
     });
   }
 
-  async getGroupLeaderboard(period: Period, dayKey?: DayKey): Promise<GroupLeaderboardRow[]> {
+  async getSquadLeaderboard(period: Period, dayKey?: DayKey): Promise<SquadLeaderboardRow[]> {
     const day = dayKey ?? this.time.today();
     const periodKey = this.periodKey(period, day);
 
     return this.cache.remember(
-      `leaderboard:group:${period}:${periodKey}`,
+      `leaderboard:squad:${period}:${periodKey}`,
       CACHE_TTL.leaderboard,
       async () => {
-        const entries = await this.prisma.groupLeaderboardEntry.findMany({
+        const entries = await this.prisma.squadLeaderboardEntry.findMany({
           where: { period, periodKey },
-          include: { group: { select: { name: true } } },
+          include: { squad: { select: { name: true } } },
           orderBy: { rank: 'asc' },
         });
 
-        // Daily/weekly/monthly scores for the same group, so one table can show all three.
+        // Daily/weekly/monthly scores for the same squad, so one table can show all three.
         const [daily, weekly, monthly] = await Promise.all([
-          this.groupScores('DAILY', day),
-          this.groupScores('WEEKLY', day),
-          this.groupScores('MONTHLY', day),
+          this.squadScores('DAILY', day),
+          this.squadScores('WEEKLY', day),
+          this.squadScores('MONTHLY', day),
         ]);
 
         return entries.map(
-          (entry): GroupLeaderboardRow => ({
+          (entry): SquadLeaderboardRow => ({
             rank: entry.rank,
             isTied: entry.isTied,
-            groupId: entry.groupId,
-            name: entry.group.name,
+            squadId: entry.squadId,
+            name: entry.squad.name,
             memberCount: entry.memberCount,
             averageCompletion: entry.averageCompletion,
             totalSolved: entry.totalSolved,
             averageStreak: entry.averageStreak,
             averageScore: entry.averageScore,
-            dailyScore: daily.get(entry.groupId) ?? 0,
-            weeklyScore: weekly.get(entry.groupId) ?? 0,
-            monthlyScore: monthly.get(entry.groupId) ?? 0,
+            dailyScore: daily.get(entry.squadId) ?? 0,
+            weeklyScore: weekly.get(entry.squadId) ?? 0,
+            monthlyScore: monthly.get(entry.squadId) ?? 0,
           }),
         );
       },
     );
   }
 
-  private async groupScores(period: Period, dayKey: DayKey): Promise<Map<string, number>> {
-    const entries = await this.prisma.groupLeaderboardEntry.findMany({
+  private async squadScores(period: Period, dayKey: DayKey): Promise<Map<string, number>> {
+    const entries = await this.prisma.squadLeaderboardEntry.findMany({
       where: { period, periodKey: this.periodKey(period, dayKey) },
-      select: { groupId: true, averageScore: true },
+      select: { squadId: true, averageScore: true },
     });
-    return new Map(entries.map((e) => [e.groupId, Math.round(e.averageScore * 100) / 100]));
+    return new Map(entries.map((e) => [e.squadId, Math.round(e.averageScore * 100) / 100]));
   }
 
   private periodKey(period: Period, dayKey: DayKey): string {

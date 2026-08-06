@@ -32,13 +32,16 @@ From your machine (or the Render Shell), with `DATABASE_URL` set to the Neon str
 npm ci
 npm run build:shared
 npm run db:generate -w @dsa/api
-npm run db:migrate -w @dsa/api    # prisma migrate deploy — applies the migration
-npm run db:seed   -w @dsa/api     # creates the admin, scoring formula, problem catalogue
+npm run db:migrate -w @dsa/api    # prisma migrate deploy — applies the migrations
+npm run db:seed   -w @dsa/api     # admin + scoring formula + problem catalogue, then the roster
 ```
 
 In production (`NODE_ENV=production`) the seed creates **only** the admin account,
 scoring formula and problem catalogue — the 60-student demo cohort is never seeded.
 It is idempotent and never resets an existing admin's password.
+
+`db:seed` then runs the roster loader, which **skips unless `roster.csv` is present** —
+see the next section.
 
 > On the free stack the Render backend build runs `migrate deploy` and the seed
 > automatically (see `docs/DEPLOY_RENDER_FREE.md`), so you usually do **not** run these
@@ -50,6 +53,27 @@ It is idempotent and never resets an existing admin's password.
 node -e "const {PrismaClient}=require('@prisma/client');const p=new PrismaClient();p.\$queryRaw\`SELECT 1\`.then(()=>{console.log('Neon OK');process.exit(0)}).catch(e=>{console.error(e.message);process.exit(1)})"
 ```
 Or hit the backend's `/api/v1/health/ready` once deployed — it reports `database: up`.
+
+## 5. Load the roster
+
+`apps/api/prisma/roster.csv` is **gitignored** — it holds students' real names and email
+addresses and this repository is public. It is therefore not in Render's checkout, and
+the deploy build's roster step is a quiet no-op. Load it into Neon yourself, once, and
+again whenever the cohort changes:
+
+```bash
+# from your machine, with DATABASE_URL pointing at Neon
+npm run db:seed:students -w @dsa/api -- --dry-run   # validate the CSV, write nothing
+npm run db:seed:students -w @dsa/api                # apply
+```
+
+Students are matched on email, so re-running after a roster edit updates them in place
+rather than duplicating them. A student who drops off the sheet is **reported, never
+deleted** — deleting one cascades away their entire submission mirror, which LeetCode's
+20-row history window makes unrecoverable.
+
+Sanity-check afterwards: `/api/v1/students/filters` should list the squads with their
+student counts.
 
 ## Notes / limits
 - **Free tier autosuspend:** Neon suspends a free project after inactivity and wakes on

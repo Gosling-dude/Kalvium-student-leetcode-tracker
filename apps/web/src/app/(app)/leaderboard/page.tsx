@@ -20,7 +20,7 @@ import {
 } from '@/components/ui';
 
 type Period = 'DAILY' | 'WEEKLY' | 'MONTHLY';
-type Scope = 'students' | 'groups';
+type Scope = 'students' | 'squads';
 
 const PERIODS: Period[] = ['DAILY', 'WEEKLY', 'MONTHLY'];
 
@@ -34,13 +34,13 @@ export default function LeaderboardPage() {
     enabled: scope === 'students',
   });
 
-  const groups = useQuery({
-    queryKey: ['leaderboard', 'groups', period],
-    queryFn: () => api.groupLeaderboard({ period }),
-    enabled: scope === 'groups',
+  const squads = useQuery({
+    queryKey: ['leaderboard', 'squads', period],
+    queryFn: () => api.squadLeaderboard({ period }),
+    enabled: scope === 'squads',
   });
 
-  const active = scope === 'students' ? students : groups;
+  const active = scope === 'students' ? students : squads;
 
   return (
     <div className="space-y-5">
@@ -56,7 +56,7 @@ export default function LeaderboardPage() {
           <SegmentedControl
             options={[
               { value: 'students', label: 'Students' },
-              { value: 'groups', label: 'Groups' },
+              { value: 'squads', label: 'Squads' },
             ]}
             value={scope}
             onChange={(value) => setScope(value as Scope)}
@@ -74,10 +74,10 @@ export default function LeaderboardPage() {
 
       <Card>
         <CardHeader
-          title={scope === 'students' ? 'Student rankings' : 'Group rankings'}
+          title={scope === 'students' ? 'Student rankings' : 'Squad rankings'}
           description={
-            scope === 'groups'
-              ? 'Groups are compared on averages, so unequal group sizes rank fairly.'
+            scope === 'squads'
+              ? 'Squads are compared on averages, so unequal squad sizes rank fairly.'
               : undefined
           }
         />
@@ -98,7 +98,7 @@ export default function LeaderboardPage() {
                 <tr>
                   <Th className="w-16">Rank</Th>
                   <Th>Student</Th>
-                  <Th>Group</Th>
+                  <Th>Squad</Th>
                   <Th className="text-right">Solved</Th>
                   <Th>Streak</Th>
                   <Th className="text-right">Score</Th>
@@ -140,7 +140,7 @@ export default function LeaderboardPage() {
                       <p className="truncate font-medium">{row.name}</p>
                       <p className="text-xs text-[var(--color-fg-subtle)]">Level {row.level}</p>
                     </Td>
-                    <Td className="text-[var(--color-fg-muted)]">{row.groupName ?? '—'}</Td>
+                    <Td className="text-[var(--color-fg-muted)]">{row.squadName ?? '—'}</Td>
                     <Td className="text-right tabular-nums">{row.solvedCount}</Td>
                     <Td>
                       <StreakFlame streak={row.currentStreak} />
@@ -167,14 +167,14 @@ export default function LeaderboardPage() {
               </tbody>
             </TableShell>
           )
-        ) : !groups.data || groups.data.length === 0 ? (
-          <EmptyState title="No group rankings yet" />
+        ) : !squads.data || squads.data.length === 0 ? (
+          <EmptyState title="No squad rankings yet" />
         ) : (
           <TableShell>
             <thead>
               <tr>
                 <Th className="w-16">Rank</Th>
-                <Th>Group</Th>
+                <Th>Squad</Th>
                 <Th className="text-right">Members</Th>
                 <Th className="text-right">Avg. completion</Th>
                 <Th className="text-right">Total solved</Th>
@@ -183,8 +183,8 @@ export default function LeaderboardPage() {
               </tr>
             </thead>
             <tbody>
-              {groups.data.map((row) => (
-                <tr key={row.groupId} className="transition hover:bg-[var(--color-surface-sunken)]">
+              {squads.data.map((row) => (
+                <tr key={row.squadId} className="transition hover:bg-[var(--color-surface-sunken)]">
                   <Td className="font-bold tabular-nums">{row.rank}</Td>
                   <Td className="font-medium">{row.name}</Td>
                   <Td className="text-right tabular-nums">{row.memberCount}</Td>

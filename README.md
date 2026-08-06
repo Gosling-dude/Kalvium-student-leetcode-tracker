@@ -72,8 +72,39 @@ cp .env.example apps/api/.env   # then edit DATABASE_URL
 npm run db:migrate -w @dsa/api  # or: npx prisma migrate dev
 npm run db:seed -w @dsa/api
 
+npm run db:seed:students        # optional: load the real roster (see below)
+
 npm run dev                     # API on :4000, web on :3000
 ```
+
+### Loading the real roster
+
+`apps/api/prisma/roster.csv` holds the live cohort — one row per student, with the
+columns the programme's spreadsheet already uses:
+
+```
+Full Name,Kalvium Email ID,Squad,Leet code user name,Leet code profile link
+```
+
+> **`roster.csv` is gitignored and must stay that way.** It contains students' real
+> names and email addresses, and this repository is public. `roster.example.csv` is the
+> committed format reference — copy it to `roster.csv` and fill it in. When the file is
+> absent the loader skips quietly, so a fresh clone and the deploy build both work
+> without it.
+
+Update that file when the cohort changes and re-run the loader:
+
+```bash
+npm run db:seed:students -w @dsa/api -- --dry-run   # validate, write nothing
+npm run db:seed:students -w @dsa/api               # apply
+```
+
+Students are matched on email, so re-running updates names, squads and handles in
+place instead of creating duplicates. Squads are created inside `Batch 2026`
+(override with `ROSTER_BATCH_NAME`), and the handle is derived from the profile link
+when the username column is blank. Students who have dropped out of the sheet are
+**reported, not deleted** — deleting one cascades away their whole submission mirror,
+which LeetCode's 20-row window makes unrecoverable.
 
 ---
 
@@ -193,7 +224,7 @@ raises a banner counting students whose data could not be trusted this cycle.
 
 A 250-row spreadsheet is never clean. The importer creates the valid rows and returns a
 per-row error list — row number, field, and what was wrong — instead of failing the
-whole upload with one 400. Batches and groups named in the sheet are created on demand,
+whole upload with one 400. Batches and squads named in the sheet are created on demand,
 and a pasted profile URL is accepted where a username was expected.
 
 ### Running without Redis
@@ -220,7 +251,7 @@ breakdown so a student can be told exactly why they scored what they did.
 
 Leaderboards rank by score, then problems solved, then **earliest completion time**
 (the specified tiebreaker), then streak, then consistency. Ties share a rank.
-Groups are compared on averages, so a 12-person group does not out-rank an 8-person one
+Squads are compared on averages, so a 12-person squad does not out-rank an 8-person one
 on volume alone.
 
 ---
@@ -235,6 +266,7 @@ on volume alone.
 | `npm test` | Unit tests |
 | `npm run db:migrate` | Apply migrations |
 | `npm run db:seed` | Seed admin, scoring formula, demo cohort |
+| `npm run db:seed:students` | Load the real roster from `apps/api/prisma/roster.csv` |
 | `npm run db:studio` | Prisma Studio |
 | `npm run smoke:provider -w @dsa/api` | Live LeetCode contract check |
 

@@ -7,7 +7,7 @@
  * never fails as a single opaque 400. A mentor needs to know that row 47 has a
  * duplicate email — not that "the upload failed".
  *
- * Batches and groups referenced by the sheet are created on demand, because requiring
+ * Batches and squads referenced by the sheet are created on demand, because requiring
  * them to exist first makes the very first import impossible.
  */
 
@@ -22,7 +22,7 @@ interface ParsedRow {
   name: string;
   email: string;
   batch: string | null;
-  group: string | null;
+  squad: string | null;
   leetcodeUsername: string;
   phone: string | null;
 }
@@ -91,12 +91,12 @@ export class StudentImportService {
         skipped: valid.length,
         errors,
         createdBatches: [],
-        createdGroups: [],
+        createdSquads: [],
       };
     }
 
     const { batchIds, createdBatches } = await this.ensureBatches(valid);
-    const { groupIds, createdGroups } = await this.ensureGroups(valid, batchIds);
+    const { squadIds, createdSquads } = await this.ensureSquads(valid, batchIds);
 
     let created = 0;
     let updated = 0;
@@ -104,8 +104,8 @@ export class StudentImportService {
 
     for (const row of valid) {
       const batchId = row.batch ? (batchIds.get(row.batch.toLowerCase()) ?? null) : null;
-      const groupKey = this.groupKey(row.batch, row.group);
-      const groupId = row.group ? (groupIds.get(groupKey) ?? null) : null;
+      const squadKey = this.squadKey(row.batch, row.squad);
+      const squadId = row.squad ? (squadIds.get(squadKey) ?? null) : null;
 
       try {
         const existing = await this.prisma.student.findFirst({
@@ -138,7 +138,7 @@ export class StudentImportService {
               phone: row.phone,
               leetcodeUsername: row.leetcodeUsername.toLowerCase(),
               batchId,
-              groupId,
+              squadId,
             },
           });
           updated += 1;
@@ -150,7 +150,7 @@ export class StudentImportService {
               phone: row.phone,
               leetcodeUsername: row.leetcodeUsername.toLowerCase(),
               batchId,
-              groupId,
+              squadId,
               // A student who has never been synced must not be reported as
               // "solved 0" — they have no data yet, which is a different thing.
               syncState: { create: { status: 'NEVER_SYNCED' } },
@@ -179,7 +179,7 @@ export class StudentImportService {
       skipped,
       errors,
       createdBatches,
-      createdGroups,
+      createdSquads,
     };
   }
 
@@ -192,7 +192,7 @@ export class StudentImportService {
       { header: 'Name', key: 'name', width: 28 },
       { header: 'Email', key: 'email', width: 32 },
       { header: 'Batch', key: 'batch', width: 18 },
-      { header: 'Group', key: 'group', width: 18 },
+      { header: 'Squad', key: 'squad', width: 18 },
       { header: 'LeetCode Username', key: 'leetcodeUsername', width: 26 },
       { header: 'Phone', key: 'phone', width: 18 },
     ];
@@ -208,7 +208,7 @@ export class StudentImportService {
       name: 'Asha Menon',
       email: 'asha.menon@kalvium.com',
       batch: 'Batch 2026',
-      group: 'Group 1',
+      squad: 'Squad 1',
       leetcodeUsername: 'asha_menon',
       phone: '9876543210',
     });
@@ -217,7 +217,7 @@ export class StudentImportService {
     notes.getColumn(1).width = 100;
     notes.addRows([
       ['Only Name, Email and LeetCode Username are required.'],
-      ['Batch and Group are created automatically if they do not already exist.'],
+      ['Batch and Squad are created automatically if they do not already exist.'],
       ['Phone is optional.'],
       ['The LeetCode username must match the profile URL exactly: leetcode.com/u/<username>.'],
       ['A wrong username makes a student appear to have solved nothing, so double-check them.'],
@@ -252,7 +252,7 @@ export class StudentImportService {
     if (missing.length > 0) {
       throw new BadRequestException(
         `The sheet is missing required column(s): ${missing.join(', ')}. ` +
-          `Expected headers: Name, Email, Batch, Group, LeetCode Username, Phone.`,
+          `Expected headers: Name, Email, Batch, Squad, LeetCode Username, Phone.`,
       );
     }
 
@@ -279,7 +279,7 @@ export class StudentImportService {
         name,
         email: email.toLowerCase(),
         batch: read('batch') || null,
-        group: read('group') || null,
+        squad: read('squad') || null,
         leetcodeUsername: this.normaliseUsername(username),
         phone: read('phone') || null,
       });
@@ -397,42 +397,42 @@ export class StudentImportService {
     return { batchIds, createdBatches };
   }
 
-  private async ensureGroups(
+  private async ensureSquads(
     rows: ParsedRow[],
     batchIds: Map<string, string>,
-  ): Promise<{ groupIds: Map<string, string>; createdGroups: string[] }> {
-    const groupIds = new Map<string, string>();
-    const createdGroups: string[] = [];
+  ): Promise<{ squadIds: Map<string, string>; createdSquads: string[] }> {
+    const squadIds = new Map<string, string>();
+    const createdSquads: string[] = [];
 
-    const pairs = new Map<string, { batch: string | null; group: string }>();
+    const pairs = new Map<string, { batch: string | null; squad: string }>();
     for (const row of rows) {
-      if (!row.group) continue;
-      pairs.set(this.groupKey(row.batch, row.group), { batch: row.batch, group: row.group });
+      if (!row.squad) continue;
+      pairs.set(this.squadKey(row.batch, row.squad), { batch: row.batch, squad: row.squad });
     }
 
     for (const [key, pair] of pairs) {
       const batchId = pair.batch ? (batchIds.get(pair.batch.toLowerCase()) ?? null) : null;
 
-      const existing = await this.prisma.group.findFirst({
-        where: { name: pair.group, batchId },
+      const existing = await this.prisma.squad.findFirst({
+        where: { name: pair.squad, batchId },
       });
 
       if (existing) {
-        groupIds.set(key, existing.id);
+        squadIds.set(key, existing.id);
       } else {
-        const group = await this.prisma.group.create({
-          data: { name: pair.group, batchId },
+        const squad = await this.prisma.squad.create({
+          data: { name: pair.squad, batchId },
         });
-        groupIds.set(key, group.id);
-        createdGroups.push(pair.batch ? `${pair.batch} / ${pair.group}` : pair.group);
+        squadIds.set(key, squad.id);
+        createdSquads.push(pair.batch ? `${pair.batch} / ${pair.squad}` : pair.squad);
       }
     }
 
-    return { groupIds, createdGroups };
+    return { squadIds, createdSquads };
   }
 
-  /** Group names are unique per batch, so the cache key must include the batch. */
-  private groupKey(batch: string | null, group: string | null): string {
-    return `${(batch ?? '').toLowerCase()}::${(group ?? '').toLowerCase()}`;
+  /** Squad names are unique per batch, so the cache key must include the batch. */
+  private squadKey(batch: string | null, squad: string | null): string {
+    return `${(batch ?? '').toLowerCase()}::${(squad ?? '').toLowerCase()}`;
   }
 }

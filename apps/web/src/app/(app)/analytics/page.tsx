@@ -16,7 +16,7 @@ import {
   Td,
   Th,
 } from '@/components/ui';
-import { CompletionTrendChart, DifficultyChart, GroupComparisonChart } from './charts';
+import { CompletionTrendChart, DifficultyChart, SquadComparisonChart } from './charts';
 
 function daysAgo(days: number): string {
   const date = new Date();
@@ -101,9 +101,9 @@ export default function AnalyticsPage() {
             </Card>
 
             <Card>
-              <CardHeader title="Group comparison" description="Average completion per group" />
+              <CardHeader title="Squad comparison" description="Average completion per squad" />
               <div className="p-4">
-                <GroupComparisonChart data={data.groupComparison} />
+                <SquadComparisonChart data={data.squadComparison} />
               </div>
             </Card>
           </div>

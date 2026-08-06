@@ -62,7 +62,7 @@ export class CreateStudentDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
-  groupId?: string;
+  squadId?: string;
 
   @ApiPropertyOptional({ enum: STUDENT_STATUSES })
   @IsOptional()
@@ -105,7 +105,7 @@ export class UpdateStudentDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
-  groupId?: string | null;
+  squadId?: string | null;
 
   @ApiPropertyOptional({ enum: STUDENT_STATUSES })
   @IsOptional()
@@ -117,7 +117,7 @@ export class StudentQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
-  groupId?: string;
+  squadId?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -156,7 +156,7 @@ export class BulkUpdateStudentsDto extends BulkIdsDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
-  groupId?: string | null;
+  squadId?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

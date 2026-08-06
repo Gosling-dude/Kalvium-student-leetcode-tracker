@@ -32,10 +32,10 @@ export class ReportsController {
     return this.reports.monthlyReport(dayKey);
   }
 
-  @Get('groups')
-  @ApiOperation({ summary: 'Group report data' })
-  groups(@Query('dayKey') dayKey?: string) {
-    return this.reports.groupReport(dayKey);
+  @Get('squads')
+  @ApiOperation({ summary: 'Squad report data' })
+  squads(@Query('dayKey') dayKey?: string) {
+    return this.reports.squadReport(dayKey);
   }
 
   @Get('attendance')
@@ -61,7 +61,7 @@ export class ReportsController {
       [
         { header: 'Student', key: 'name', width: 26 },
         { header: 'Email', key: 'email', width: 30 },
-        { header: 'Group', key: 'group', width: 16 },
+        { header: 'Squad', key: 'squad', width: 16 },
         { header: 'Batch', key: 'batch', width: 16 },
         { header: 'LeetCode', key: 'leetcodeUsername', width: 20 },
         { header: 'Solved', key: 'solved', width: 8 },
@@ -92,7 +92,7 @@ export class ReportsController {
       [
         { header: 'Student', key: 'name', width: 26 },
         { header: 'Email', key: 'email', width: 30 },
-        { header: 'Group', key: 'group', width: 16 },
+        { header: 'Squad', key: 'squad', width: 16 },
         { header: 'Batch', key: 'batch', width: 16 },
         { header: 'Solved', key: 'solved', width: 10 },
         { header: 'Assigned', key: 'assigned', width: 10 },

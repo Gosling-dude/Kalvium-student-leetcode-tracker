@@ -28,6 +28,13 @@ const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe!2026';
 const ADMIN_NAME = process.env.SEED_ADMIN_NAME ?? 'Program Admin';
 const SEED_DEMO = process.env.NODE_ENV !== 'production' && process.env.SEED_DEMO !== 'false';
 
+/**
+ * The demo cohort lives in its own batch, kept apart from the real roster loaded by
+ * `seed-students.ts` (`Batch 2026` by default). Everything below is scoped to it, so
+ * running this seed on a database that already holds real students cannot touch them.
+ */
+const DEMO_BATCH_NAME = 'Demo Batch';
+
 /** Real LeetCode problems, so slugs and difficulties are genuine. */
 const PROBLEM_POOL: { slug: string; title: string; difficulty: 'EASY' | 'MEDIUM' | 'HARD'; tags: string[] }[] = [
   { slug: 'two-sum', title: 'Two Sum', difficulty: 'EASY', tags: ['Array', 'Hash Table'] },
@@ -129,31 +136,37 @@ async function main(): Promise<void> {
     ),
   );
 
+  // A batch of its own, deliberately not the roster's `Batch 2026`. Sharing one would
+  // let this seed synthesise 30 days of fabricated history onto real students — data
+  // indistinguishable from a genuine sync in every report and leaderboard.
   const batch = await prisma.batch.upsert({
-    where: { name: 'Batch 2026' },
-    create: { name: 'Batch 2026', startDate: new Date('2026-06-01'), isActive: true },
+    where: { name: DEMO_BATCH_NAME },
+    create: { name: DEMO_BATCH_NAME, startDate: new Date('2026-06-01'), isActive: true },
     update: {},
   });
 
-  const groupColors = ['#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#06b6d4', '#a855f7'];
-  const groups = [];
+  const squadColors = ['#6366f1', '#22c55e', '#f59e0b', '#ec4899', '#06b6d4', '#a855f7'];
+  const squads = [];
   for (let i = 0; i < 6; i += 1) {
-    const name = `Group ${i + 1}`;
-    const existing = await prisma.group.findFirst({ where: { name, batchId: batch.id } });
-    groups.push(
+    const name = `Squad ${i + 1}`;
+    const existing = await prisma.squad.findFirst({ where: { name, batchId: batch.id } });
+    squads.push(
       existing ??
-        (await prisma.group.create({
+        (await prisma.squad.create({
           data: {
             name,
             batchId: batch.id,
             mentorId: mentors[i % mentors.length]!.id,
-            color: groupColors[i],
+            color: squadColors[i],
           },
         })),
     );
   }
 
-  const existingStudents = await prisma.student.count();
+  // Scoped to the demo batch, not to every student. A dev database may also hold the
+  // real roster (`prisma/seed-students.ts`), and those students must never be counted
+  // here — nor given the synthetic history synthesised further down.
+  const existingStudents = await prisma.student.count({ where: { batchId: batch.id } });
   const STUDENT_COUNT = 60;
 
   if (existingStudents === 0) {
@@ -169,7 +182,7 @@ async function main(): Promise<void> {
           email: `${handle}@kalvium.com`,
           leetcodeUsername: handle,
           batchId: batch.id,
-          groupId: groups[i % groups.length]!.id,
+          squadId: squads[i % squads.length]!.id,
           phone: `98${String(10000000 + i).slice(0, 8)}`,
           // Demo students are marked as never synced, because they are not real
           // LeetCode accounts. Their history below is synthetic and labelled as such.
@@ -180,7 +193,10 @@ async function main(): Promise<void> {
     console.log(`  students: ${STUDENT_COUNT} created`);
   }
 
-  const students = await prisma.student.findMany({ select: { id: true } });
+  const students = await prisma.student.findMany({
+    where: { batchId: batch.id },
+    select: { id: true },
+  });
 
   // --- 30 days of assignments and synthetic outcomes -----------------------
   const DAYS = 30;

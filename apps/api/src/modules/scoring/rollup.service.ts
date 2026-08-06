@@ -16,7 +16,7 @@ import {
   computeDailyScore,
   computeStreaks,
   rankEntries,
-  rankGroups,
+  rankSquads,
   requiredSolvedForStreak,
   type DayKey,
   type Difficulty,
@@ -261,7 +261,7 @@ export class RollupService {
       where: { dayKey: { gte: from, lte: to } },
       include: {
         student: {
-          select: { id: true, name: true, currentStreak: true, groupId: true, status: true },
+          select: { id: true, name: true, currentStreak: true, squadId: true, status: true },
         },
       },
     });
@@ -278,7 +278,7 @@ export class RollupService {
         qualifying: number;
         streak: number;
         completionMinute: number | null;
-        groupId: string | null;
+        squadId: string | null;
       }
     >();
 
@@ -291,7 +291,7 @@ export class RollupService {
         qualifying: 0,
         streak: row.student.currentStreak,
         completionMinute: null,
-        groupId: row.student.groupId,
+        squadId: row.student.squadId,
       };
 
       entry.score += row.score;
@@ -308,7 +308,7 @@ export class RollupService {
       byStudent.set(row.studentId, entry);
     }
 
-    const rankable: (RankableEntry & { groupId: string | null; assignedCount: number })[] = [
+    const rankable: (RankableEntry & { squadId: string | null; assignedCount: number })[] = [
       ...byStudent,
     ].map(([id, entry]) => ({
       id,
@@ -319,7 +319,7 @@ export class RollupService {
       currentStreak: entry.streak,
       consistency:
         entry.assigned > 0 ? Math.round((entry.solved / entry.assigned) * 10000) / 100 : 0,
-      groupId: entry.groupId,
+      squadId: entry.squadId,
       assignedCount: entry.assigned,
     }));
 
@@ -351,57 +351,57 @@ export class RollupService {
       }),
     ]);
 
-    await this.buildGroupLeaderboard(period, periodKey, rankable);
+    await this.buildSquadLeaderboard(period, periodKey, rankable);
   }
 
-  private async buildGroupLeaderboard(
+  private async buildSquadLeaderboard(
     period: 'DAILY' | 'WEEKLY' | 'MONTHLY',
     periodKey: string,
-    students: (RankableEntry & { groupId: string | null; assignedCount: number })[],
+    students: (RankableEntry & { squadId: string | null; assignedCount: number })[],
   ): Promise<void> {
-    const groups = await this.prisma.group.findMany({ select: { id: true, name: true } });
+    const squads = await this.prisma.squad.findMany({ select: { id: true, name: true } });
 
-    const membersByGroup = new Map<
+    const membersBySquad = new Map<
       string,
       (RankableEntry & { assignedCount: number })[]
     >();
     for (const student of students) {
-      if (!student.groupId) continue;
-      const list = membersByGroup.get(student.groupId) ?? [];
+      if (!student.squadId) continue;
+      const list = membersBySquad.get(student.squadId) ?? [];
       list.push(student);
-      membersByGroup.set(student.groupId, list);
+      membersBySquad.set(student.squadId, list);
     }
 
-    const inputs = groups
-      .filter((group) => (membersByGroup.get(group.id)?.length ?? 0) > 0)
-      .map((group) => {
-        const members = membersByGroup.get(group.id) ?? [];
+    const inputs = squads
+      .filter((squad) => (membersBySquad.get(squad.id)?.length ?? 0) > 0)
+      .map((squad) => {
+        const members = membersBySquad.get(squad.id) ?? [];
         // Average problems assigned per member over the window — the denominator for
-        // group completion. Averaged rather than summed so unequal group sizes compare.
+        // squad completion. Averaged rather than summed so unequal squad sizes compare.
         const assignedPerMember = Math.max(
           1,
           Math.round(members.reduce((n, m) => n + m.assignedCount, 0) / members.length),
         );
-        return { groupId: group.id, groupName: group.name, members, assignedPerMember };
+        return { squadId: squad.id, squadName: squad.name, members, assignedPerMember };
       });
 
-    const ranked = rankGroups(inputs);
+    const ranked = rankSquads(inputs);
 
-    const previous = await this.prisma.groupLeaderboardEntry.findMany({
+    const previous = await this.prisma.squadLeaderboardEntry.findMany({
       where: { period, periodKey },
-      select: { groupId: true, rank: true },
+      select: { squadId: true, rank: true },
     });
-    const previousRanks = new Map(previous.map((p) => [p.groupId, p.rank]));
+    const previousRanks = new Map(previous.map((p) => [p.squadId, p.rank]));
 
     await this.prisma.$transaction([
-      this.prisma.groupLeaderboardEntry.deleteMany({ where: { period, periodKey } }),
-      this.prisma.groupLeaderboardEntry.createMany({
+      this.prisma.squadLeaderboardEntry.deleteMany({ where: { period, periodKey } }),
+      this.prisma.squadLeaderboardEntry.createMany({
         data: ranked.map((row) => ({
           period,
           periodKey,
-          groupId: row.entry.groupId,
+          squadId: row.entry.squadId,
           rank: row.rank,
-          previousRank: previousRanks.get(row.entry.groupId) ?? null,
+          previousRank: previousRanks.get(row.entry.squadId) ?? null,
           memberCount: row.entry.memberCount,
           averageCompletion: row.entry.averageCompletion,
           totalSolved: row.entry.totalSolved,
