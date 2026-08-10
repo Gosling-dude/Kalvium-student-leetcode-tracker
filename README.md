@@ -3,7 +3,9 @@
 Automated LeetCode progress tracking for the Kalvium DSA mastery programme. Mentors
 upload the student list once, post four problems a day, and press **Sync** — the
 platform checks every student's submissions, scores them, and produces the daily
-report, leaderboards and analytics on its own.
+report, leaderboards and analytics on its own. **Email Reports** turns that daily
+report into a mentor-approved email — who needs intervention today, and what to do
+about it — see [docs/DAILY_EMAIL_REPORTING.md](docs/DAILY_EMAIL_REPORTING.md).
 
 ---
 
@@ -161,6 +163,7 @@ build (redeploy Vercel if it changes), and **never set `PORT`** (Render injects 
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | Backend | ✅ | First admin; change the password after first login. |
 | `PROGRAM_TIMEZONE` | Backend | ✅ | e.g. `Asia/Kolkata`. All day boundaries resolve here. |
 | `SWAGGER_ENABLED` | Backend | ➖ | `false` by default in production; `true` to expose `/api/v1/docs`. |
+| `EMAIL_PROVIDER` / `EMAIL_API_KEY` / `EMAIL_FROM` | Backend | ➖ | Enables the daily report email send. See [docs/DAILY_EMAIL_REPORTING.md](docs/DAILY_EMAIL_REPORTING.md). |
 
 GitHub Actions secrets (Repo → Settings → Secrets and variables → Actions): `BACKEND_URL`
 (the Render base URL, no `/api/v1`) and `CRON_SECRET` (same value as the backend).
@@ -184,6 +187,8 @@ dsa-tracker/
 │           ├── providers/  ← the ONLY code that knows about LeetCode
 │           ├── sync/       incremental sync, queue, scheduler
 │           ├── scoring/    scoring config + the rollup engine
+│           ├── email-reports/ daily report, blockers, approval-gated email
+│           │                  → docs/DAILY_EMAIL_REPORTING.md
 │           └── …           auth · students · assignments · dashboard ·
 │                             leaderboard · analytics · reports · admin ·
 │                             notifications · audit · health
@@ -290,16 +295,21 @@ and set `CORS_ORIGINS` to your actual origin.
 
 ## Status
 
-Verified on this machine: **126 unit tests pass** (103 domain, 23 provider/rate-limiter);
-API type-checks and builds; web type-checks and builds all 9 routes; the Prisma schema
-validates and its migration SQL is generated; the live provider smoke test passes all
+Verified on this machine: **153 unit tests pass** (130 domain — including the daily
+email reporting rules — 23 provider/rate-limiter); shared/API/web all type-check;
+shared/API/web all build, including the new `/email-reports` route (11 routes total);
+the Prisma schema validates and every migration's SQL (including
+`20260811000000_daily_email_reporting`) is generated and diff-verified against the
+schema; the new GitHub Action YAML parses; the live provider smoke test passes all
 8 checks against LeetCode.
 
-**Not yet exercised against a live database.** The migration has not been applied and
-the API has not been booted end-to-end, because the local PostgreSQL uses
-`scram-sha-256` and no password was available during the build. Run
-`npm run db:migrate -w @dsa/api && npm run db:seed -w @dsa/api` (or `docker compose up`)
-to close that gap — that is the first thing to do.
+**Not yet exercised against a live database.** No local PostgreSQL/Docker was available
+in the environment this was built in, so the new migration has not been applied and the
+API has not been booted end-to-end — the same gap the previous status note here
+described. Run `npm run db:migrate -w @dsa/api && npm run db:seed -w @dsa/api` (or
+`docker compose up`), then exercise the full flow once — generate a report for today,
+yesterday, and an older date; record a blocker; preview, approve and send an email
+(with `EMAIL_PROVIDER=resend` configured) — before relying on this in production.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model and
 [`docs/STATUS.md`](docs/STATUS.md) for a feature-by-feature completion breakdown.

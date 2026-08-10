@@ -13,8 +13,11 @@ import type {
   AnalyticsOverview,
   AssignmentSummary,
   AuthUser,
+  BlockerRecord,
+  DailyEmailReport,
   DashboardStats,
   SquadLeaderboardRow,
+  EmailReportRecord,
   ImportResult,
   LeaderboardRow,
   LoginResponse,
@@ -272,4 +275,58 @@ export const api = {
 
   recompute: (body: { from?: string; to?: string } = {}) =>
     apiFetch<{ days: number }>('/admin/recompute', { method: 'POST', body }),
+
+  // --- Daily email reporting -------------------------------------------------
+
+  dailyEmailReport: (dayKey: string, squadId?: string) =>
+    apiFetch<DailyEmailReport>(`/reports/daily/${dayKey}${qs({ squadId })}`),
+
+  generateEmail: (
+    dayKey: string,
+    body: { fromEmail: string; toRecipients: string[]; ccRecipients?: string[]; subject?: string },
+  ) => apiFetch<EmailReportRecord>(`/reports/daily/${dayKey}/generate-email`, { method: 'POST', body }),
+
+  previewEmail: (body: {
+    emailReportId: string;
+    fromEmail?: string;
+    toRecipients?: string[];
+    ccRecipients?: string[];
+    subject?: string;
+  }) => apiFetch<EmailReportRecord>('/reports/email/preview', { method: 'POST', body }),
+
+  approveEmail: (emailReportId: string) =>
+    apiFetch<EmailReportRecord>('/reports/email/approve', { method: 'POST', body: { emailReportId } }),
+
+  sendEmail: (emailReportId: string, force = false) =>
+    apiFetch<EmailReportRecord>('/reports/email/send', {
+      method: 'POST',
+      body: { emailReportId, force },
+    }),
+
+  emailHistory: (params: { dayKey?: string; status?: string; page?: number; pageSize?: number } = {}) =>
+    apiFetch<Paginated<EmailReportRecord>>(`/reports/email/history${qs(params)}`),
+
+  emailStatus: (dayKey: string) =>
+    apiFetch<{ sent: EmailReportRecord | null; latest: EmailReportRecord | null }>(
+      `/reports/email/status${qs({ dayKey })}`,
+    ),
+
+  emailReport: (id: string) => apiFetch<EmailReportRecord>(`/reports/email/${id}`),
+
+  listBlockers: (params: { dayKey?: string; studentId?: string } = {}) =>
+    apiFetch<BlockerRecord[]>(`/reports/blockers${qs(params)}`),
+
+  createBlocker: (body: {
+    studentId: string;
+    dayKey: string;
+    category: string;
+    description?: string;
+    actionTaken?: string;
+    followUpRequired?: boolean;
+    followUpDate?: string;
+    mentorNotes?: string;
+  }) => apiFetch<BlockerRecord>('/reports/blockers', { method: 'POST', body }),
+
+  updateBlocker: (id: string, body: Record<string, unknown>) =>
+    apiFetch<BlockerRecord>(`/reports/blockers/${id}`, { method: 'PATCH', body }),
 };

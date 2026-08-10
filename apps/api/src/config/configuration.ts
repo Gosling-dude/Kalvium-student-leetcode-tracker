@@ -67,6 +67,21 @@ export interface AppConfig {
   throttle: { ttlSeconds: number; limit: number };
 
   logging: { level: string; pretty: boolean; persist: boolean };
+
+  /**
+   * Outbound email for the daily report feature (`EmailService`). `provider: 'none'`
+   * (the default when `EMAIL_API_KEY` is unset) means previews, drafts and the
+   * approval workflow all work — only the final `send` call fails, with a clear error
+   * rather than silently no-opping. See docs/DAILY_EMAIL_REPORTING.md.
+   */
+  email: {
+    provider: 'resend' | 'none';
+    apiKey: string | null;
+    fromEmail: string | null;
+    /** Default recipients the daily-report GitHub Action uses when nobody has set any. */
+    defaultTo: string[];
+    defaultCc: string[];
+  };
 }
 
 function requireEnv(key: string, fallback?: string): string {
@@ -228,6 +243,14 @@ export function loadConfiguration(): AppConfig {
       level: process.env.LOG_LEVEL ?? 'info',
       pretty: toBool(process.env.LOG_PRETTY, !isProduction),
       persist: toBool(process.env.PERSIST_LOGS, true),
+    },
+
+    email: {
+      provider: (process.env.EMAIL_PROVIDER ?? 'none') as 'resend' | 'none',
+      apiKey: process.env.EMAIL_API_KEY || null,
+      fromEmail: process.env.EMAIL_FROM || null,
+      defaultTo: toList(process.env.EMAIL_DEFAULT_TO, []),
+      defaultCc: toList(process.env.EMAIL_DEFAULT_CC, []),
     },
   };
 }

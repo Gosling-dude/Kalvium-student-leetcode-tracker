@@ -10,8 +10,11 @@
 import type { DayKey } from '../domain/time';
 import type { BadgeSummary, EvaluatedAchievement, LevelProgress } from '../domain/gamification';
 import type { ScoreComponent } from '../domain/scoring';
+import type { ActionTier, BlockerSummaryKey, StatusLabel } from '../domain/daily-email-report';
 import type {
+  BlockerCategory,
   Difficulty,
+  EmailReportStatus,
   ProblemStatus,
   StudentStatus,
   SyncJobStatus,
@@ -384,5 +387,138 @@ export interface SystemLogEntry {
   context: string;
   message: string;
   metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Daily email reporting & follow-up
+// ---------------------------------------------------------------------------
+
+/** A mentor's blocker record for one student on one day. */
+export interface BlockerRecord {
+  id: string;
+  studentId: string;
+  studentName: string;
+  dayKey: DayKey;
+  solvedCount: number;
+  assignedCount: number;
+  category: BlockerCategory;
+  description: string | null;
+  actionTaken: string | null;
+  followUpRequired: boolean;
+  followUpDate: DayKey | null;
+  mentorNotes: string | null;
+  resolvedAt: string | null;
+  recordedById: string | null;
+  recordedByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One student's outcome in a daily email report — the student table row (§6). */
+export interface DailyEmailReportStudentRow {
+  studentId: string;
+  name: string;
+  email: string;
+  squadName: string | null;
+  batchName: string | null;
+  leetcodeUsername: string;
+  assignedCount: number;
+  solvedCount: number;
+  completionPercent: number;
+  statusLabel: StatusLabel;
+  actionTier: ActionTier;
+  missingProblems: string[];
+  syncStatus: SyncStatus;
+  /** Why a zero is a zero — data problem vs. genuine non-attempt (reused from the mentor dashboard). */
+  reason: string | null;
+  blocker: BlockerRecord | null;
+  /** Ready-to-use guidance text: blocker-aware when one is on file, generic otherwise (§8). */
+  actionRequired: string;
+}
+
+export interface DailyEmailReportBucket {
+  solvedCount: number;
+  label: string;
+  count: number;
+  students: DailyEmailReportStudentRow[];
+}
+
+export interface DailyEmailReportActionGroup {
+  tier: ActionTier;
+  emoji: string;
+  title: string;
+  count: number;
+  students: { studentId: string; name: string; email: string }[];
+}
+
+export interface DailyEmailBlockerSummaryEntry {
+  key: BlockerSummaryKey;
+  label: string;
+  count: number;
+}
+
+export interface DailyEmailReportSummary {
+  dayKey: DayKey;
+  dayLabelLong: string;
+  dayLabelShort: string;
+  problemsAssigned: number;
+  studentsTracked: number;
+  /** Indexed by solved count, `assignedCount` entries long — e.g. `bucketCounts[0]` = "solved 4 of 4". */
+  bucketCounts: { solvedCount: number; label: string; count: number }[];
+  overallCompletionPercent: number;
+  generatedAt: string;
+}
+
+/** The full computed report for one day — reconstructed live, never stored (§2, §21). */
+export interface DailyEmailReport {
+  summary: DailyEmailReportSummary;
+  hasAssignment: boolean;
+  isFutureDate: boolean;
+  /** Active students whose account predates the assignment but who joined after this
+   *  particular day closed are excluded from the report; this is how many were. */
+  excludedNotYetEnrolled: number;
+  problems: AssignmentProblem[];
+  buckets: DailyEmailReportBucket[];
+  students: DailyEmailReportStudentRow[];
+  actionGroups: DailyEmailReportActionGroup[];
+  blockerSummary: DailyEmailBlockerSummaryEntry[];
+}
+
+export interface EmailRecipientsInput {
+  fromEmail: string;
+  toRecipients: string[];
+  ccRecipients: string[];
+  subject?: string;
+}
+
+/** Unsent, fully-rendered preview of what an email would contain (§11). */
+export interface EmailPreview {
+  dayKey: DayKey;
+  fromEmail: string;
+  toRecipients: string[];
+  ccRecipients: string[];
+  subject: string;
+  bodyHtml: string;
+}
+
+/** One row of email history (§14) — the `EmailReport` row itself, wire-shaped. */
+export interface EmailReportRecord {
+  id: string;
+  dayKey: DayKey;
+  status: EmailReportStatus;
+  fromEmail: string;
+  toRecipients: string[];
+  ccRecipients: string[];
+  subject: string;
+  bodyHtml: string;
+  generatedAt: string;
+  generatedByName: string | null;
+  approvedAt: string | null;
+  approvedByName: string | null;
+  sentAt: string | null;
+  providerMessageId: string | null;
+  failedError: string | null;
+  supersedesId: string | null;
   createdAt: string;
 }
