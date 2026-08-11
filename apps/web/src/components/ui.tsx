@@ -8,7 +8,8 @@
  * CSS custom properties in `globals.css`, so light and dark are handled once.
  */
 
-import { type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
+import { useEffect, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
+import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // --- Card -------------------------------------------------------------------
@@ -271,6 +272,92 @@ export function StreakFlame({ streak }: { streak: number }) {
       <span className="tabular-nums">{streak}</span>
       <span className="sr-only">day streak</span>
     </Badge>
+  );
+}
+
+// --- Modal ------------------------------------------------------------------
+
+/**
+ * A focused overlay for content that needs the user's full attention before they act —
+ * the email preview, confirmations. Closes on Escape or backdrop click; body scroll is
+ * locked while open so the page behind it cannot be scrolled accidentally.
+ */
+export function Modal({
+  open,
+  onClose,
+  title,
+  description,
+  size = 'md',
+  children,
+  footer,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: ReactNode;
+  description?: ReactNode;
+  size?: 'md' | 'lg' | 'xl';
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const widths = { md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' } as const;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <button
+        aria-label="Close"
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        className={cn(
+          'relative flex max-h-[85vh] w-full flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-raised)] shadow-2xl animate-rise',
+          widths[size],
+        )}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-4">
+          <div className="min-w-0">
+            <h2 id="modal-title" className="truncate text-sm font-semibold tracking-tight">
+              {title}
+            </h2>
+            {description ? (
+              <p className="mt-0.5 text-xs text-[var(--color-fg-muted)]">{description}</p>
+            ) : null}
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="shrink-0 rounded-md p-1 text-[var(--color-fg-subtle)] transition hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-fg)]"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        {footer ? (
+          <div className="flex items-center justify-end gap-2 border-t border-[var(--color-border)] px-5 py-3">
+            {footer}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

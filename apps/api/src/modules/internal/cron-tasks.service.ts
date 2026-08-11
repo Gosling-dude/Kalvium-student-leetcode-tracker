@@ -6,14 +6,17 @@
  * "what a sync does" and "what a nightly rollup does" — not three subtly different ones.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
-import type { SyncJobSummary } from '@dsa/shared';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { DayKey, EmailReportRecord, SyncJobSummary } from '@dsa/shared';
 
+import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthService } from '../auth/auth.service';
 import { RollupService } from '../scoring/rollup.service';
 import { SyncService } from '../sync/sync.service';
+import { EmailReportsService } from '../email-reports/email-reports.service';
+import { NotificationsService } from '../notifications/notifications.module';
 
 export interface RollupResult {
   dayKey: string;
@@ -32,6 +35,9 @@ export class CronTasksService {
     private readonly auth: AuthService,
     private readonly audit: AuditService,
     private readonly time: ProgramTimeService,
+    private readonly emailReports: EmailReportsService,
+    private readonly notifications: NotificationsService,
+    @Inject(CONFIG_TOKEN) private readonly config: AppConfig,
   ) {}
 
   /**
@@ -82,5 +88,54 @@ export class CronTasksService {
       prunedAuditLogs: prunedLogs.audit,
       prunedSystemLogs: prunedLogs.system,
     };
+  }
+
+  /**
+   * Daily report automation (§15, §28): generate the report for the day that just
+   * closed, render it as an email, and leave it `PENDING_APPROVAL`.
+   *
+   * This method never calls `EmailReportsService.send` and never will — the approval
+   * gate is enforced inside that service regardless, but the point is that nothing on
+   * this path even attempts it. A human still has to open the Email Reports page and
+   * click Approve & Send.
+   *
+   * Runs against *yesterday* by default, same as the rollup, and should be scheduled
+   * after it: this is only useful once that day's `DailyStatus` rows are final.
+   */
+  async runDailyReportGeneration(dayKey?: DayKey): Promise<EmailReportRecord | null> {
+    const day = dayKey ?? this.time.yesterday();
+    this.logger.log(`Generating daily report email for ${day}`);
+
+    const { fromEmail, defaultTo, defaultCc } = this.config.email;
+    if (!fromEmail || defaultTo.length === 0) {
+      this.logger.warn(
+        `Skipping automated report for ${day}: EMAIL_FROM and/or EMAIL_DEFAULT_TO are not configured.`,
+      );
+      return null;
+    }
+
+    const draft = await this.emailReports.generateDraft(
+      day,
+      { fromEmail, toRecipients: defaultTo, ccRecipients: defaultCc },
+      null,
+    );
+    const pending = await this.emailReports.submitForApproval(draft.id);
+
+    await this.notifications.dispatch({
+      event: 'DAILY_REPORT_PENDING_APPROVAL',
+      title: `Daily DSA report for ${day} is ready for approval`,
+      body:
+        `The automated daily report for ${day} has been generated and is waiting for a ` +
+        `mentor or admin to review and send it from the Email Reports page.`,
+      data: { dayKey: day, emailReportId: pending.id },
+    });
+
+    await this.audit.log('INFO', 'CronTasks', `Daily report for ${day} generated and pending approval`, {
+      emailReportId: pending.id,
+      toRecipients: defaultTo,
+    });
+
+    this.logger.log(`Daily report for ${day} is PENDING_APPROVAL (id ${pending.id})`);
+    return pending;
   }
 }

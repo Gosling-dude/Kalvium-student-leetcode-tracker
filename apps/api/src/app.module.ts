@@ -13,6 +13,7 @@ import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 
 import { PrismaModule } from './infra/prisma/prisma.module';
 import { CacheModule } from './infra/cache/cache.module';
+import { EmailModule } from './infra/email/email.module';
 import { ProvidersModule } from './modules/providers/providers.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -24,6 +25,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { LeaderboardModule } from './modules/leaderboard/leaderboard.module';
 import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { ReportsModule } from './modules/reports/reports.module';
+import { EmailReportsModule } from './modules/email-reports/email-reports.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { HealthModule } from './modules/health/health.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -61,6 +63,7 @@ class CoreModule {}
     CoreModule,
     PrismaModule,
     CacheModule,
+    EmailModule,
     ProvidersModule,
     AuditModule,
 
@@ -73,6 +76,7 @@ class CoreModule {}
     LeaderboardModule,
     AnalyticsModule,
     ReportsModule,
+    EmailReportsModule,
     AdminModule,
     NotificationsModule,
     HealthModule,

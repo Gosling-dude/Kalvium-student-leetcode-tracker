@@ -10,7 +10,7 @@
  * calling Action sees a real success/failure rather than a fire-and-forget 202.
  */
 
-import { Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 
 import { Public } from '../../common/decorators';
@@ -38,5 +38,20 @@ export class InternalController {
   async rollup() {
     const result = await this.tasks.runNightlyRollup();
     return { ok: true, ran: true, ...result };
+  }
+
+  /**
+   * Daily report automation (§28). Optionally accepts `{ dayKey }` so a manual
+   * `workflow_dispatch` run (or a support script) can (re)generate a specific date
+   * instead of "yesterday". Always stops at `PENDING_APPROVAL` — see
+   * `CronTasksService.runDailyReportGeneration`.
+   */
+  @Post('daily-report')
+  @HttpCode(200)
+  async dailyReport(@Body() body: { dayKey?: string }) {
+    const result = await this.tasks.runDailyReportGeneration(body?.dayKey);
+    return result
+      ? { ok: true, ran: true, emailReport: result }
+      : { ok: true, ran: false, reason: 'EMAIL_FROM / EMAIL_DEFAULT_TO are not configured.' };
   }
 }

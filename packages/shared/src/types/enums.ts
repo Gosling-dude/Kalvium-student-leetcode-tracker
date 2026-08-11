@@ -81,8 +81,63 @@ export const NOTIFICATION_EVENTS = [
   'SYNC_COMPLETED',
   'SYNC_FAILED',
   'ACHIEVEMENT_UNLOCKED',
+  'DAILY_REPORT_PENDING_APPROVAL',
 ] as const;
 export type NotificationEvent = (typeof NOTIFICATION_EVENTS)[number];
+
+/**
+ * Why a student did not finish a day's assignment, as recorded by a mentor.
+ *
+ * `NO_BLOCKER` is a deliberate choice a mentor makes ("I asked, there is no blocker") —
+ * it is not the same as no `Blocker` row existing at all, which means nobody asked yet.
+ * The report and email must keep those two states visually distinct.
+ */
+export const BLOCKER_CATEGORIES = [
+  'CONCEPTUAL_DIFFICULTY',
+  'UNABLE_TO_UNDERSTAND_PROBLEM',
+  'UNABLE_TO_IDENTIFY_PATTERN',
+  'CODING_IMPLEMENTATION_ISSUE',
+  'ENVIRONMENT_SETUP_ISSUE',
+  'LEETCODE_ISSUE',
+  'TIME_MANAGEMENT',
+  'INTERNET_DEVICE_ISSUE',
+  'PERSONAL_REASON',
+  'NO_BLOCKER',
+  'OTHER',
+] as const;
+export type BlockerCategory = (typeof BLOCKER_CATEGORIES)[number];
+
+export const BLOCKER_CATEGORY_LABELS: Record<BlockerCategory, string> = {
+  CONCEPTUAL_DIFFICULTY: 'Conceptual difficulty',
+  UNABLE_TO_UNDERSTAND_PROBLEM: 'Unable to understand problem',
+  UNABLE_TO_IDENTIFY_PATTERN: 'Unable to identify pattern',
+  CODING_IMPLEMENTATION_ISSUE: 'Coding/implementation issue',
+  ENVIRONMENT_SETUP_ISSUE: 'Environment/setup issue',
+  LEETCODE_ISSUE: 'LeetCode issue',
+  TIME_MANAGEMENT: 'Time management',
+  INTERNET_DEVICE_ISSUE: 'Internet/device issue',
+  PERSONAL_REASON: 'Personal reason',
+  NO_BLOCKER: 'No blocker',
+  OTHER: 'Other',
+};
+
+/** Lifecycle of one generated daily report email. See `domain/daily-email-report.ts`. */
+export const EMAIL_REPORT_STATUSES = [
+  'DRAFT',
+  'PENDING_APPROVAL',
+  'APPROVED',
+  'SENT',
+  'FAILED',
+] as const;
+export type EmailReportStatus = (typeof EMAIL_REPORT_STATUSES)[number];
+
+export const EMAIL_REPORT_STATUS_LABELS: Record<EmailReportStatus, string> = {
+  DRAFT: 'Draft',
+  PENDING_APPROVAL: 'Pending approval',
+  APPROVED: 'Approved',
+  SENT: 'Sent',
+  FAILED: 'Failed',
+};
 
 export const REPORT_TYPES = [
   'DAILY',

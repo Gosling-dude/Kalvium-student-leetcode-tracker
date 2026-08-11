@@ -11,6 +11,7 @@
  * Usage:
  *   node dist/jobs/cron.js sync
  *   node dist/jobs/cron.js rollup
+ *   node dist/jobs/cron.js daily-report [dayKey]
  */
 
 import 'reflect-metadata';
@@ -24,8 +25,8 @@ const logger = new Logger('CronJob');
 
 async function main(): Promise<void> {
   const task = (process.argv[2] ?? '').toLowerCase();
-  if (task !== 'sync' && task !== 'rollup') {
-    logger.error(`Unknown cron task "${task}". Expected "sync" or "rollup".`);
+  if (task !== 'sync' && task !== 'rollup' && task !== 'daily-report') {
+    logger.error(`Unknown cron task "${task}". Expected "sync", "rollup" or "daily-report".`);
     process.exitCode = 2;
     return;
   }
@@ -40,8 +41,10 @@ async function main(): Promise<void> {
       // runSync awaits the job to a terminal status, so the run is complete before we
       // close the context (and disconnect Prisma).
       await tasks.runSync();
-    } else {
+    } else if (task === 'rollup') {
       await tasks.runNightlyRollup();
+    } else {
+      await tasks.runDailyReportGeneration(process.argv[3]);
     }
   } finally {
     await app.close();

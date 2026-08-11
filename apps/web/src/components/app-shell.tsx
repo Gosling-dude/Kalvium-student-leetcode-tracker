@@ -19,6 +19,7 @@ import {
   CalendarDays,
   LayoutDashboard,
   ListChecks,
+  Mail,
   Moon,
   RefreshCw,
   Search,
@@ -38,6 +39,7 @@ const NAV = [
   { href: '/leaderboard', label: 'Leaderboard', icon: Trophy },
   { href: '/students', label: 'Students', icon: Users },
   { href: '/assignments', label: 'Assignments', icon: CalendarDays },
+  { href: '/email-reports', label: 'Email Reports', icon: Mail },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/admin', label: 'Admin', icon: Settings },
 ];

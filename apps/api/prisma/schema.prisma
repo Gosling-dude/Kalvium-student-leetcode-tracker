@@ -125,6 +125,7 @@ enum NotificationEvent {
   SYNC_COMPLETED
   SYNC_FAILED
   ACHIEVEMENT_UNLOCKED
+  DAILY_REPORT_PENDING_APPROVAL
 }
 
 enum NotificationStatus {
@@ -132,6 +133,33 @@ enum NotificationStatus {
   SENT
   FAILED
   SKIPPED
+}
+
+/// Why a student did not finish the day's assignment — recorded by a mentor, never
+/// inferred. A solved-count of 1 with no `Blocker` row is reported as "no blocker
+/// reported", not silently treated as `NO_BLOCKER`; the two are different facts.
+enum BlockerCategory {
+  CONCEPTUAL_DIFFICULTY
+  UNABLE_TO_UNDERSTAND_PROBLEM
+  UNABLE_TO_IDENTIFY_PATTERN
+  CODING_IMPLEMENTATION_ISSUE
+  ENVIRONMENT_SETUP_ISSUE
+  LEETCODE_ISSUE
+  TIME_MANAGEMENT
+  INTERNET_DEVICE_ISSUE
+  PERSONAL_REASON
+  NO_BLOCKER
+  OTHER
+}
+
+/// Lifecycle of one generated daily report email. `SENT` is terminal for the approval
+/// gate — `EmailReportsService` refuses to call the transport for anything else.
+enum EmailReportStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SENT
+  FAILED
 }
 
 // ---------------------------------------------------------------------------
@@ -151,13 +179,16 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  mentoredSquads Squad[]        @relation("SquadMentor")
-  assignments    Assignment[]   @relation("AssignmentAuthor")
-  notes          MentorNote[]
-  auditLogs      AuditLog[]
-  refreshTokens  RefreshToken[]
-  apiKeys        ApiKey[]
-  syncJobs       SyncJob[]
+  mentoredSquads        Squad[]        @relation("SquadMentor")
+  assignments           Assignment[]   @relation("AssignmentAuthor")
+  notes                 MentorNote[]
+  auditLogs             AuditLog[]
+  refreshTokens         RefreshToken[]
+  apiKeys               ApiKey[]
+  syncJobs              SyncJob[]
+  blockersRecorded      Blocker[]      @relation("BlockerRecordedBy")
+  emailReportsGenerated EmailReport[]  @relation("EmailReportGeneratedBy")
+  emailReportsApproved  EmailReport[]  @relation("EmailReportApprovedBy")
 
   @@index([role])
   @@index([isActive])
@@ -184,17 +215,17 @@ model RefreshToken {
 }
 
 model ApiKey {
-  id         String    @id @default(uuid()) @db.Uuid
-  name       String
+  id          String    @id @default(uuid()) @db.Uuid
+  name        String
   /// Only the hash is stored; the plaintext key is shown once at creation.
-  keyHash    String    @unique
-  prefix     String
-  scopes     String[]  @default([])
-  createdById String?  @db.Uuid
-  lastUsedAt DateTime?
-  expiresAt  DateTime?
-  revokedAt  DateTime?
-  createdAt  DateTime  @default(now())
+  keyHash     String    @unique
+  prefix      String
+  scopes      String[]  @default([])
+  createdById String?   @db.Uuid
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
 
   createdBy User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
@@ -233,8 +264,8 @@ model Squad {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch    Batch?                   @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  mentor   User?                    @relation("SquadMentor", fields: [mentorId], references: [id], onDelete: SetNull)
+  batch    Batch?                  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  mentor   User?                   @relation("SquadMentor", fields: [mentorId], references: [id], onDelete: SetNull)
   students Student[]
   entries  SquadLeaderboardEntry[]
 
@@ -251,35 +282,35 @@ model Squad {
 }
 
 model Student {
-  id                String        @id @default(uuid()) @db.Uuid
-  name              String
-  email             String        @unique
-  phone             String?
+  id                  String        @id @default(uuid()) @db.Uuid
+  name                String
+  email               String        @unique
+  phone               String?
   /// Stored lowercase; LeetCode usernames are case-insensitive for lookup but the
   /// API echoes back the canonical casing, which we keep in `leetcodeDisplayName`.
-  leetcodeUsername  String        @unique
+  leetcodeUsername    String        @unique
   leetcodeDisplayName String?
-  status            StudentStatus @default(ACTIVE)
-  avatarUrl         String?
+  status              StudentStatus @default(ACTIVE)
+  avatarUrl           String?
 
   batchId String? @db.Uuid
   squadId String? @db.Uuid
 
   /// Denormalised aggregates, refreshed after each sync. Always derivable from
   /// `Submission` + `DailyStatus`; cached here so list views need no joins.
-  currentStreak   Int @default(0)
-  longestStreak   Int @default(0)
-  totalSolved     Int @default(0)
-  totalScore      Int @default(0)
-  easySolved      Int @default(0)
-  mediumSolved    Int @default(0)
-  hardSolved      Int @default(0)
+  currentStreak Int @default(0)
+  longestStreak Int @default(0)
+  totalSolved   Int @default(0)
+  totalScore    Int @default(0)
+  easySolved    Int @default(0)
+  mediumSolved  Int @default(0)
+  hardSolved    Int @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch         Batch?              @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  squad         Squad?              @relation(fields: [squadId], references: [id], onDelete: SetNull)
+  batch         Batch?               @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  squad         Squad?               @relation(fields: [squadId], references: [id], onDelete: SetNull)
   submissions   Submission[]
   dailyStatuses DailyStatus[]
   syncState     StudentSyncState?
@@ -287,6 +318,7 @@ model Student {
   achievements  StudentAchievement[]
   entries       LeaderboardEntry[]
   notifications NotificationLog[]
+  blockers      Blocker[]
 
   @@index([squadId])
   @@index([batchId])
@@ -381,22 +413,22 @@ model AssignmentProblem {
 /// one would multiply provider calls for no benefit. We link to `Problem` only when
 /// the slug matches something we track.
 model Submission {
-  id        String @id @default(uuid()) @db.Uuid
-  studentId String @db.Uuid
+  id        String  @id @default(uuid()) @db.Uuid
+  studentId String  @db.Uuid
   problemId String? @db.Uuid
 
   /// LeetCode's submission id — the idempotency key for the mirror.
   providerSubmissionId String
   provider             String @default("leetcode")
 
-  titleSlug   String
-  title       String
-  status      ProblemStatus @default(ACCEPTED)
-  language    String?
+  titleSlug String
+  title     String
+  status    ProblemStatus @default(ACCEPTED)
+  language  String?
   /// Runtime and memory are not exposed by the public submission-list queries;
   /// nullable so an authenticated provider can populate them later without a migration.
-  runtime     String?
-  memory      String?
+  runtime   String?
+  memory    String?
 
   submittedAt DateTime
   /// Program-day bucket of `submittedAt`, precomputed so day queries never
@@ -426,20 +458,20 @@ model StudentSyncState {
 
   /// Newest submission timestamp already mirrored. The incremental sync stops
   /// walking the provider's list once it reaches this point.
-  lastSubmissionAt   DateTime?
+  lastSubmissionAt         DateTime?
   lastProviderSubmissionId String?
-  lastSyncedAt       DateTime?
-  lastSuccessAt      DateTime?
-  status             SyncStatus @default(NEVER_SYNCED)
-  lastError          String?
-  consecutiveFailures Int       @default(0)
-  totalSyncs         Int        @default(0)
+  lastSyncedAt             DateTime?
+  lastSuccessAt            DateTime?
+  status                   SyncStatus @default(NEVER_SYNCED)
+  lastError                String?
+  consecutiveFailures      Int        @default(0)
+  totalSyncs               Int        @default(0)
   /// Cached from the provider's aggregate stats — the student's all-time totals.
-  providerTotalSolved Int?
-  providerEasySolved  Int?
-  providerMediumSolved Int?
-  providerHardSolved   Int?
-  providerRanking      Int?
+  providerTotalSolved      Int?
+  providerEasySolved       Int?
+  providerMediumSolved     Int?
+  providerHardSolved       Int?
+  providerRanking          Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -466,31 +498,31 @@ model DailyStatus {
   assignedCount Int @default(0)
   solvedCount   Int @default(0)
 
-  score          Int  @default(0)
+  score          Int   @default(0)
   /// Labelled `ScoreComponent[]`, so the UI can explain a score without recomputing it.
   scoreBreakdown Json?
 
   /// When the student finished the *whole* assignment; null if they did not.
-  completedAt       DateTime?
+  completedAt      DateTime?
   /// Minute-of-day of `completedAt` in program time — the leaderboard tiebreaker.
-  completionMinute  Int?
-  firstSolvedAt     DateTime?
-  lastSolvedAt      DateTime?
+  completionMinute Int?
+  firstSolvedAt    DateTime?
+  lastSolvedAt     DateTime?
 
-  isPerfect     Boolean    @default(false)
-  streakAtDay   Int        @default(0)
-  syncStatus    SyncStatus @default(NEVER_SYNCED)
+  isPerfect      Boolean    @default(false)
+  streakAtDay    Int        @default(0)
+  syncStatus     SyncStatus @default(NEVER_SYNCED)
   /// Set when a mentor overrides the automatic result.
-  isOverridden  Boolean    @default(false)
-  overrideNote  String?
-  overriddenById String?   @db.Uuid
+  isOverridden   Boolean    @default(false)
+  overrideNote   String?
+  overriddenById String?    @db.Uuid
 
   computedAt DateTime @default(now())
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  student        Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  assignment     Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assignment      Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   problemStatuses DailyProblemStatus[]
 
   @@unique([studentId, dayKey])
@@ -566,11 +598,11 @@ model SquadLeaderboardEntry {
 
   rank              Int
   previousRank      Int?
-  memberCount       Int   @default(0)
-  averageCompletion Float @default(0)
-  totalSolved       Int   @default(0)
-  averageStreak     Float @default(0)
-  averageScore      Float @default(0)
+  memberCount       Int     @default(0)
+  averageCompletion Float   @default(0)
+  totalSolved       Int     @default(0)
+  averageStreak     Float   @default(0)
+  averageScore      Float   @default(0)
   isTied            Boolean @default(false)
 
   computedAt DateTime @default(now())
@@ -624,10 +656,10 @@ model SyncJob {
   failedStudents    Int @default(0)
   newSubmissions    Int @default(0)
 
-  startedAt  DateTime?
-  finishedAt DateTime?
-  durationMs Int?
-  error      String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  durationMs  Int?
+  error       String?
   /// Per-student failure detail, so "retry failed" knows exactly what to retry.
   errorDetail Json?
 
@@ -636,7 +668,7 @@ model SyncJob {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  triggeredBy User?          @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
+  triggeredBy User?         @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
   items       SyncJobItem[]
 
   @@index([status])
@@ -646,15 +678,15 @@ model SyncJob {
 }
 
 model SyncJobItem {
-  id        String     @id @default(uuid()) @db.Uuid
-  syncJobId String     @db.Uuid
-  studentId String     @db.Uuid
-  status    SyncStatus @default(NEVER_SYNCED)
-  newSubmissions Int   @default(0)
-  attempts  Int        @default(0)
-  error     String?
-  durationMs Int?
-  processedAt DateTime?
+  id             String     @id @default(uuid()) @db.Uuid
+  syncJobId      String     @db.Uuid
+  studentId      String     @db.Uuid
+  status         SyncStatus @default(NEVER_SYNCED)
+  newSubmissions Int        @default(0)
+  attempts       Int        @default(0)
+  error          String?
+  durationMs     Int?
+  processedAt    DateTime?
 
   createdAt DateTime @default(now())
 
@@ -672,11 +704,11 @@ model SyncJobItem {
 /// Achievement *rules* live in code (`@dsa/shared`); this table records only when a
 /// student first unlocked one, which is the part that cannot be recomputed.
 model StudentAchievement {
-  id          String   @id @default(uuid()) @db.Uuid
-  studentId   String   @db.Uuid
-  code        String
-  unlockedAt  DateTime @default(now())
-  notifiedAt  DateTime?
+  id         String    @id @default(uuid()) @db.Uuid
+  studentId  String    @db.Uuid
+  code       String
+  unlockedAt DateTime  @default(now())
+  notifiedAt DateTime?
 
   student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
@@ -788,4 +820,101 @@ model Setting {
   updatedAt DateTime @updatedAt
 
   @@map("settings")
+}
+
+// ---------------------------------------------------------------------------
+// Daily email reporting & follow-up
+// ---------------------------------------------------------------------------
+//
+// There is deliberately no `DailyReport` table. Every number a report shows — problems
+// assigned, who solved what, completion buckets — is reconstructable at any time from
+// `Assignment` + `DailyStatus` + `DailyProblemStatus` for the requested `dayKey`
+// (see `DailyEmailReportService`), exactly like the rest of the app's aggregates. Only
+// the two facts that cannot be recomputed are persisted here: what a mentor recorded
+// about a blocker, and what an approved email actually said when it was sent.
+
+/// A mentor's record of why a student did not finish a day's assignment, plus what was
+/// done about it. One row per student per day — a second submission for the same day
+/// updates the existing row rather than creating a duplicate.
+model Blocker {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @db.Uuid
+  /// `YYYY-MM-DD` in the program timezone — the same key `DailyStatus` uses.
+  dayKey    String
+
+  /// Snapshot of the student's outcome at the time this was recorded, so the entry
+  /// reads correctly even if a later sync changes `DailyStatus.solvedCount`.
+  solvedCount   Int
+  assignedCount Int
+
+  category    BlockerCategory @default(NO_BLOCKER)
+  description String?
+  actionTaken String?
+
+  followUpRequired Boolean   @default(false)
+  /// `YYYY-MM-DD`; optional even when `followUpRequired` is true.
+  followUpDate     String?
+  mentorNotes      String?
+  resolvedAt       DateTime?
+
+  recordedById String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  recordedBy User?   @relation("BlockerRecordedBy", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@unique([studentId, dayKey])
+  @@index([dayKey])
+  @@index([studentId])
+  @@map("blockers")
+}
+
+/// One generated daily report email, tracked through DRAFT → PENDING_APPROVAL →
+/// APPROVED → SENT (or FAILED). Rows are never mutated after `SENT` — the whole point
+/// of persisting `subjectFinal`/`bodyHtml` is that "View Previous Email" shows exactly
+/// what went out, even after later syncs change the underlying data. This table *is*
+/// the email history (§14): no separate log table.
+model EmailReport {
+  id     String            @id @default(uuid()) @db.Uuid
+  dayKey String
+  status EmailReportStatus @default(DRAFT)
+
+  fromEmail    String
+  toRecipients String[]
+  ccRecipients String[] @default([])
+
+  subject  String
+  bodyHtml String
+
+  /// The computed report (summary, buckets, action items, blocker counts) at the time
+  /// this email was generated — the source the HTML/CSV were rendered from. Kept so a
+  /// sent email's numbers can be explained without re-deriving them later.
+  snapshot Json
+
+  generatedById String?  @db.Uuid
+  generatedAt   DateTime @default(now())
+
+  approvedById String?   @db.Uuid
+  approvedAt   DateTime?
+
+  sentAt            DateTime?
+  providerMessageId String?
+  failedError       String?
+
+  /// Set when this row was created via "Send Again" after a prior SENT report for the
+  /// same day, so the history can show the chain instead of two unrelated rows.
+  supersedesId String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  generatedBy User? @relation("EmailReportGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
+  approvedBy  User? @relation("EmailReportApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@index([dayKey])
+  @@index([status])
+  @@index([dayKey, status])
+  @@map("email_reports")
 }
