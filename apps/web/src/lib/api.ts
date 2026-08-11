@@ -13,6 +13,9 @@ import type {
   AnalyticsOverview,
   AssignmentSummary,
   AuthUser,
+  BatchHistoryEntry,
+  BatchStats,
+  BatchSummary,
   BlockerRecord,
   DailyEmailReport,
   DashboardStats,
@@ -196,10 +199,29 @@ export const api = {
   logout: (refreshToken: string) =>
     apiFetch<void>('/auth/logout', { method: 'POST', body: { refreshToken } }),
 
-  dashboard: (dayKey?: string) => apiFetch<DashboardStats>(`/dashboard${qs({ dayKey })}`),
+  dashboard: (dayKey?: string, batch?: string) =>
+    apiFetch<DashboardStats>(`/dashboard${qs({ dayKey, batch })}`),
 
-  mentorDashboard: (dayKey?: string, squadId?: string) =>
-    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, squadId })}`),
+  mentorDashboard: (dayKey?: string, squadId?: string, batch?: string) =>
+    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, squadId, batch })}`),
+
+  // --- Batches ---------------------------------------------------------------
+
+  batches: () => apiFetch<BatchSummary[]>('/batches'),
+
+  batchStats: (dayKey?: string) => apiFetch<BatchStats[]>(`/batches/stats${qs({ dayKey })}`),
+
+  batchHistory: (studentId: string) =>
+    apiFetch<BatchHistoryEntry[]>(`/students/${studentId}/batch-history`),
+
+  moveStudentBatch: (studentId: string, toBatchId: string, reason?: string) =>
+    apiFetch<{
+      studentId: string;
+      name: string;
+      fromBatchId: string | null;
+      toBatchId: string;
+      history: BatchHistoryEntry[];
+    }>(`/students/${studentId}/move-batch`, { method: 'POST', body: { toBatchId, reason } }),
 
   students: (params: Record<string, string | number | undefined>) =>
     apiFetch<Paginated<StudentSummary>>(`/students${qs(params)}`),
@@ -208,7 +230,7 @@ export const api = {
 
   studentFilters: () =>
     apiFetch<{
-      batches: { id: string; name: string; studentCount: number }[];
+      batches: BatchSummary[];
       squads: { id: string; name: string; batchName: string | null; studentCount: number }[];
     }>('/students/filters'),
 
@@ -218,7 +240,9 @@ export const api = {
   updateStudent: (id: string, body: unknown) =>
     apiFetch<StudentSummary>(`/students/${id}`, { method: 'PATCH', body }),
 
-  deleteStudent: (id: string) => apiFetch<void>(`/students/${id}`, { method: 'DELETE' }),
+  /** Archives the student when they have history; deletes only when they have none. */
+  deleteStudent: (id: string) =>
+    apiFetch<{ deleted: boolean; archived: boolean }>(`/students/${id}`, { method: 'DELETE' }),
 
   importStudents: (file: File, updateExisting: boolean) => {
     const form = new FormData();
@@ -230,10 +254,18 @@ export const api = {
   assignments: (params: Record<string, string | number | undefined>) =>
     apiFetch<Paginated<AssignmentSummary>>(`/assignments${qs(params)}`),
 
-  todayAssignment: () => apiFetch<AssignmentSummary | null>('/assignments/today'),
+  /** Without a batch this returns every batch's set for today. */
+  todayAssignment: (batch?: string) =>
+    batch
+      ? apiFetch<AssignmentSummary | null>(`/assignments/today${qs({ batch })}`)
+      : apiFetch<AssignmentSummary[]>('/assignments/today'),
 
+  assignmentsForDay: (dayKey: string) =>
+    apiFetch<AssignmentSummary[]>(`/assignments/day/${dayKey}`),
+
+  /** Returns one assignment per batch targeted. */
   createAssignment: (body: unknown) =>
-    apiFetch<AssignmentSummary>('/assignments', { method: 'POST', body }),
+    apiFetch<AssignmentSummary[]>('/assignments', { method: 'POST', body }),
 
   previewProblem: (url: string) =>
     apiFetch<{ title: string; difficulty: string; acceptanceRate: number | null; topicTags: string[] }>(
@@ -247,8 +279,8 @@ export const api = {
   squadLeaderboard: (params: Record<string, string | number | undefined>) =>
     apiFetch<SquadLeaderboardRow[]>(`/leaderboard/squads${qs(params)}`),
 
-  analytics: (from?: string, to?: string) =>
-    apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to })}`),
+  analytics: (from?: string, to?: string, batch?: string) =>
+    apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to, batch })}`),
 
   startSync: (body: { mode?: string; dayKey?: string } = {}) =>
     apiFetch<SyncJobSummary>('/sync', { method: 'POST', body }),
@@ -278,12 +310,19 @@ export const api = {
 
   // --- Daily email reporting -------------------------------------------------
 
-  dailyEmailReport: (dayKey: string, squadId?: string) =>
-    apiFetch<DailyEmailReport>(`/reports/daily/${dayKey}${qs({ squadId })}`),
+  dailyEmailReport: (dayKey: string, squadId?: string, batch?: string) =>
+    apiFetch<DailyEmailReport>(`/reports/daily/${dayKey}${qs({ squadId, batch })}`),
 
   generateEmail: (
     dayKey: string,
-    body: { fromEmail: string; toRecipients: string[]; ccRecipients?: string[]; subject?: string },
+    body: {
+      fromEmail: string;
+      toRecipients: string[];
+      ccRecipients?: string[];
+      subject?: string;
+      /** Omit for the overall report; supply to generate a single batch's report. */
+      batchId?: string;
+    },
   ) => apiFetch<EmailReportRecord>(`/reports/daily/${dayKey}/generate-email`, { method: 'POST', body }),
 
   previewEmail: (body: {
@@ -303,12 +342,14 @@ export const api = {
       body: { emailReportId, force },
     }),
 
-  emailHistory: (params: { dayKey?: string; status?: string; page?: number; pageSize?: number } = {}) =>
+  emailHistory: (
+    params: { dayKey?: string; status?: string; batch?: string; page?: number; pageSize?: number } = {},
+  ) =>
     apiFetch<Paginated<EmailReportRecord>>(`/reports/email/history${qs(params)}`),
 
-  emailStatus: (dayKey: string) =>
+  emailStatus: (dayKey: string, batch?: string) =>
     apiFetch<{ sent: EmailReportRecord | null; latest: EmailReportRecord | null }>(
-      `/reports/email/status${qs({ dayKey })}`,
+      `/reports/email/status${qs({ dayKey, batch })}`,
     ),
 
   emailReport: (id: string) => apiFetch<EmailReportRecord>(`/reports/email/${id}`),

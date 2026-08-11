@@ -18,8 +18,10 @@ import {
   calculateAssignmentCompletion,
   computeDailyScore,
   computeStreaks,
+  isCurrentStudent,
   isPerfectDay,
   rankEntries,
+  selectAssignmentForBatch,
   rankSquads,
   type AssignedProblemRef,
   type CompletionSubmission,
@@ -37,6 +39,7 @@ import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringConfigService } from './scoring-config.service';
 import { StudentMetricsService } from './student-metrics.service';
+import { BatchesService } from '../batches/batches.service';
 
 /** How far back streak computation looks. Beyond this, a streak is not meaningfully "current". */
 const STREAK_HISTORY_DAYS = 400;
@@ -67,6 +70,7 @@ export class RollupService {
     private readonly time: ProgramTimeService,
     private readonly scoringConfig: ScoringConfigService,
     private readonly metrics: StudentMetricsService,
+    private readonly batches: BatchesService,
   ) {}
 
   /**
@@ -76,7 +80,10 @@ export class RollupService {
   async recomputeDay(dayKey: DayKey): Promise<{ students: number; assigned: number }> {
     const config = await this.scoringConfig.getActive();
 
-    const assignment = await this.prisma.assignment.findUnique({
+    // Every batch's set for the day, plus any pre-batch (batch-less) row. Which one
+    // applies to a given student is decided per student below, from the batch they were
+    // in *that day* — never from the batch they are in now.
+    const assignments = await this.prisma.assignment.findMany({
       where: { dayKey },
       include: { problems: { include: { problem: true }, orderBy: { position: 'asc' } } },
     });
@@ -87,18 +94,34 @@ export class RollupService {
         id: true,
         leetcodeUsername: true,
         createdAt: true,
+        batchId: true,
         syncState: { select: { status: true } },
       },
     });
 
-    // A day with no assignment still gets rows, all with assignedCount 0. Those days
-    // are neutral for streaks and must not be confused with "assigned but missed".
-    const assignedProblems = assignment?.problems ?? [];
-    const assignedCount = assignedProblems.length;
+    // The historical placement of every student on this day, resolved in one query.
+    const historicalBatch = await this.batches.batchOnDayForStudents(
+      students.map((student) => student.id),
+      dayKey,
+    );
 
-    const results = assignment
-      ? await this.evaluateDay(dayKey, assignedProblems)
-      : new Map<string, StudentDayResult>();
+    // Evaluate once per distinct problem set rather than once per student: the students
+    // in a batch all face the same problems, and the submission scan is the expensive part.
+    const resultsByAssignment = new Map<string, Map<string, StudentDayResult>>();
+    for (const assignment of assignments) {
+      resultsByAssignment.set(
+        assignment.id,
+        await this.evaluateDay(dayKey, assignment.problems),
+      );
+    }
+
+    const difficultyByProblem = new Map<string, Difficulty>(
+      assignments.flatMap((assignment) =>
+        assignment.problems.map(
+          (link) => [link.problem.id, link.problem.difficulty as Difficulty] as const,
+        ),
+      ),
+    );
 
     // Streaks need history, so load the window once for everyone rather than per student.
     const historyFrom = this.time.addDays(dayKey, -STREAK_HISTORY_DAYS);
@@ -118,12 +141,25 @@ export class RollupService {
       historyByStudent.set(row.studentId, list);
     }
 
-    const difficultyBySlug = new Map<string, Difficulty>(
-      assignedProblems.map((link) => [link.problem.id, link.problem.difficulty as Difficulty]),
-    );
-
     for (const student of students) {
-      const result = results.get(student.id);
+      // The batch that was true on this day. A student with no recorded placement by
+      // then genuinely had none — their current batch is not a substitute, because using
+      // it would re-file a closed day under a batch they joined later (§7).
+      const batchIdOnDay = historicalBatch.get(student.id) ?? null;
+
+      // Only this student's batch's set is a candidate, plus the pre-batch row that
+      // applied to everyone. Another batch's problems are never considered.
+      const assignment = selectAssignmentForBatch(assignments, batchIdOnDay);
+
+      // A day with no assignment for this student's batch still gets a row, with
+      // assignedCount 0. Those days are neutral for streaks and must not be confused
+      // with "assigned but missed".
+      const assignedProblems = assignment?.problems ?? [];
+      const assignedCount = assignedProblems.length;
+
+      const result = assignment
+        ? resultsByAssignment.get(assignment.id)?.get(student.id)
+        : undefined;
       const solvedCount = result?.solvedCount ?? 0;
 
       const days = [...(historyByStudent.get(student.id) ?? [])];
@@ -140,7 +176,7 @@ export class RollupService {
 
       const solvedDifficulties = (result?.problemStatuses ?? [])
         .filter((p) => p.status === 'ACCEPTED')
-        .map((p) => difficultyBySlug.get(p.problemId) ?? 'MEDIUM');
+        .map((p) => difficultyByProblem.get(p.problemId) ?? 'MEDIUM');
 
       const score = computeDailyScore(
         {
@@ -161,6 +197,7 @@ export class RollupService {
         studentId: student.id,
         dayKey,
         assignmentId: assignment?.id ?? null,
+        batchId: batchIdOnDay,
         assignedCount,
         solvedCount,
         score: score.total,
@@ -179,11 +216,12 @@ export class RollupService {
     await this.cache.delByPrefix(`dashboard:${dayKey}`);
     await this.cache.delByPrefix(`mentor:${dayKey}`);
 
+    const totalAssigned = assignments.reduce((n, a) => n + a.problems.length, 0);
     this.logger.log(
-      `Recomputed ${dayKey}: ${students.length} students, ${assignedCount} problems assigned`,
+      `Recomputed ${dayKey}: ${students.length} students across ${assignments.length} assignment set(s), ${totalAssigned} problems assigned in total`,
     );
 
-    return { students: students.length, assigned: assignedCount };
+    return { students: students.length, assigned: totalAssigned };
   }
 
   /**
@@ -275,12 +313,22 @@ export class RollupService {
       where: { dayKey: { gte: from, lte: to } },
       include: {
         student: {
-          select: { id: true, name: true, currentStreak: true, squadId: true, status: true },
+          select: {
+            id: true,
+            name: true,
+            currentStreak: true,
+            squadId: true,
+            batchId: true,
+            status: true,
+          },
         },
       },
     });
 
-    const active = rows.filter((row) => row.student.status === 'ACTIVE');
+    // Archived students are out of the current programme, so they are out of the current
+    // leaderboard (§12, §24) — while their existing `LeaderboardEntry` rows for past
+    // periods stay untouched, keeping historical standings correct.
+    const active = rows.filter((row) => isCurrentStudent(row.student.status));
 
     const byStudent = new Map<
       string,
@@ -293,6 +341,7 @@ export class RollupService {
         streak: number;
         completionMinute: number | null;
         squadId: string | null;
+        batchId: string | null;
       }
     >();
 
@@ -306,6 +355,7 @@ export class RollupService {
         streak: row.student.currentStreak,
         completionMinute: null,
         squadId: row.student.squadId,
+        batchId: null,
       };
 
       entry.score += row.score;
@@ -319,12 +369,21 @@ export class RollupService {
         entry.completionMinute = row.completionMinute;
       }
 
+      // The batch this ranking belongs to is the one the student was in on the period's
+      // closing day — a historical fact taken from `DailyStatus`, not from the student's
+      // current batch, so re-ranking an old period after a move keeps the old grouping.
+      if (row.batchId !== null && (entry.batchId === null || row.dayKey === to)) {
+        entry.batchId = row.batchId;
+      }
+
       byStudent.set(row.studentId, entry);
     }
 
-    const rankable: (RankableEntry & { squadId: string | null; assignedCount: number })[] = [
-      ...byStudent,
-    ].map(([id, entry]) => ({
+    const rankable: (RankableEntry & {
+      squadId: string | null;
+      batchId: string | null;
+      assignedCount: number;
+    })[] = [...byStudent].map(([id, entry]) => ({
       id,
       displayName: entry.name,
       score: entry.score,
@@ -334,6 +393,7 @@ export class RollupService {
       consistency:
         entry.assigned > 0 ? Math.round((entry.solved / entry.assigned) * 10000) / 100 : 0,
       squadId: entry.squadId,
+      batchId: entry.batchId,
       assignedCount: entry.assigned,
     }));
 
@@ -353,6 +413,7 @@ export class RollupService {
           period,
           periodKey,
           studentId: row.entry.id,
+          batchId: row.entry.batchId,
           rank: row.rank,
           previousRank: previousRanks.get(row.entry.id) ?? null,
           score: Math.round(row.entry.score),
@@ -371,7 +432,11 @@ export class RollupService {
   private async buildSquadLeaderboard(
     period: 'DAILY' | 'WEEKLY' | 'MONTHLY',
     periodKey: string,
-    students: (RankableEntry & { squadId: string | null; assignedCount: number })[],
+    students: (RankableEntry & {
+      squadId: string | null;
+      batchId: string | null;
+      assignedCount: number;
+    })[],
   ): Promise<void> {
     const squads = await this.prisma.squad.findMany({ select: { id: true, name: true } });
 
@@ -547,6 +612,7 @@ export class RollupService {
     studentId: string;
     dayKey: DayKey;
     assignmentId: string | null;
+    batchId: string | null;
     assignedCount: number;
     solvedCount: number;
     score: number;
@@ -562,15 +628,25 @@ export class RollupService {
   }): Promise<void> {
     const existing = await this.prisma.dailyStatus.findUnique({
       where: { studentId_dayKey: { studentId: input.studentId, dayKey: input.dayKey } },
-      select: { id: true, isOverridden: true },
+      select: { id: true, isOverridden: true, batchId: true },
     });
 
     // A mentor's manual override is authoritative. Recomputing must never silently
     // undo a deliberate correction.
     if (existing?.isOverridden) return;
 
+    // The historical batch is written once and then frozen (§7).
+    //
+    // Recomputing 10 Aug after a student moved on 15 Aug must not re-file 10 Aug under
+    // the new batch. `batchOnDayForStudents` already returns the correct historical
+    // answer, so this is belt-and-braces — but it is the guarantee that holds even if a
+    // placement row is later corrected or back-dated, which is exactly the case where a
+    // recompute would otherwise quietly rewrite a closed day.
+    const batchId = existing?.batchId ?? input.batchId;
+
     const data = {
       assignmentId: input.assignmentId,
+      batchId,
       assignedCount: input.assignedCount,
       solvedCount: input.solvedCount,
       score: input.score,
@@ -590,6 +666,7 @@ export class RollupService {
       create: { studentId: input.studentId, dayKey: input.dayKey, ...data },
       update: data,
     });
+
 
     if (input.problemStatuses.length === 0) return;
 

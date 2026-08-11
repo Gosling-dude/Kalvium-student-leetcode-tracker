@@ -83,13 +83,10 @@ function summaryTable(report: DailyEmailReport): string {
     </table>`;
 }
 
-function problemsList(report: DailyEmailReport): string {
-  if (report.problems.length === 0) {
-    return `<p style="margin:0; font-size:14px; color:${COLORS.muted};">No problems were assigned this day.</p>`;
-  }
+function problemItems(problems: DailyEmailReport['problems']): string {
   return `
     <ol style="margin:0; padding-left:20px; font-size:14px; color:${COLORS.text};">
-      ${report.problems
+      ${problems
         .map(
           (p) => `
         <li style="margin-bottom:8px;">
@@ -100,6 +97,64 @@ function problemsList(report: DailyEmailReport): string {
         )
         .join('')}
     </ol>`;
+}
+
+/**
+ * The assigned problems, per batch.
+ *
+ * An overall report covering batches with different sets prints one labelled block per
+ * batch rather than a single merged list — a merged list would read as though every
+ * student was given all of them (§4, §13).
+ */
+function problemsList(report: DailyEmailReport): string {
+  const sections = report.batchSections.filter((s) => s.problems.length > 0);
+
+  if (sections.length === 0) {
+    return `<p style="margin:0; font-size:14px; color:${COLORS.muted};">No problems were assigned this day.</p>`;
+  }
+
+  if (sections.length === 1 && !sections[0]!.batchName) {
+    return problemItems(sections[0]!.problems);
+  }
+
+  return sections
+    .map(
+      (batchSection) => `
+      <div style="margin-bottom:18px;">
+        <h3 style="margin:0 0 6px; font-size:14px; color:${COLORS.text};">
+          ${escapeHtml(batchSection.batchName ?? 'All students')}
+          <span style="font-weight:400; color:${COLORS.muted};">
+            — ${batchSection.assignedCount} assigned · ${batchSection.studentsTracked} student(s) · ${batchSection.completionPercent}% complete
+          </span>
+        </h3>
+        ${problemItems(batchSection.problems)}
+      </div>`,
+    )
+    .join('');
+}
+
+/** Per-batch headline counts, so each batch's distribution is legible on its own (§10). */
+function batchBreakdownTable(report: DailyEmailReport): string {
+  if (report.batchSections.length <= 1) return '';
+
+  const rows = report.batchSections
+    .map((batchSection) => {
+      const buckets = batchSection.buckets
+        .map((bucket) => `${bucket.label}: <strong>${bucket.count}</strong>`)
+        .join(' &middot; ');
+      return `
+        <tr>
+          <td style="padding:8px 0; font-size:14px; color:${COLORS.text}; border-bottom:1px solid ${COLORS.border};">
+            <strong>${escapeHtml(batchSection.batchName ?? 'Unassigned')}</strong>
+            <span style="color:${COLORS.muted};"> — ${batchSection.assignedCount} assigned, ${batchSection.studentsTracked} student(s)</span>
+            <br/>
+            <span style="font-size:13px; color:${COLORS.muted};">${buckets}</span>
+          </td>
+        </tr>`;
+    })
+    .join('');
+
+  return `<table role="presentation" width="100%" style="border-collapse:collapse;">${rows}</table>`;
 }
 
 function studentTable(report: DailyEmailReport): string {
@@ -197,7 +252,7 @@ export function buildDailyReportEmailHtml(report: DailyEmailReport): string {
       : 'No assignment was published for this day, so there is nothing to report.';
     return wrap(`
       <tr><td style="padding:8px 0 24px;">
-        <h1 style="margin:0 0 8px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report — ${escapeHtml(summary.dayLabelShort)}</h1>
+        <h1 style="margin:0 0 8px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report${summary.batchName ? ` — ${escapeHtml(summary.batchName)}` : ''} — ${escapeHtml(summary.dayLabelShort)}</h1>
         <p style="margin:0; font-size:14px; color:${COLORS.muted};">${escapeHtml(reason)}</p>
       </td></tr>
     `);
@@ -206,13 +261,22 @@ export function buildDailyReportEmailHtml(report: DailyEmailReport): string {
   return wrap(`
     <tr><td style="padding:8px 0 4px;">
       <h1 style="margin:0 0 4px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report</h1>
-      <p style="margin:0; font-size:14px; color:${COLORS.muted};">${escapeHtml(summary.dayLabelLong)}</p>
+      <p style="margin:0; font-size:14px; color:${COLORS.muted};">
+        ${summary.batchName ? `${escapeHtml(summary.batchName)} &middot; ` : ''}${escapeHtml(summary.dayLabelLong)}
+      </p>
     </td></tr>
     <tr><td style="padding:16px 0 0; font-size:14px; color:${COLORS.text};">
       Hello Team,<br/><br/>
-      Here is the DSA assignment progress report for ${escapeHtml(summary.dayLabelLong)}.
+      Here is the DSA assignment progress report for ${escapeHtml(summary.dayLabelLong)}${
+        summary.batchName ? ` (${escapeHtml(summary.batchName)})` : ''
+      }.
     </td></tr>
     ${section('Assignment Summary', summaryTable(report))}
+    ${
+      report.batchSections.length > 1
+        ? section('Batch Breakdown', batchBreakdownTable(report))
+        : ''
+    }
     ${section('Assigned Problems', problemsList(report))}
     ${section('Student Performance', studentTable(report))}
     ${section('Action Items for Campus Team', actionItems(report))}

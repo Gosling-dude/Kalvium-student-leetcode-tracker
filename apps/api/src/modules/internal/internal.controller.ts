@@ -49,9 +49,15 @@ export class InternalController {
   @Post('daily-report')
   @HttpCode(200)
   async dailyReport(@Body() body: { dayKey?: string }) {
-    const result = await this.tasks.runDailyReportGeneration(body?.dayKey);
-    return result
-      ? { ok: true, ran: true, emailReport: result }
-      : { ok: true, ran: false, reason: 'EMAIL_FROM / EMAIL_DEFAULT_TO are not configured.' };
+    // One report per active batch; an empty result means nothing could be generated.
+    const reports = await this.tasks.runDailyReportGeneration(body?.dayKey);
+    return reports.length > 0
+      ? { ok: true, ran: true, generated: reports.length, emailReports: reports }
+      : {
+          ok: true,
+          ran: false,
+          reason:
+            'No reports were generated — check that EMAIL_FROM / EMAIL_DEFAULT_TO are configured.',
+        };
   }
 }

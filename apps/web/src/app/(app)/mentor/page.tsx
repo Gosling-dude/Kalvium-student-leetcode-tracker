@@ -4,10 +4,16 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Download, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { SYNC_STATUS_LABELS, isTrustworthySync, type MentorBucket } from '@dsa/shared';
+import {
+  SYNC_STATUS_LABELS,
+  isTrustworthySync,
+  type MentorBatchSection,
+  type MentorBucket,
+} from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
 import { todayKey } from '@/lib/utils';
+import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
 import {
   Badge,
   Button,
@@ -29,18 +35,21 @@ import {
 export default function MentorPage() {
   const [dayKey, setDayKey] = useState(todayKey());
   const [exporting, setExporting] = useState(false);
+  const { selected: batch } = useBatchFilter();
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['mentor', dayKey],
-    queryFn: () => api.mentorDashboard(dayKey),
+    queryKey: ['mentor', dayKey, batch],
+    queryFn: () => api.mentorDashboard(dayKey, undefined, batch ?? undefined),
   });
 
   const onExport = async (): Promise<void> => {
     setExporting(true);
     try {
+      // The export follows the filter: what you are looking at is what you download.
+      const scope = batch ? `&batch=${encodeURIComponent(batch)}` : '';
       await downloadFile(
-        `/reports/export/daily?dayKey=${dayKey}&format=XLSX`,
-        `daily-report-${dayKey}.xlsx`,
+        `/reports/export/daily?dayKey=${dayKey}&format=XLSX${scope}`,
+        `daily-report-${dayKey}${batch ? `-${batch}` : ''}.xlsx`,
       );
       toast.success('Report downloaded');
     } catch (err) {
@@ -61,7 +70,8 @@ export default function MentorPage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <BatchFilter />
           <label htmlFor="dayKey" className="sr-only">
             Date
           </label>
@@ -85,7 +95,7 @@ export default function MentorPage() {
         </Card>
       ) : error ? (
         <ErrorState error={error} onRetry={() => void refetch()} />
-      ) : !data ? null : !data.assignment ? (
+      ) : !data ? null : data.sections.filter((s) => s.assignedCount > 0).length === 0 ? (
         <Card>
           <EmptyState
             title={`No assignment on ${dayKey}`}
@@ -93,15 +103,39 @@ export default function MentorPage() {
           />
         </Card>
       ) : (
-        data.buckets.map((bucket) => (
-          <BucketTable
-            key={bucket.solvedCount}
-            bucket={bucket}
-            assignedCount={data.assignment?.problems.length ?? 4}
-          />
-        ))
+        /*
+          One block per batch, each bucketed against its *own* problem count. A single
+          merged list would report a student who cleared their batch's 4 problems as
+          incomplete on a day the other batch was given 5 (§10).
+        */
+        data.sections
+          .filter((section) => section.assignedCount > 0)
+          .map((section) => <BatchSectionTables key={section.batchId ?? 'none'} section={section} />)
       )}
     </div>
+  );
+}
+
+/** One batch's heading plus its "solved N" tables. */
+function BatchSectionTables({ section }: { section: MentorBatchSection }) {
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
+        <BatchChip code={section.batchCode} name={section.batchName} />
+        <h2 className="text-base font-semibold">{section.batchName ?? 'No batch'}</h2>
+        <span className="text-sm text-[var(--color-fg-muted)]">
+          {section.assignedCount} assigned · {section.totalStudents} student
+          {section.totalStudents === 1 ? '' : 's'}
+        </span>
+      </div>
+      {section.buckets.map((bucket) => (
+        <BucketTable
+          key={bucket.solvedCount}
+          bucket={bucket}
+          assignedCount={section.assignedCount}
+        />
+      ))}
+    </section>
   );
 }
 
@@ -166,14 +200,18 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
                   </Td>
                   <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
                   <Td>
-                    <a
-                      href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="font-mono text-xs hover:text-[var(--color-brand)]"
-                    >
-                      {student.leetcodeUsername}
-                    </a>
+                    {student.leetcodeUsername ? (
+                      <a
+                        href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="font-mono text-xs hover:text-[var(--color-brand)]"
+                      >
+                        {student.leetcodeUsername}
+                      </a>
+                    ) : (
+                      <span className="text-xs text-[var(--color-fg-subtle)]">No handle linked</span>
+                    )}
                     {untrusted ? (
                       <Badge tone="danger" className="ml-2">
                         {SYNC_STATUS_LABELS[student.syncStatus]}

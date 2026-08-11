@@ -5,6 +5,7 @@ import {
   evaluateAchievements,
   heatmapIntensity,
   levelProgress,
+  type BatchHistoryEntry,
   type Paginated,
   type StudentProfile,
   type StudentSummary,
@@ -28,7 +29,7 @@ const SORTABLE = [
 ] as const;
 
 type StudentWithRelations = Student & {
-  batch: { id: string; name: string } | null;
+  batch: { id: string; name: string; code: string } | null;
   squad: { id: string; name: string } | null;
   syncState: { status: string; lastSyncedAt: Date | null } | null;
 };
@@ -79,11 +80,27 @@ export class StudentsService {
         name: dto.name,
         email: dto.email.toLowerCase(),
         phone: dto.phone ?? null,
-        leetcodeUsername: dto.leetcodeUsername.toLowerCase(),
+        leetcodeUsername: dto.leetcodeUsername?.toLowerCase() ?? null,
         batchId: dto.batchId ?? null,
         squadId: dto.squadId ?? null,
+        cohort: dto.cohort ?? null,
+        maxBeltLevel: dto.maxBeltLevel ?? null,
         status: dto.status ?? 'ACTIVE',
         syncState: { create: { status: 'NEVER_SYNCED' } },
+        // A student created straight into a batch starts their placement history there,
+        // so a later report about today can resolve their batch without guessing.
+        ...(dto.batchId
+          ? {
+              batchHistory: {
+                create: {
+                  toBatchId: dto.batchId,
+                  effectiveFromDayKey: this.time.today(),
+                  source: 'MANUAL' as const,
+                  reason: 'Initial placement at creation',
+                },
+              },
+            }
+          : {}),
       },
       include: { batch: true, squad: true, syncState: true },
     });
@@ -91,11 +108,25 @@ export class StudentsService {
   }
 
   async update(id: string, dto: UpdateStudentDto): Promise<StudentSummary> {
-    await this.assertExists(id);
+    const before = await this.prisma.student.findUnique({
+      where: { id },
+      select: { id: true, batchId: true, status: true },
+    });
+    if (!before) throw new NotFoundException(`Student ${id} was not found`);
 
     // Changing the LeetCode handle invalidates the sync cursor: submissions already
     // mirrored belong to the *old* account, and the new one must be re-read from scratch.
     const usernameChanged = dto.leetcodeUsername !== undefined;
+
+    // A batch change through this route is still a batch change: it must leave the same
+    // history trail as `POST /students/:id/move-batch`, or a placement made here would
+    // be invisible to every historical query.
+    const batchChanged = dto.batchId !== undefined && dto.batchId !== before.batchId;
+
+    // Archiving through this route records *when*, so "removed from the programme" is a
+    // dated fact rather than an inference from the current status.
+    const archiving = dto.status === 'ARCHIVED' && before.status !== 'ARCHIVED';
+    const unarchiving = dto.status !== undefined && dto.status !== 'ARCHIVED' && before.status === 'ARCHIVED';
 
     const student = await this.prisma.student.update({
       where: { id },
@@ -108,6 +139,23 @@ export class StudentsService {
           : {}),
         ...(dto.batchId !== undefined ? { batchId: dto.batchId } : {}),
         ...(dto.squadId !== undefined ? { squadId: dto.squadId } : {}),
+        ...(dto.cohort !== undefined ? { cohort: dto.cohort } : {}),
+        ...(dto.maxBeltLevel !== undefined ? { maxBeltLevel: dto.maxBeltLevel } : {}),
+        ...(archiving ? { archivedAt: new Date() } : {}),
+        ...(unarchiving ? { archivedAt: null, archivedReason: null } : {}),
+        ...(batchChanged
+          ? {
+              batchHistory: {
+                create: {
+                  fromBatchId: before.batchId,
+                  toBatchId: dto.batchId ?? null,
+                  effectiveFromDayKey: this.time.today(),
+                  source: 'MANUAL' as const,
+                  reason: 'Batch changed via student update',
+                },
+              },
+            }
+          : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(usernameChanged
           ? {
@@ -132,14 +180,66 @@ export class StudentsService {
     return this.toSummary(student as StudentWithRelations);
   }
 
-  async remove(id: string): Promise<void> {
+  /**
+   * Delete a student outright — only when there is genuinely nothing to lose.
+   *
+   * A student with any history (submissions, daily statuses, leaderboard entries,
+   * blockers, batch placements) is archived instead, because deleting them cascades that
+   * history away and LeetCode cannot give it back: the provider exposes only the 20 most
+   * recent submissions, so the local mirror is the sole copy of anything older (§2, §24,
+   * §29). Callers that want a student gone from current views get exactly that from
+   * archiving; nobody needs the rows destroyed.
+   */
+  async remove(id: string): Promise<{ deleted: boolean; archived: boolean }> {
     await this.assertExists(id);
+
+    if (await this.hasHistory(id)) {
+      await this.archive(id, 'Removed via admin delete — archived because history exists');
+      return { deleted: false, archived: true };
+    }
+
     await this.prisma.student.delete({ where: { id } });
+    return { deleted: true, archived: false };
   }
 
-  async removeMany(ids: string[]): Promise<number> {
-    const result = await this.prisma.student.deleteMany({ where: { id: { in: ids } } });
-    return result.count;
+  async removeMany(ids: string[]): Promise<{ deleted: number; archived: number }> {
+    let deleted = 0;
+    let archived = 0;
+    for (const id of ids) {
+      const result = await this.remove(id).catch(() => null);
+      if (!result) continue;
+      if (result.deleted) deleted += 1;
+      if (result.archived) archived += 1;
+    }
+    return { deleted, archived };
+  }
+
+  /**
+   * Archive a student out of the current programme, keeping every historical record.
+   *
+   * This is what "remove a student" means in this system. Their submissions, daily
+   * statuses, streak history, leaderboard entries and email history all stay exactly as
+   * they are; only their membership of the *current* roster ends, which is what removes
+   * them from active counts, the dashboard, the daily tracker, leaderboards, new
+   * assignments and daily emails.
+   */
+  async archive(id: string, reason: string): Promise<void> {
+    await this.prisma.student.update({
+      where: { id },
+      data: { status: 'ARCHIVED', archivedAt: new Date(), archivedReason: reason },
+    });
+  }
+
+  /** Whether anything irreplaceable hangs off this student. */
+  private async hasHistory(id: string): Promise<boolean> {
+    const [submissions, statuses, entries, blockers, placements] = await Promise.all([
+      this.prisma.submission.count({ where: { studentId: id } }),
+      this.prisma.dailyStatus.count({ where: { studentId: id } }),
+      this.prisma.leaderboardEntry.count({ where: { studentId: id } }),
+      this.prisma.blocker.count({ where: { studentId: id } }),
+      this.prisma.studentBatchHistory.count({ where: { studentId: id } }),
+    ]);
+    return submissions + statuses + entries + blockers + placements > 0;
   }
 
   /** Bulk reassignment — the operation mentors actually perform on a selection. */
@@ -147,6 +247,18 @@ export class StudentsService {
     ids: string[],
     changes: { squadId?: string | null; batchId?: string | null; status?: string },
   ): Promise<number> {
+    const today = this.time.today();
+
+    // A bulk batch change has to write one history row per student, so it cannot be a
+    // single `updateMany`. Read the previous batches first, then write both sides.
+    const previous =
+      changes.batchId !== undefined
+        ? await this.prisma.student.findMany({
+            where: { id: { in: ids } },
+            select: { id: true, batchId: true },
+          })
+        : [];
+
     const result = await this.prisma.student.updateMany({
       where: { id: { in: ids } },
       data: {
@@ -155,8 +267,24 @@ export class StudentsService {
         ...(changes.status !== undefined
           ? { status: changes.status as Student['status'] }
           : {}),
+        ...(changes.status === 'ARCHIVED' ? { archivedAt: new Date() } : {}),
       },
     });
+
+    const moved = previous.filter((student) => student.batchId !== changes.batchId);
+    if (moved.length > 0) {
+      await this.prisma.studentBatchHistory.createMany({
+        data: moved.map((student) => ({
+          studentId: student.id,
+          fromBatchId: student.batchId,
+          toBatchId: changes.batchId ?? null,
+          effectiveFromDayKey: today,
+          source: 'MANUAL' as const,
+          reason: 'Bulk batch reassignment',
+        })),
+      });
+    }
+
     return result.count;
   }
 
@@ -171,7 +299,7 @@ export class StudentsService {
     const today = this.time.today();
     const from = this.time.addDays(today, -(days - 1));
 
-    const [statuses, notes, achievements] = await this.prisma.$transaction([
+    const [statuses, notes, achievements, placements] = await this.prisma.$transaction([
       this.prisma.dailyStatus.findMany({
         where: { studentId: id, dayKey: { gte: from, lte: today } },
         orderBy: { dayKey: 'asc' },
@@ -182,6 +310,14 @@ export class StudentsService {
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.studentAchievement.findMany({ where: { studentId: id } }),
+      this.prisma.studentBatchHistory.findMany({
+        where: { studentId: id },
+        include: {
+          fromBatch: { select: { name: true, code: true } },
+          toBatch: { select: { name: true, code: true } },
+        },
+        orderBy: [{ effectiveFromDayKey: 'desc' }, { changedAt: 'desc' }],
+      }),
     ]);
 
     const week = this.time.weekBounds(today);
@@ -247,6 +383,24 @@ export class StudentsService {
       totalSolved: totalLeetcodeSolved,
       currentStreak: dsaStreak.current,
       levelProgress: levelProgress(student.totalScore),
+      batchHistory: placements.map(
+        (row): BatchHistoryEntry => ({
+          id: row.id,
+          studentId: row.studentId,
+          fromBatchId: row.fromBatchId,
+          fromBatchName: row.fromBatch?.name ?? null,
+          fromBatchCode: row.fromBatch?.code ?? null,
+          toBatchId: row.toBatchId,
+          toBatchName: row.toBatch?.name ?? null,
+          toBatchCode: row.toBatch?.code ?? null,
+          effectiveFromDayKey: row.effectiveFromDayKey,
+          reason: row.reason,
+          source: row.source,
+          changedById: row.changedById,
+          changedByName: row.changedByName,
+          changedAt: row.changedAt.toISOString(),
+        }),
+      ),
       achievements: evaluated,
       difficultyBreakdown: {
         easy: student.easySolved,
@@ -318,8 +472,10 @@ export class StudentsService {
   async getFilterOptions() {
     const [batches, squads] = await this.prisma.$transaction([
       this.prisma.batch.findMany({
-        orderBy: { name: 'asc' },
-        include: { _count: { select: { students: true } } },
+        where: { status: 'ACTIVE' },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        // Archived students have left the programme and are not part of a batch's size.
+        include: { _count: { select: { students: { where: { status: 'ACTIVE' } } } } },
       }),
       this.prisma.squad.findMany({
         orderBy: { name: 'asc' },
@@ -335,6 +491,10 @@ export class StudentsService {
       batches: batches.map((b) => ({
         id: b.id,
         name: b.name,
+        code: b.code,
+        description: b.description,
+        status: b.status,
+        sortOrder: b.sortOrder,
         studentCount: b._count.students,
         startDate: b.startDate?.toISOString() ?? null,
         isActive: b.isActive,
@@ -354,12 +514,29 @@ export class StudentsService {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Which students a query may see.
+   *
+   * The default excludes archived students: they have left the programme, and a plain
+   * `GET /students` is a question about the *current* roster (§21, §24). They are
+   * reachable only by asking for them explicitly — `status=ARCHIVED` for just them, or
+   * `includeArchived=true` alongside everyone else — so no screen shows them by
+   * accident while every historical record still points at them.
+   */
   private buildWhere(query: StudentQueryDto): Prisma.StudentWhereInput {
     const search = query.search?.trim();
 
+    const archiveScope: Prisma.StudentWhereInput = query.status
+      ? {} // An explicit status filter is the caller naming exactly what they want.
+      : query.includeArchived
+        ? {}
+        : { status: { not: 'ARCHIVED' } };
+
     return {
+      ...archiveScope,
       ...(query.squadId ? { squadId: query.squadId } : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
+      ...(query.cohort !== undefined ? { cohort: query.cohort } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.syncStatus ? { syncState: { status: query.syncStatus } } : {}),
       ...(query.minStreak !== undefined ? { currentStreak: { gte: query.minStreak } } : {}),
@@ -392,6 +569,9 @@ export class StudentsService {
       status: student.status,
       batchId: student.batchId,
       batchName: student.batch?.name ?? null,
+      batchCode: student.batch?.code ?? null,
+      cohort: student.cohort,
+      maxBeltLevel: student.maxBeltLevel,
       squadId: student.squadId,
       squadName: student.squad?.name ?? null,
       avatarUrl: student.avatarUrl,
@@ -400,6 +580,8 @@ export class StudentsService {
       currentStreak: student.currentStreak,
       longestStreak: student.longestStreak,
       totalSolved: student.totalSolved,
+      archivedAt: student.archivedAt?.toISOString() ?? null,
+      archivedReason: student.archivedReason,
       createdAt: student.createdAt.toISOString(),
     };
   }

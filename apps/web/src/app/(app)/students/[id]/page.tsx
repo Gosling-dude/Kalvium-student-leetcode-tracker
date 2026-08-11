@@ -4,10 +4,16 @@ import { use } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, ExternalLink } from 'lucide-react';
-import { SYNC_STATUS_LABELS, isTrustworthySync } from '@dsa/shared';
+import {
+  BATCH_CHANGE_SOURCE_LABELS,
+  SYNC_STATUS_LABELS,
+  isTrustworthySync,
+  type BatchHistoryEntry,
+} from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { cn, formatPercent, timeAgo } from '@/lib/utils';
+import { BatchChip } from '@/components/batch-filter';
 import {
   Badge,
   Card,
@@ -75,18 +81,41 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
           <p className="text-sm text-[var(--color-fg-muted)]">
             {data.email}
             {data.squadName ? ` · ${data.squadName}` : ''}
-            {data.batchName ? ` · ${data.batchName}` : ''}
           </p>
+          {/*
+            Batch, cohort and belt are the student's current organisational placement —
+            shown together and prominently, because they are what a mentor scanning this
+            page is checking (§9, §11).
+          */}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <a
-              href={`https://leetcode.com/u/${data.leetcodeUsername}/`}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 font-mono text-xs text-[var(--color-brand)] hover:underline"
-            >
-              {data.leetcodeUsername}
-              <ExternalLink className="size-3" aria-hidden />
-            </a>
+            <BatchChip code={data.batchCode} name={data.batchName} />
+            <span className="text-sm">{data.batchName ?? 'No batch'}</span>
+            {data.cohort !== null ? <Badge tone="info">Cohort {data.cohort}</Badge> : null}
+            {data.maxBeltLevel !== null ? (
+              <Badge tone="brand">Max belt {data.maxBeltLevel}</Badge>
+            ) : null}
+            {data.status === 'ARCHIVED' ? (
+              <Badge tone="neutral">
+                Archived{data.archivedAt ? ` ${timeAgo(data.archivedAt)}` : ''}
+              </Badge>
+            ) : null}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {data.leetcodeUsername ? (
+              <a
+                href={`https://leetcode.com/u/${data.leetcodeUsername}/`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 font-mono text-xs text-[var(--color-brand)] hover:underline"
+              >
+                {data.leetcodeUsername}
+                <ExternalLink className="size-3" aria-hidden />
+              </a>
+            ) : (
+              <span className="text-xs text-[var(--color-fg-subtle)]">
+                No LeetCode account linked
+              </span>
+            )}
             {untrusted ? (
               <Badge tone="danger">{SYNC_STATUS_LABELS[data.syncStatus]}</Badge>
             ) : (
@@ -309,6 +338,8 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         )}
       </Card>
 
+      <BatchHistorySection history={data.batchHistory} currentBatchName={data.batchName} />
+
       {data.notes.length > 0 ? (
         <Card>
           <CardHeader title="Mentor notes" />
@@ -325,5 +356,66 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         </Card>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Batch History (§11) — every placement this student has had, newest first.
+ *
+ * Present because a mentor reading a past result needs to know which batch it was earned
+ * in. A student who moved on 15 Aug was assessed against Foundation's questions on
+ * 10 Aug, and this section is what makes that legible rather than surprising.
+ */
+function BatchHistorySection({
+  history,
+  currentBatchName,
+}: {
+  history: BatchHistoryEntry[];
+  currentBatchName: string | null;
+}) {
+  if (history.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Batch history"
+        description="Past results stay recorded under the batch the student was in at the time."
+      />
+      <ol className="divide-y divide-[var(--color-border)]">
+        {history.map((entry, index) => (
+          <li key={entry.id} className="flex flex-wrap items-center gap-2 px-5 py-3 text-sm">
+            <span className="w-24 shrink-0 font-mono text-xs text-[var(--color-fg-muted)]">
+              {entry.effectiveFromDayKey}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              {entry.fromBatchName ? (
+                <>
+                  <span className="text-[var(--color-fg-muted)]">{entry.fromBatchName}</span>
+                  <span aria-hidden className="text-[var(--color-fg-subtle)]">
+                    &rarr;
+                  </span>
+                </>
+              ) : null}
+              <BatchChip code={entry.toBatchCode} name={entry.toBatchName} />
+              <span className="font-medium">{entry.toBatchName ?? 'No batch'}</span>
+            </span>
+            {index === 0 && entry.toBatchName === currentBatchName ? (
+              <Badge tone="success">Current</Badge>
+            ) : null}
+            <Badge tone="neutral">{BATCH_CHANGE_SOURCE_LABELS[entry.source]}</Badge>
+            {entry.changedByName ? (
+              <span className="text-xs text-[var(--color-fg-subtle)]">
+                by {entry.changedByName}
+              </span>
+            ) : null}
+            {entry.reason ? (
+              <span className="w-full text-xs text-[var(--color-fg-muted)] sm:w-auto">
+                &ldquo;{entry.reason}&rdquo;
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </Card>
   );
 }

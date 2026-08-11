@@ -1,0 +1,15 @@
+-- Make `students.leetcodeUsername` optional.
+--
+-- Roster membership and a linked LeetCode account are separate facts. A student can be
+-- on the authoritative roster before anyone has collected their handle, and the roster
+-- itself does not carry handles — it identifies students by email.
+--
+-- The alternative, inventing a placeholder handle, was rejected: it would make such a
+-- student permanently indistinguishable from one whose handle is merely misspelled, and
+-- the sync would report a "LeetCode user not found" that is not true. Students with no
+-- handle are instead skipped by the sync and reported as never-synced, which is what
+-- they are.
+--
+-- Strictly widening: every existing row keeps its value, and the unique index still
+-- forbids two students sharing a handle, because Postgres treats NULLs as distinct.
+ALTER TABLE "students" ALTER COLUMN "leetcodeUsername" DROP NOT NULL;

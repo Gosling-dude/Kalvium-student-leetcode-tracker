@@ -17,6 +17,7 @@ import { RollupService } from '../scoring/rollup.service';
 import { SyncService } from '../sync/sync.service';
 import { EmailReportsService } from '../email-reports/email-reports.service';
 import { NotificationsService } from '../notifications/notifications.module';
+import { BatchesService } from '../batches/batches.service';
 
 export interface RollupResult {
   dayKey: string;
@@ -37,6 +38,7 @@ export class CronTasksService {
     private readonly time: ProgramTimeService,
     private readonly emailReports: EmailReportsService,
     private readonly notifications: NotificationsService,
+    private readonly batches: BatchesService,
     @Inject(CONFIG_TOKEN) private readonly config: AppConfig,
   ) {}
 
@@ -102,40 +104,81 @@ export class CronTasksService {
    * Runs against *yesterday* by default, same as the rollup, and should be scheduled
    * after it: this is only useful once that day's `DailyStatus` rows are final.
    */
-  async runDailyReportGeneration(dayKey?: DayKey): Promise<EmailReportRecord | null> {
+  async runDailyReportGeneration(dayKey?: DayKey): Promise<EmailReportRecord[]> {
     const day = dayKey ?? this.time.yesterday();
-    this.logger.log(`Generating daily report email for ${day}`);
 
     const { fromEmail, defaultTo, defaultCc } = this.config.email;
     if (!fromEmail || defaultTo.length === 0) {
       this.logger.warn(
         `Skipping automated report for ${day}: EMAIL_FROM and/or EMAIL_DEFAULT_TO are not configured.`,
       );
-      return null;
+      return [];
     }
 
-    const draft = await this.emailReports.generateDraft(
-      day,
-      { fromEmail, toRecipients: defaultTo, ccRecipients: defaultCc },
-      null,
+    // One report per active batch, so mentors receive a Foundation report and an
+    // Intermediate report rather than one email averaging two different assignments
+    // together (§13). Each is generated, queued and approved independently.
+    const batches = await this.batches.findAll();
+    const targets: { batchId: string | null; label: string }[] =
+      batches.length > 0
+        ? batches.map((batch) => ({ batchId: batch.id, label: batch.name }))
+        : [{ batchId: null, label: 'all students' }];
+
+    this.logger.log(
+      `Generating daily report email(s) for ${day}: ${targets.map((t) => t.label).join(', ')}`,
     );
-    const pending = await this.emailReports.submitForApproval(draft.id);
 
-    await this.notifications.dispatch({
-      event: 'DAILY_REPORT_PENDING_APPROVAL',
-      title: `Daily DSA report for ${day} is ready for approval`,
-      body:
-        `The automated daily report for ${day} has been generated and is waiting for a ` +
-        `mentor or admin to review and send it from the Email Reports page.`,
-      data: { dayKey: day, emailReportId: pending.id },
-    });
+    const generated: EmailReportRecord[] = [];
 
-    await this.audit.log('INFO', 'CronTasks', `Daily report for ${day} generated and pending approval`, {
-      emailReportId: pending.id,
-      toRecipients: defaultTo,
-    });
+    for (const target of targets) {
+      // One batch failing must not cost the others their report.
+      try {
+        const draft = await this.emailReports.generateDraft(
+          day,
+          {
+            fromEmail,
+            toRecipients: defaultTo,
+            ccRecipients: defaultCc,
+            ...(target.batchId ? { batchId: target.batchId } : {}),
+          },
+          null,
+        );
+        const pending = await this.emailReports.submitForApproval(draft.id);
+        generated.push(pending);
 
-    this.logger.log(`Daily report for ${day} is PENDING_APPROVAL (id ${pending.id})`);
-    return pending;
+        await this.notifications.dispatch({
+          event: 'DAILY_REPORT_PENDING_APPROVAL',
+          title: `Daily DSA report for ${day} (${target.label}) is ready for approval`,
+          body:
+            `The automated daily report for ${day} covering ${target.label} has been ` +
+            `generated and is waiting for a mentor or admin to review and send it from ` +
+            `the Email Reports page.`,
+          data: { dayKey: day, emailReportId: pending.id, batchId: target.batchId },
+        });
+
+        await this.audit.log(
+          'INFO',
+          'CronTasks',
+          `Daily report for ${day} (${target.label}) generated and pending approval`,
+          { emailReportId: pending.id, batchId: target.batchId, toRecipients: defaultTo },
+        );
+
+        this.logger.log(
+          `Daily report for ${day} (${target.label}) is PENDING_APPROVAL (id ${pending.id})`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Failed to generate the ${target.label} report for ${day}: ${(error as Error).message}`,
+        );
+        await this.audit.log(
+          'ERROR',
+          'CronTasks',
+          `Daily report generation failed for ${day} (${target.label})`,
+          { batchId: target.batchId, error: (error as Error).message },
+        );
+      }
+    }
+
+    return generated;
   }
 }

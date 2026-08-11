@@ -194,6 +194,19 @@ export function defaultEmailSubject(dayKey: DayKey): string {
 }
 
 /**
+ * The subject line for a report, naming the batch when there is one.
+ *
+ * "DSA Daily Assignment Report — Foundation Level — 12 Aug 2026" rather than two
+ * identically-titled emails, so a recipient holding both can tell at a glance which
+ * students each one is about (§13). Falls back to the batch-less subject for the overall
+ * report, which genuinely covers everyone.
+ */
+export function batchEmailSubject(dayKey: DayKey, batchName?: string | null): string {
+  if (!batchName) return defaultEmailSubject(dayKey);
+  return `Daily DSA Assignment Report — ${batchName} — ${formatDayKeyShort(dayKey)}`;
+}
+
+/**
  * Blocker-summary bucket key. `NOT_REPORTED` is distinct from the `NO_BLOCKER` category
  * — one means nobody asked yet, the other means a mentor asked and there genuinely was
  * none (§8). Collapsing them would hide exactly the gap this feature exists to surface.

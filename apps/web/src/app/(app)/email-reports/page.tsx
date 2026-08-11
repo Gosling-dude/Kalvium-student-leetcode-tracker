@@ -7,6 +7,7 @@ import { Download, FileSpreadsheet, Mail, Send } from 'lucide-react';
 import { defaultEmailSubject, type DailyEmailReportStudentRow, type EmailReportRecord } from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
+import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
 import { todayKey } from '@/lib/utils';
 import { Button, Card, CardHeader, EmptyState, ErrorState, TableSkeleton } from '@/components/ui';
 import {
@@ -23,6 +24,10 @@ import {
 
 export default function EmailReportsPage() {
   const [dayKey, setDayKey] = useState(todayKey());
+  const { selected: batch, batches } = useBatchFilter();
+
+  /** The batch id matching the active filter, for scoping the generated email. */
+  const batchId = batch ? (batches.find((item) => item.code === batch)?.id ?? undefined) : undefined;
   const [tab, setTab] = useState<number | 'ALL'>('ALL');
   const [blockerStudent, setBlockerStudent] = useState<DailyEmailReportStudentRow | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -39,13 +44,13 @@ export default function EmailReportsPage() {
   const queryClient = useQueryClient();
 
   const { data: report, isLoading, error, refetch } = useQuery({
-    queryKey: ['email-report', dayKey],
-    queryFn: () => api.dailyEmailReport(dayKey),
+    queryKey: ['email-report', dayKey, batch],
+    queryFn: () => api.dailyEmailReport(dayKey, undefined, batch ?? undefined),
   });
 
   const { data: sentStatus } = useQuery({
-    queryKey: ['email-status', dayKey],
-    queryFn: () => api.emailStatus(dayKey),
+    queryKey: ['email-status', dayKey, batch],
+    queryFn: () => api.emailStatus(dayKey, batch ?? undefined),
     enabled: Boolean(report?.hasAssignment),
   });
 
@@ -57,11 +62,14 @@ export default function EmailReportsPage() {
       if (!fromEmail) {
         throw new Error('Set a sender email before generating the email.');
       }
+      // Scoped to the active batch filter, so "Foundation" on screen generates the
+      // Foundation report — subject line included (§13).
       return api.generateEmail(dayKey, {
         fromEmail,
         toRecipients,
         ccRecipients,
         subject: subject || undefined,
+        batchId,
       });
     },
     onSuccess: (record) => {
@@ -77,7 +85,7 @@ export default function EmailReportsPage() {
     setExporting(true);
     try {
       await downloadFile(
-        `/reports/daily/${dayKey}/export?format=${format}`,
+        `/reports/daily/${dayKey}/export?format=${format}${batch ? `&batch=${encodeURIComponent(batch)}` : ''}`,
         `daily-email-report-${dayKey}.${format.toLowerCase()}`,
       );
       toast.success('Report downloaded');
@@ -101,10 +109,12 @@ export default function EmailReportsPage() {
           <h1 className="text-xl font-semibold tracking-tight">Email Reports</h1>
           <p className="text-sm text-[var(--color-fg-muted)]">
             Daily DSA assignment reporting, follow-up, and mentor-approved email delivery.
+            {report?.summary.batchName ? ` Showing ${report.summary.batchName}.` : ''}
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <BatchFilter />
           <label htmlFor="reportDate" className="sr-only">
             Report date
           </label>
@@ -263,7 +273,7 @@ export default function EmailReportsPage() {
         onApproved={(record) => setPreviewRecord(record)}
         onSent={(record) => {
           setPreviewRecord(record);
-          void queryClient.invalidateQueries({ queryKey: ['email-status', dayKey] });
+          void queryClient.invalidateQueries({ queryKey: ['email-status', dayKey, batch] });
           void queryClient.invalidateQueries({ queryKey: ['email-history'] });
         }}
       />

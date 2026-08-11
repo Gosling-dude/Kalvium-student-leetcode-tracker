@@ -8,6 +8,7 @@ import {
 import {
   CACHE_TTL,
   extractProblemSlug,
+  selectAssignmentForBatch,
   type AssignmentProblem,
   type AssignmentSummary,
   type DayKey,
@@ -18,6 +19,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
+import { BatchesService } from '../batches/batches.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
 import { ProviderProblemNotFoundError } from '../providers/provider.errors';
 import type { CreateAssignmentDto, UpdateAssignmentDto } from './dto/assignment.dto';
@@ -30,40 +32,101 @@ export class AssignmentsService {
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
+    private readonly batches: BatchesService,
     @Inject(SUBMISSION_PROVIDER) private readonly provider: SubmissionProvider,
   ) {}
 
-  async create(dto: CreateAssignmentDto, userId: string): Promise<AssignmentSummary> {
+  /**
+   * Create a day's problem set for one or more batches.
+   *
+   * Each batch gets its own `Assignment` row even when the problems are identical.
+   * Sharing one row between batches would make "edit Foundation's Wednesday" silently
+   * edit Intermediate's too, and would leave `DailyStatus.assignmentId` unable to say
+   * which set a student was actually measured against.
+   *
+   * Returns one summary per batch created. All-or-nothing: if any batch already has an
+   * assignment that day, nothing is written, so a partial multi-batch create can never
+   * leave one batch with work and the other without.
+   */
+  async create(dto: CreateAssignmentDto, userId: string): Promise<AssignmentSummary[]> {
     if (!this.time.isValid(dto.dayKey)) {
       throw new BadRequestException(`"${dto.dayKey}" is not a valid date (expected YYYY-MM-DD)`);
     }
 
-    const existing = await this.prisma.assignment.findUnique({ where: { dayKey: dto.dayKey } });
-    if (existing) {
+    const batchIds = await this.resolveTargetBatches(dto.batches);
+
+    const clashes = await this.prisma.assignment.findMany({
+      where: { dayKey: dto.dayKey, batchId: { in: batchIds } },
+      include: { batch: { select: { name: true } } },
+    });
+    if (clashes.length > 0) {
+      const names = clashes.map((c) => c.batch?.name ?? 'all batches').join(', ');
       throw new BadRequestException(
-        `An assignment already exists for ${dto.dayKey}. Update it instead of creating a second one.`,
+        `An assignment already exists for ${dto.dayKey} for: ${names}. Update it instead of creating a second one.`,
       );
     }
 
+    // Resolved once, outside the transaction: fetching problem metadata hits the
+    // provider, which must not run inside an open database transaction.
     const problemIds = await this.resolveProblems(dto.problemUrls);
 
-    const assignment = await this.prisma.assignment.create({
-      data: {
-        dayKey: dto.dayKey,
-        title: dto.title ?? null,
-        topic: dto.topic ?? null,
-        notes: dto.notes ?? null,
-        difficulty: dto.difficulty ?? null,
-        createdById: userId,
-        problems: {
-          create: problemIds.map((problemId, index) => ({ problemId, position: index + 1 })),
-        },
-      },
-      include: this.include(),
-    });
+    const created = await this.prisma.$transaction(
+      batchIds.map((batchId) =>
+        this.prisma.assignment.create({
+          data: {
+            dayKey: dto.dayKey,
+            batchId,
+            title: dto.title ?? null,
+            topic: dto.topic ?? null,
+            notes: dto.notes ?? null,
+            difficulty: dto.difficulty ?? null,
+            createdById: userId,
+            problems: {
+              create: problemIds.map((problemId, index) => ({ problemId, position: index + 1 })),
+            },
+          },
+          include: this.include(),
+        }),
+      ),
+    );
 
     await this.invalidate(dto.dayKey);
-    return this.toSummary(assignment);
+    return created.map((assignment) => this.toSummary(assignment));
+  }
+
+  /**
+   * Turn the requested batch selectors into ids.
+   *
+   * An empty/omitted list means every *active* batch. Archived batches are excluded
+   * deliberately: assigning new work to a batch nobody is in creates rows that no
+   * student will ever be evaluated against.
+   */
+  private async resolveTargetBatches(selectors?: string[]): Promise<string[]> {
+    if (!selectors || selectors.length === 0) {
+      const active = await this.prisma.batch.findMany({
+        where: { status: 'ACTIVE' },
+        orderBy: { sortOrder: 'asc' },
+        select: { id: true },
+      });
+      if (active.length === 0) {
+        throw new BadRequestException(
+          'There are no active batches to assign to. Create a batch first.',
+        );
+      }
+      return active.map((batch) => batch.id);
+    }
+
+    const ids: string[] = [];
+    for (const selector of selectors) {
+      const resolved = await this.batches.resolveSelector(selector);
+      if (resolved === null) {
+        throw new BadRequestException(
+          `"${selector}" does not name a batch. Omit "batches" entirely to assign to every batch.`,
+        );
+      }
+      if (!ids.includes(resolved)) ids.push(resolved);
+    }
+    return ids;
   }
 
   async update(id: string, dto: UpdateAssignmentDto): Promise<AssignmentSummary> {
@@ -110,16 +173,47 @@ export class AssignmentsService {
     await this.invalidate(existing.dayKey);
   }
 
-  async findByDay(dayKey: DayKey): Promise<AssignmentSummary | null> {
-    const assignment = await this.prisma.assignment.findUnique({
-      where: { dayKey },
+  /**
+   * The assignment that applies to `batchId` on `dayKey`.
+   *
+   * Falls back to a batch-less row when the batch has none of its own — those are the
+   * pre-batch assignments that applied to everybody, and they keep applying to everybody
+   * (see `selectAssignmentForBatch`). A *different* batch's assignment is never returned.
+   *
+   * `batchId === null` means "no batch filter": the caller gets the batch-less row if one
+   * exists, and otherwise nothing, because there is no single answer for a day where two
+   * batches have different sets — use `findAllByDay` for that.
+   */
+  async findByDay(dayKey: DayKey, batchId?: string | null): Promise<AssignmentSummary | null> {
+    const assignments = await this.prisma.assignment.findMany({
+      where: {
+        dayKey,
+        ...(batchId ? { OR: [{ batchId }, { batchId: null }] } : { batchId: null }),
+      },
       include: this.include(),
     });
-    return assignment ? this.toSummary(assignment) : null;
+
+    const selected = selectAssignmentForBatch(assignments, batchId ?? null);
+    return selected ? this.toSummary(selected) : null;
   }
 
-  async findToday(): Promise<AssignmentSummary | null> {
-    return this.findByDay(this.time.today());
+  /** Every batch's assignment for a day — what the batch-aware daily tracker renders. */
+  async findAllByDay(dayKey: DayKey): Promise<AssignmentSummary[]> {
+    const assignments = await this.prisma.assignment.findMany({
+      where: { dayKey },
+      include: this.include(),
+      orderBy: [{ batch: { sortOrder: 'asc' } }, { createdAt: 'asc' }],
+    });
+    return assignments.map((assignment) => this.toSummary(assignment));
+  }
+
+  async findToday(batchId?: string | null): Promise<AssignmentSummary | null> {
+    return this.findByDay(this.time.today(), batchId);
+  }
+
+  /** Every batch's set for today, in program-local time. */
+  async findAllToday(): Promise<AssignmentSummary[]> {
+    return this.findAllByDay(this.time.today());
   }
 
   async findAll(query: {
@@ -128,8 +222,13 @@ export class AssignmentsService {
     from?: string;
     to?: string;
     search?: string;
+    batchId?: string | null;
   }): Promise<Paginated<AssignmentSummary>> {
     const where = {
+      // A batch filter includes that batch's own rows plus the pre-batch rows that
+      // applied to everyone — the same resolution rule the evaluator uses, so the
+      // history list and the results agree about what a batch was given.
+      ...(query.batchId ? { OR: [{ batchId: query.batchId }, { batchId: null }] } : {}),
       ...(query.from || query.to
         ? { dayKey: { ...(query.from ? { gte: query.from } : {}), ...(query.to ? { lte: query.to } : {}) } }
         : {}),
@@ -147,7 +246,7 @@ export class AssignmentsService {
       this.prisma.assignment.findMany({
         where,
         include: this.include(),
-        orderBy: { dayKey: 'desc' },
+        orderBy: [{ dayKey: 'desc' }, { batch: { sortOrder: 'asc' } }],
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
       }),
@@ -251,6 +350,7 @@ export class AssignmentsService {
     return {
       problems: { include: { problem: true }, orderBy: { position: 'asc' as const } },
       createdBy: { select: { name: true } },
+      batch: { select: { name: true, code: true } },
     };
   }
 
@@ -265,6 +365,8 @@ export class AssignmentsService {
   private toSummary(assignment: {
     id: string;
     dayKey: string;
+    batchId: string | null;
+    batch?: { name: string; code: string } | null;
     title: string | null;
     topic: string | null;
     notes: string | null;
@@ -291,6 +393,9 @@ export class AssignmentsService {
     return {
       id: assignment.id,
       dayKey: assignment.dayKey,
+      batchId: assignment.batchId,
+      batchName: assignment.batch?.name ?? null,
+      batchCode: assignment.batch?.code ?? null,
       title: assignment.title,
       topic: assignment.topic,
       notes: assignment.notes,

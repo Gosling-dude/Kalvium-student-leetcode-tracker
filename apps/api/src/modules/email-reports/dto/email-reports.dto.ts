@@ -58,6 +58,16 @@ export class GenerateEmailDto extends RecipientsDto {
   @IsOptional()
   @IsUUID()
   squadId?: string;
+
+  /**
+   * Which batch this report covers. Omitted produces the overall report across every
+   * batch; supplying one produces "Foundation"/"Intermediate" reports that can be
+   * generated, approved and sent independently of each other (§13).
+   */
+  @ApiPropertyOptional({ description: 'Batch this report covers. Omit for the overall report.' })
+  @IsOptional()
+  @IsUUID()
+  batchId?: string;
 }
 
 export class PreviewEmailDto {
@@ -211,6 +221,12 @@ export class ListEmailHistoryDto {
   @IsOptional()
   @IsString()
   dayKey?: string;
+
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  batch?: string;
 
   @ApiPropertyOptional({ enum: EMAIL_REPORT_STATUSES })
   @IsOptional()

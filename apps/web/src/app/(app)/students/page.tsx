@@ -5,10 +5,17 @@ import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, Upload } from 'lucide-react';
 import { toast } from 'sonner';
-import { SYNC_STATUS_LABELS, isTrustworthySync, type ImportResult } from '@dsa/shared';
+import {
+  SYNC_STATUS_LABELS,
+  isTrustworthySync,
+  type ImportResult,
+  type StudentSummary,
+} from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
-import { timeAgo } from '@/lib/utils';
+import { timeAgo, todayKey } from '@/lib/utils';
+import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { MoveBatchDialog } from '@/components/move-batch-dialog';
 import {
   Badge,
   Button,
@@ -31,15 +38,58 @@ export default function StudentsPage() {
   const [search, setSearch] = useState('');
   const [squadId, setSquadId] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
+  const [cohort, setCohort] = useState('');
+  /** '' = current students only (the default), 'all' = plus archived, 'ARCHIVED' = only. */
+  const [archiveScope, setArchiveScope] = useState('');
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [moving, setMoving] = useState<StudentSummary | null>(null);
+
+  const { selected: batch, batches } = useBatchFilter();
 
   const filters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
 
   const students = useQuery({
-    queryKey: ['students', { page, search, squadId, syncStatus }],
+    queryKey: ['students', { page, search, squadId, syncStatus, batch, cohort, archiveScope }],
     queryFn: () =>
-      api.students({ page, pageSize: 25, search, squadId, syncStatus, sortBy: 'name' }),
+      api.students({
+        page,
+        pageSize: 25,
+        search,
+        squadId,
+        syncStatus,
+        sortBy: 'name',
+        batch: batch ?? undefined,
+        cohort: cohort || undefined,
+        ...(archiveScope === 'all'
+          ? { includeArchived: 'true' }
+          : archiveScope === 'ARCHIVED'
+            ? { status: 'ARCHIVED' }
+            : {}),
+      }),
   });
+
+  // Today's completion for the table. Read from the daily tracker rather than recomputed
+  // here, so this column can never disagree with the mentor view about the same student.
+  const today = useQuery({
+    queryKey: ['mentor', todayKey(), batch],
+    queryFn: () => api.mentorDashboard(todayKey(), undefined, batch ?? undefined),
+    staleTime: 60_000,
+  });
+
+  const completionByStudent = new Map(
+    (today.data?.buckets ?? [])
+      .flatMap((bucket) => bucket.students)
+      .map((row) => [row.studentId, { solved: row.solvedCount, assigned: row.assignedCount }]),
+  );
+
+  /** Cohorts present in the roster, so the filter never offers an empty option. */
+  const cohortOptions = [
+    ...new Set(
+      (students.data?.items ?? [])
+        .map((student) => student.cohort)
+        .filter((value): value is number => value !== null),
+    ),
+  ].sort((a, b) => a - b);
 
   const importMutation = useMutation({
     mutationFn: (file: File) => api.importStudents(file, true),
@@ -67,6 +117,7 @@ export default function StudentsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <BatchFilter />
           <Button
             onClick={() =>
               void downloadFile('/students/import/template', 'dsa-tracker-students.xlsx')
@@ -157,6 +208,41 @@ export default function StudentsPage() {
           </select>
 
           <select
+            value={cohort}
+            onChange={(event) => {
+              setCohort(event.target.value);
+              setPage(1);
+            }}
+            aria-label="Filter by cohort"
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none"
+          >
+            <option value="">All cohorts</option>
+            {cohortOptions.map((value) => (
+              <option key={value} value={value}>
+                Cohort {value}
+              </option>
+            ))}
+          </select>
+
+          {/*
+            Archived students are hidden by default — they have left the programme. They
+            remain reachable here because their history is intact and still worth reading.
+          */}
+          <select
+            value={archiveScope}
+            onChange={(event) => {
+              setArchiveScope(event.target.value);
+              setPage(1);
+            }}
+            aria-label="Filter by roster status"
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none"
+          >
+            <option value="">Current students</option>
+            <option value="all">Current + archived</option>
+            <option value="ARCHIVED">Archived only</option>
+          </select>
+
+          <select
             value={syncStatus}
             onChange={(event) => {
               setSyncStatus(event.target.value);
@@ -189,15 +275,15 @@ export default function StudentsPage() {
               <thead>
                 <tr>
                   <Th>Student</Th>
-                  <Th>Squad</Th>
-                  {/* Batch is intentionally not a column: every student in the cohort
-                      belongs to the same batch, so it repeated one value down all 250
-                      rows and carried no information. Still available as a filter and
-                      on the student profile, for when a second batch exists. */}
+                  <Th>Batch</Th>
+                  <Th className="text-right">Cohort</Th>
+                  <Th className="text-right">Max belt</Th>
                   <Th>LeetCode</Th>
                   <Th>Streak</Th>
+                  <Th className="text-right">Today</Th>
                   <Th className="text-right">Total solved</Th>
                   <Th>Last sync</Th>
+                  <Th className="text-right">Actions</Th>
                 </tr>
               </thead>
               <tbody>
@@ -217,19 +303,40 @@ export default function StudentsPage() {
                         {student.email}
                       </p>
                     </Td>
-                    <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
                     <Td>
-                      <a
-                        href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="font-mono text-xs hover:text-[var(--color-brand)]"
-                      >
-                        {student.leetcodeUsername}
-                      </a>
+                      <div className="flex items-center gap-1.5">
+                        <BatchChip code={student.batchCode} name={student.batchName} />
+                        {student.status === 'ARCHIVED' ? (
+                          <Badge tone="neutral">Archived</Badge>
+                        ) : null}
+                      </div>
+                    </Td>
+                    <Td className="text-right tabular-nums text-[var(--color-fg-muted)]">
+                      {student.cohort ?? '—'}
+                    </Td>
+                    <Td className="text-right tabular-nums">{student.maxBeltLevel ?? '—'}</Td>
+                    <Td>
+                      {student.leetcodeUsername ? (
+                        <a
+                          href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="font-mono text-xs hover:text-[var(--color-brand)]"
+                        >
+                          {student.leetcodeUsername}
+                        </a>
+                      ) : (
+                        <span className="text-xs text-[var(--color-fg-subtle)]">Not linked</span>
+                      )}
                     </Td>
                     <Td>
                       <StreakFlame streak={student.currentStreak} />
+                    </Td>
+                    <Td className="text-right tabular-nums text-[var(--color-fg-muted)]">
+                      {(() => {
+                        const todayRow = completionByStudent.get(student.id);
+                        return todayRow ? `${todayRow.solved}/${todayRow.assigned}` : '—';
+                      })()}
                     </Td>
                     <Td className="text-right tabular-nums">{student.totalSolved}</Td>
                     <Td>
@@ -239,6 +346,19 @@ export default function StudentsPage() {
                         </span>
                       ) : (
                         <Badge tone="danger">{SYNC_STATUS_LABELS[student.syncStatus]}</Badge>
+                      )}
+                    </Td>
+                    <Td className="text-right">
+                      {student.status === 'ARCHIVED' ? (
+                        <span className="text-xs text-[var(--color-fg-subtle)]">—</span>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          className="px-2 py-1 text-xs"
+                          onClick={() => setMoving(student)}
+                        >
+                          Move batch
+                        </Button>
                       )}
                     </Td>
                   </tr>
@@ -265,6 +385,13 @@ export default function StudentsPage() {
           </>
         )}
       </Card>
+
+      <MoveBatchDialog
+        student={moving}
+        batches={batches}
+        open={moving !== null}
+        onClose={() => setMoving(null)}
+      />
     </div>
   );
 }

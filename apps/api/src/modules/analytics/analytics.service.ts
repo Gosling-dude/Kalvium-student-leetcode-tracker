@@ -21,16 +21,27 @@ export class AnalyticsService {
     private readonly time: ProgramTimeService,
   ) {}
 
-  async overview(from?: DayKey, to?: DayKey): Promise<AnalyticsOverview> {
+  /**
+   * `batchId` narrows every series to one batch, filtering on `DailyStatus.batchId` —
+   * the batch each student was in *on that day*. A student who moved mid-range therefore
+   * contributes their pre-move days to their old batch's trend and their later days to
+   * the new one, which is what makes a batch's history stable (§5, §7).
+   */
+  async overview(from?: DayKey, to?: DayKey, batchId?: string | null): Promise<AnalyticsOverview> {
     const end = to ?? this.time.today();
     const start = from ?? this.time.addDays(end, -29);
+    const batch = batchId ?? null;
 
     return this.cache.remember(
-      `analytics:${start}:${end}`,
+      `analytics:${start}:${end}:${batch ?? 'all'}`,
       CACHE_TTL.analytics,
       async (): Promise<AnalyticsOverview> => {
         const statuses = await this.prisma.dailyStatus.findMany({
-          where: { dayKey: { gte: start, lte: end }, student: { status: 'ACTIVE' } },
+          where: {
+            dayKey: { gte: start, lte: end },
+            ...(batch ? { batchId: batch } : {}),
+            student: { status: 'ACTIVE' },
+          },
           include: { student: { select: { id: true, name: true, squadId: true } } },
         });
 
@@ -41,10 +52,10 @@ export class AnalyticsService {
           daily,
           weekly: this.bucketBy(daily, (d) => this.time.weekKey(d.dayKey)),
           monthly: this.bucketBy(daily, (d) => this.time.monthKey(d.dayKey)),
-          byDifficulty: await this.byDifficulty(start, end),
-          byTopic: await this.byTopic(start, end),
+          byDifficulty: await this.byDifficulty(start, end, batch),
+          byTopic: await this.byTopic(start, end, batch),
           squadComparison: await this.squadComparison(statuses),
-          topImprovers: await this.improvers(start, end, 'TOP'),
+          topImprovers: await this.improvers(start, end, 'TOP', batch),
           bottomPerformers: this.bottomPerformers(statuses),
         };
       },
@@ -52,13 +63,13 @@ export class AnalyticsService {
   }
 
   /** Contribution-style heatmap over a date range, aggregated across all students. */
-  async heatmap(days = 120) {
+  async heatmap(days = 120, batchId?: string | null) {
     const end = this.time.today();
     const start = this.time.addDays(end, -(days - 1));
 
     const rows = await this.prisma.dailyStatus.groupBy({
       by: ['dayKey'],
-      where: { dayKey: { gte: start, lte: end } },
+      where: { dayKey: { gte: start, lte: end }, ...(batchId ? { batchId } : {}) },
       _sum: { solvedCount: true, assignedCount: true },
       _count: { _all: true },
     });
@@ -131,9 +142,14 @@ export class AnalyticsService {
       }));
   }
 
-  private async byDifficulty(start: DayKey, end: DayKey) {
+  private async byDifficulty(start: DayKey, end: DayKey, batchId: string | null) {
     const rows = await this.prisma.dailyProblemStatus.findMany({
-      where: { dailyStatus: { dayKey: { gte: start, lte: end } } },
+      where: {
+        dailyStatus: {
+          dayKey: { gte: start, lte: end },
+          ...(batchId ? { batchId } : {}),
+        },
+      },
       include: { problem: { select: { difficulty: true } } },
     });
 
@@ -157,9 +173,14 @@ export class AnalyticsService {
     });
   }
 
-  private async byTopic(start: DayKey, end: DayKey) {
+  private async byTopic(start: DayKey, end: DayKey, batchId: string | null) {
     const rows = await this.prisma.dailyProblemStatus.findMany({
-      where: { dailyStatus: { dayKey: { gte: start, lte: end } } },
+      where: {
+        dailyStatus: {
+          dayKey: { gte: start, lte: end },
+          ...(batchId ? { batchId } : {}),
+        },
+      },
       include: { problem: { select: { topicTags: true } } },
     });
 
@@ -217,7 +238,12 @@ export class AnalyticsService {
   }
 
   /** Compares a window against the equally-sized window immediately before it. */
-  private async improvers(start: DayKey, end: DayKey, direction: 'TOP' | 'BOTTOM') {
+  private async improvers(
+    start: DayKey,
+    end: DayKey,
+    direction: 'TOP' | 'BOTTOM',
+    batchId: string | null,
+  ) {
     const span = this.time.diffDays(start, end);
     const previousEnd = this.time.addDays(start, -1);
     const previousStart = this.time.addDays(previousEnd, -span);
@@ -225,12 +251,15 @@ export class AnalyticsService {
     const [current, previous] = await Promise.all([
       this.prisma.dailyStatus.groupBy({
         by: ['studentId'],
-        where: { dayKey: { gte: start, lte: end } },
+        where: { dayKey: { gte: start, lte: end }, ...(batchId ? { batchId } : {}) },
         _sum: { score: true },
       }),
       this.prisma.dailyStatus.groupBy({
         by: ['studentId'],
-        where: { dayKey: { gte: previousStart, lte: previousEnd } },
+        where: {
+          dayKey: { gte: previousStart, lte: previousEnd },
+          ...(batchId ? { batchId } : {}),
+        },
         _sum: { score: true },
       }),
     ]);

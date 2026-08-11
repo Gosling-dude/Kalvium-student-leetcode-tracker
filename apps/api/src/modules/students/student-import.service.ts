@@ -16,6 +16,7 @@ import ExcelJS from 'exceljs';
 import { IMPORT_COLUMN_ALIASES, type ImportResult, type ImportRowError } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { BatchesService } from '../batches/batches.service';
 
 interface ParsedRow {
   rowNumber: number;
@@ -35,7 +36,10 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_-]{1,39}$/;
 export class StudentImportService {
   private readonly logger = new Logger(StudentImportService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly batches: BatchesService,
+  ) {}
 
   async import(
     buffer: Buffer,
@@ -388,7 +392,11 @@ export class StudentImportService {
       if (existing) {
         batchIds.set(name.toLowerCase(), existing.id);
       } else {
-        const batch = await this.prisma.batch.create({ data: { name } });
+        // `code` is required and unique; derive one from the name for spreadsheet
+        // imports, which only carry a batch name.
+        const batch = await this.prisma.batch.create({
+          data: { name, code: await this.batches.deriveAvailableCode(name) },
+        });
         batchIds.set(name.toLowerCase(), batch.id);
         createdBatches.push(name);
       }

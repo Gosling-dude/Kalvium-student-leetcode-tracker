@@ -6,6 +6,7 @@ import { Toaster } from 'sonner';
 import { useState, type ReactNode } from 'react';
 
 import { ApiError } from '@/lib/api';
+import { BatchFilterProvider } from '@/components/batch-filter';
 
 export function Providers({ children }: { children: ReactNode }) {
   // Created inside state so each browser session gets one client and it is never
@@ -37,7 +38,7 @@ export function Providers({ children }: { children: ReactNode }) {
         enableSystem
         disableTransitionOnChange
       >
-        {children}
+        <BatchFilterProvider>{children}</BatchFilterProvider>
         <Toaster position="bottom-right" richColors closeButton />
       </ThemeProvider>
     </QueryClientProvider>

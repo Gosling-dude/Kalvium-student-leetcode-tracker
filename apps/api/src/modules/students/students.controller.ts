@@ -29,6 +29,7 @@ import type { Response } from 'express';
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { StudentImportService } from './student-import.service';
 import { StudentsService } from './students.service';
+import { BatchesService } from '../batches/batches.service';
 import {
   BulkIdsDto,
   BulkUpdateStudentsDto,
@@ -60,11 +61,23 @@ export class StudentsController {
   constructor(
     private readonly students: StudentsService,
     private readonly importer: StudentImportService,
+    private readonly batches: BatchesService,
   ) {}
 
+  /**
+   * `?batch=` accepts an id, a code (`A`) or an alias (`foundation`); it is resolved to
+   * an id here so the service only ever filters on ids. An unknown value is rejected
+   * rather than ignored — silently dropping a bad filter would show a mentor every
+   * batch's students under one batch's heading.
+   */
   @Get()
   @ApiOperation({ summary: 'Search, filter and paginate students' })
-  findAll(@Query() query: StudentQueryDto) {
+  async findAll(@Query() query: StudentQueryDto) {
+    // Mutated rather than spread: `skip`/`take` are getters on `PaginationQueryDto`, and
+    // spreading the instance would silently drop them and paginate from row 0 every time.
+    if (query.batch) {
+      query.batchId = (await this.batches.resolveSelector(query.batch)) ?? undefined;
+    }
     return this.students.findAll(query);
   }
 
@@ -114,21 +127,27 @@ export class StudentsController {
     return this.students.update(id, dto);
   }
 
+  /**
+   * Removes a student from the current programme.
+   *
+   * A student with history is archived rather than deleted — their submissions and
+   * results are the only copy that exists (§24). The response says which happened, so
+   * the UI can tell the admin the truth instead of implying the rows are gone.
+   */
   @Delete(':id')
   @Roles('ADMIN')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @Audit('STUDENT_DELETED', 'Student')
-  @ApiOperation({ summary: 'Delete a student and all their history' })
-  async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
-    await this.students.remove(id);
+  @Audit('STUDENT_REMOVED', 'Student')
+  @ApiOperation({ summary: 'Remove a student — archived when they have history, deleted when they do not' })
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.students.remove(id);
   }
 
   @Post('bulk/delete')
   @Roles('ADMIN')
-  @Audit('STUDENTS_BULK_DELETED', 'Student')
-  @ApiOperation({ summary: 'Delete many students' })
-  async bulkDelete(@Body() dto: BulkIdsDto) {
-    return { deleted: await this.students.removeMany(dto.ids) };
+  @Audit('STUDENTS_BULK_REMOVED', 'Student')
+  @ApiOperation({ summary: 'Remove many students — archiving any that have history' })
+  bulkDelete(@Body() dto: BulkIdsDto) {
+    return this.students.removeMany(dto.ids);
   }
 
   @Post('bulk/update')

@@ -62,8 +62,50 @@ export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 export const SYNC_MODES = ['FULL', 'INCREMENTAL', 'RETRY_FAILED', 'SINGLE_STUDENT'] as const;
 export type SyncMode = (typeof SYNC_MODES)[number];
 
-export const STUDENT_STATUSES = ['ACTIVE', 'INACTIVE', 'DROPPED', 'PAUSED'] as const;
+/**
+ * `ARCHIVED` is "no longer in the current programme" — the state a student reaches when
+ * they drop off the authoritative roster.
+ *
+ * It exists so that removing someone from the roster never means deleting them. Their
+ * submissions, daily statuses, streak history, leaderboard entries and email history are
+ * historical facts that remain true after they leave; only their presence in *current*
+ * views ends. Use `isCurrentStudent` rather than testing this value by hand.
+ */
+export const STUDENT_STATUSES = ['ACTIVE', 'INACTIVE', 'DROPPED', 'PAUSED', 'ARCHIVED'] as const;
 export type StudentStatus = (typeof STUDENT_STATUSES)[number];
+
+export const STUDENT_STATUS_LABELS: Record<StudentStatus, string> = {
+  ACTIVE: 'Active',
+  INACTIVE: 'Inactive',
+  DROPPED: 'Dropped',
+  PAUSED: 'Paused',
+  ARCHIVED: 'Archived',
+};
+
+/**
+ * Whether a student counts towards the *current* programme.
+ *
+ * The single predicate behind "active student count", the dashboard, the daily tracker,
+ * current leaderboards, new assignments and daily emails. Archived students fail it and
+ * therefore vanish from all of those, while every historical query — which filters on a
+ * `dayKey`, not on this — keeps them.
+ */
+export function isCurrentStudent(status: StudentStatus): boolean {
+  return status === 'ACTIVE';
+}
+
+export const BATCH_STATUSES = ['ACTIVE', 'ARCHIVED'] as const;
+export type BatchStatus = (typeof BATCH_STATUSES)[number];
+
+export const BATCH_CHANGE_SOURCES = ['MANUAL', 'ROSTER_SYNC', 'IMPORT', 'MIGRATION'] as const;
+export type BatchChangeSource = (typeof BATCH_CHANGE_SOURCES)[number];
+
+export const BATCH_CHANGE_SOURCE_LABELS: Record<BatchChangeSource, string> = {
+  MANUAL: 'Manual change',
+  ROSTER_SYNC: 'Roster sync',
+  IMPORT: 'Import',
+  MIGRATION: 'Migration',
+};
 
 export const NOTIFICATION_CHANNELS = [
   'EMAIL',

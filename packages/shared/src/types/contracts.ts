@@ -12,6 +12,8 @@ import type { BadgeSummary, EvaluatedAchievement, LevelProgress } from '../domai
 import type { ScoreComponent } from '../domain/scoring';
 import type { ActionTier, BlockerSummaryKey, StatusLabel } from '../domain/daily-email-report';
 import type {
+  BatchChangeSource,
+  BatchStatus,
   BlockerCategory,
   Difficulty,
   EmailReportStatus,
@@ -54,9 +56,48 @@ export interface LoginResponse extends AuthTokens {
 export interface BatchSummary {
   id: string;
   name: string;
+  /** Short stable key used in URLs and filters, e.g. `A`. */
+  code: string;
+  description: string | null;
+  status: BatchStatus;
+  sortOrder: number;
+  /** Active students only — archived students are not part of a batch's current size. */
   studentCount: number;
   startDate: string | null;
   isActive: boolean;
+}
+
+/** A batch plus the figures the Batch Management cards show. */
+export interface BatchStats extends BatchSummary {
+  activeStudents: number;
+  archivedStudents: number;
+  /** Mean completion over the requested day, 0–100. */
+  averageCompletionPercent: number;
+  /** Mean `maxBeltLevel` across active students with one recorded; null when none have. */
+  averageBeltLevel: number | null;
+  /** Cohort → number of active students, ascending by cohort. */
+  cohortCounts: { cohort: number | null; studentCount: number }[];
+  /** Problems assigned to this batch on the requested day. */
+  assignedCount: number;
+  dayKey: DayKey;
+}
+
+/** One row of a student's batch history, newest first in API responses. */
+export interface BatchHistoryEntry {
+  id: string;
+  studentId: string;
+  fromBatchId: string | null;
+  fromBatchName: string | null;
+  fromBatchCode: string | null;
+  toBatchId: string | null;
+  toBatchName: string | null;
+  toBatchCode: string | null;
+  effectiveFromDayKey: DayKey;
+  reason: string | null;
+  source: BatchChangeSource;
+  changedById: string | null;
+  changedByName: string | null;
+  changedAt: string;
 }
 
 export interface SquadSummary {
@@ -75,10 +116,19 @@ export interface StudentSummary {
   name: string;
   email: string;
   phone: string | null;
-  leetcodeUsername: string;
+  /** Null when no LeetCode account has been linked yet — see the schema note. */
+  leetcodeUsername: string | null;
   status: StudentStatus;
   batchId: string | null;
   batchName: string | null;
+  batchCode: string | null;
+  /** Current cohort (1…6 today). Null when the student has not been assigned one. */
+  cohort: number | null;
+  /**
+   * The authoritative belt from the roster — never derived from score, solved counts or
+   * eligibility. Null when the roster has not supplied one.
+   */
+  maxBeltLevel: number | null;
   squadId: string | null;
   squadName: string | null;
   avatarUrl: string | null;
@@ -86,7 +136,10 @@ export interface StudentSummary {
   lastSyncedAt: string | null;
   currentStreak: number;
   longestStreak: number;
+  /** Lifetime distinct LeetCode problems solved. Never assignment completion. */
   totalSolved: number;
+  archivedAt: string | null;
+  archivedReason: string | null;
   createdAt: string;
 }
 
@@ -135,10 +188,27 @@ export interface StudentDailyReport {
   badges: BadgeSummary[];
 }
 
+/** Headline figures for one batch on the dashboard, sized to that batch's assignment. */
+export interface DashboardBatchBreakdown {
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  activeStudents: number;
+  assignedCount: number;
+  solvedBuckets: number[];
+  completionPercent: number;
+}
+
 export interface DashboardStats {
   dayKey: DayKey;
+  /** The batch filter applied; `null` when showing all batches. */
+  batchId: string | null;
+  /** Active students only — archived students are not part of the current programme. */
   totalStudents: number;
   activeStudents: number;
+  /** Per-batch figures, always present so the dashboard can show both without a refetch. */
+  batchBreakdown: DashboardBatchBreakdown[];
+  /** Null on an unfiltered multi-batch day: there is no single assignment for everyone. */
   assignment: AssignmentSummary | null;
   /** Index = number solved, so `solvedBuckets[4]` is the count who cleared everything. */
   solvedBuckets: number[];
@@ -171,6 +241,13 @@ export interface AssignmentProblem {
 export interface AssignmentSummary {
   id: string;
   dayKey: DayKey;
+  /**
+   * The batch this problem set belongs to. `null` means it predates batches and applied
+   * to every student — a historical fact, never retro-assigned to a batch.
+   */
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
   title: string | null;
   topic: string | null;
   notes: string | null;
@@ -186,9 +263,15 @@ export interface MentorBucketRow {
   name: string;
   email: string;
   squadName: string | null;
+  /** The batch the student was in *on this day*, not their batch now. */
   batchName: string | null;
-  leetcodeUsername: string;
+  batchCode: string | null;
+  cohort: number | null;
+  maxBeltLevel: number | null;
+  leetcodeUsername: string | null;
   solvedCount: number;
+  /** Problems assigned to *this student's* batch that day. */
+  assignedCount: number;
   completionTime: string | null;
   currentStreak: number;
   score: number;
@@ -206,9 +289,41 @@ export interface MentorBucket {
   students: MentorBucketRow[];
 }
 
+/**
+ * One batch's slice of a day: its own problem set, its own students, its own buckets.
+ *
+ * Sized independently per batch because the batches genuinely differ — Foundation may
+ * have 4 problems on a day Intermediate has 5, and bucketing either against the other's
+ * count would invent students who "solved 5 of 4".
+ */
+export interface MentorBatchSection {
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  assignment: AssignmentSummary | null;
+  /** This batch's problem count for the day. Never assume 4. */
+  assignedCount: number;
+  buckets: MentorBucket[];
+  totalStudents: number;
+}
+
 export interface MentorDashboard {
   dayKey: DayKey;
+  /** The batch filter that produced this view; `null` when showing all batches. */
+  batchId: string | null;
+  /**
+   * One section per batch that had students on this day, in batch sort order. A
+   * batch-filtered request yields exactly one section; an unfiltered request yields one
+   * per batch, which is what the "Foundation … / Intermediate …" daily tracker renders.
+   */
+  sections: MentorBatchSection[];
+  /**
+   * The single section's assignment when filtered to one batch, otherwise `null` —
+   * there is no one assignment for a multi-batch day, and picking one would misreport
+   * the other batch's problems as everyone's.
+   */
   assignment: AssignmentSummary | null;
+  /** Every student across all sections, bucketed by solved count. */
   buckets: MentorBucket[];
   totalStudents: number;
 }
@@ -220,6 +335,9 @@ export interface LeaderboardRow {
   name: string;
   squadName: string | null;
   batchName: string | null;
+  batchCode: string | null;
+  cohort: number | null;
+  maxBeltLevel: number | null;
   avatarUrl: string | null;
   solvedCount: number;
   currentStreak: number;
@@ -350,6 +468,12 @@ export interface StudentMetrics {
 
 export interface StudentProfile extends StudentSummary {
   levelProgress: LevelProgress;
+  /**
+   * Every batch this student has been placed in, newest first — the "Batch History"
+   * section. Present on the profile because a mentor reading a past result needs to know
+   * which batch it was earned in.
+   */
+  batchHistory: BatchHistoryEntry[];
   achievements: EvaluatedAchievement[];
   difficultyBreakdown: DifficultyBreakdown;
   /** Explicitly separated headline numbers — see `StudentMetrics`. */
@@ -450,8 +574,12 @@ export interface DailyEmailReportStudentRow {
   name: string;
   email: string;
   squadName: string | null;
+  /** The batch the student was in on the reported day — historical, not current. */
   batchName: string | null;
-  leetcodeUsername: string;
+  batchCode: string | null;
+  cohort: number | null;
+  leetcodeUsername: string | null;
+  /** Problems assigned to *this student's* batch that day. */
   assignedCount: number;
   solvedCount: number;
   completionPercent: number;
@@ -491,12 +619,33 @@ export interface DailyEmailReportSummary {
   dayKey: DayKey;
   dayLabelLong: string;
   dayLabelShort: string;
+  /** Which batch this report covers; `null` is the overall (all-batches) report. */
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
   problemsAssigned: number;
   studentsTracked: number;
   /** Indexed by solved count, `assignedCount` entries long — e.g. `bucketCounts[0]` = "solved 4 of 4". */
   bucketCounts: { solvedCount: number; label: string; count: number }[];
   overallCompletionPercent: number;
   generatedAt: string;
+}
+
+/**
+ * One batch's portion of a report. An overall report carries one of these per batch, so
+ * the email can print "Foundation — 4 assigned" and "Intermediate — 5 assigned" as
+ * separate blocks instead of averaging two different assignments into one meaningless
+ * number.
+ */
+export interface DailyEmailReportBatchSection {
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  assignedCount: number;
+  studentsTracked: number;
+  completionPercent: number;
+  problems: AssignmentProblem[];
+  buckets: DailyEmailReportBucket[];
 }
 
 /** The full computed report for one day — reconstructed live, never stored (§2, §21). */
@@ -507,7 +656,14 @@ export interface DailyEmailReport {
   /** Active students whose account predates the assignment but who joined after this
    *  particular day closed are excluded from the report; this is how many were. */
   excludedNotYetEnrolled: number;
+  /**
+   * Problems for the single batch being reported. Empty on an overall report spanning
+   * batches with different sets — read `batchSections` there, because there is no one
+   * problem list that is true for everybody.
+   */
   problems: AssignmentProblem[];
+  /** Per-batch blocks, in batch order. One entry when the report is batch-filtered. */
+  batchSections: DailyEmailReportBatchSection[];
   buckets: DailyEmailReportBucket[];
   students: DailyEmailReportStudentRow[];
   actionGroups: DailyEmailReportActionGroup[];
@@ -524,6 +680,10 @@ export interface EmailRecipientsInput {
 /** Unsent, fully-rendered preview of what an email would contain (§11). */
 export interface EmailPreview {
   dayKey: DayKey;
+  /** The batch this preview covers; `null` for the overall report. */
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
   fromEmail: string;
   toRecipients: string[];
   ccRecipients: string[];
@@ -535,6 +695,10 @@ export interface EmailPreview {
 export interface EmailReportRecord {
   id: string;
   dayKey: DayKey;
+  /** Which batch this report covered; `null` for the overall report. */
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
   status: EmailReportStatus;
   fromEmail: string;
   toRecipients: string[];

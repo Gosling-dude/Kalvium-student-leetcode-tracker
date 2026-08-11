@@ -141,7 +141,14 @@ async function main(): Promise<void> {
   // indistinguishable from a genuine sync in every report and leaderboard.
   const batch = await prisma.batch.upsert({
     where: { name: DEMO_BATCH_NAME },
-    create: { name: DEMO_BATCH_NAME, startDate: new Date('2026-06-01'), isActive: true },
+    create: {
+      name: DEMO_BATCH_NAME,
+      code: 'DEMO',
+      description: 'Synthetic demo cohort — never mixed with the real roster',
+      startDate: new Date('2026-06-01'),
+      isActive: true,
+      sortOrder: 900,
+    },
     update: {},
   });
 
@@ -187,6 +194,16 @@ async function main(): Promise<void> {
           // Demo students are marked as never synced, because they are not real
           // LeetCode accounts. Their history below is synthetic and labelled as such.
           syncState: { create: { status: 'NEVER_SYNCED' } },
+          // Placed in the demo batch from the start, so the historical-batch resolver
+          // has an answer for the synthetic days generated below.
+          batchHistory: {
+            create: {
+              toBatchId: batch.id,
+              effectiveFromDayKey: addDays(today, -400),
+              source: 'MIGRATION',
+              reason: 'Demo seed placement',
+            },
+          },
         },
       });
     }
@@ -205,12 +222,18 @@ async function main(): Promise<void> {
   for (let offset = DAYS - 1; offset >= 0; offset -= 1) {
     const dayKey = addDays(today, -offset);
 
-    let assignment = await prisma.assignment.findUnique({ where: { dayKey } });
+    // Scoped to the demo batch, not to every batch. A batch-less assignment would apply
+    // to real roster students too (that is what `batchId: null` means), which would put
+    // fabricated problem sets in front of the actual cohort.
+    let assignment = await prisma.assignment.findUnique({
+      where: { dayKey_batchId: { dayKey, batchId: batch.id } },
+    });
     if (!assignment) {
       const picked = [...problems].sort(() => random() - 0.5).slice(0, 4);
       assignment = await prisma.assignment.create({
         data: {
           dayKey,
+          batchId: batch.id,
           topic: picked[0]?.topicTags[0] ?? 'Mixed',
           title: `Day ${DAYS - offset}`,
           createdById: admin.id,
@@ -233,7 +256,7 @@ async function main(): Promise<void> {
   for (let offset = DAYS - 1; offset >= 0; offset -= 1) {
     const dayKey = addDays(today, -offset);
     const assignment = await prisma.assignment.findUnique({
-      where: { dayKey },
+      where: { dayKey_batchId: { dayKey, batchId: batch.id } },
       include: { problems: { include: { problem: true } } },
     });
     if (!assignment) continue;
@@ -285,6 +308,9 @@ async function main(): Promise<void> {
           studentId: student.id,
           dayKey,
           assignmentId: assignment.id,
+          // The batch this synthetic day belongs to, matching what the rollup would
+          // have frozen for a real day.
+          batchId: batch.id,
           assignedCount,
           solvedCount,
           score: score.total,

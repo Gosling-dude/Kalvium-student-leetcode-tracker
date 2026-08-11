@@ -26,9 +26,11 @@ import {
   type BlockerSummaryKey,
   type DailyEmailReport,
   type DailyEmailReportActionGroup,
+  type DailyEmailReportBatchSection,
   type DailyEmailReportBucket,
   type DailyEmailReportStudentRow,
   type DayKey,
+  type MentorBucketRow,
 } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -43,15 +45,36 @@ export class DailyReportService {
     private readonly dashboard: DashboardService,
   ) {}
 
-  /** The full report — everything the dashboard page and the email body need. */
-  async build(dayKey: DayKey, squadId?: string): Promise<DailyEmailReport> {
+  /**
+   * The full report — everything the dashboard page and the email body need.
+   *
+   * `filter.batchId` scopes the whole report to one batch, which is what produces the
+   * separate "Foundation" and "Intermediate" daily emails; omitting it produces the
+   * overall report, whose per-batch blocks live in `batchSections` because two batches
+   * with different problem counts have no single meaningful denominator (§13).
+   */
+  async build(
+    dayKey: DayKey,
+    filter: { squadId?: string; batchId?: string | null } = {},
+  ): Promise<DailyEmailReport> {
     const today = this.time.today();
     const isFutureDate = dayKey > today;
+    const batchId = filter.batchId ?? null;
+
+    const batch = batchId
+      ? await this.prisma.batch.findUnique({
+          where: { id: batchId },
+          select: { name: true, code: true },
+        })
+      : null;
 
     const emptySummary = {
       dayKey,
       dayLabelLong: formatDayKeyLong(dayKey),
       dayLabelShort: formatDayKeyShort(dayKey),
+      batchId,
+      batchName: batch?.name ?? null,
+      batchCode: batch?.code ?? null,
       problemsAssigned: 0,
       studentsTracked: 0,
       bucketCounts: [],
@@ -69,6 +92,7 @@ export class DailyReportService {
         isFutureDate: true,
         excludedNotYetEnrolled: 0,
         problems: [],
+        batchSections: [],
         buckets: [],
         students: [],
         actionGroups: [],
@@ -76,16 +100,24 @@ export class DailyReportService {
       };
     }
 
-    const mentor = await this.dashboard.getMentorDashboard(dayKey, squadId);
-    const assignment = mentor.assignment;
+    const mentor = await this.dashboard.getMentorDashboard(dayKey, {
+      squadId: filter.squadId,
+      batchId,
+    });
 
-    if (!assignment) {
+    // A day counts as assigned when *any* batch in scope was given problems. Requiring a
+    // single shared assignment would report an overall day as "no assignment" whenever
+    // the batches had different sets, which is the normal case.
+    const sectionsWithWork = mentor.sections.filter((section) => section.assignedCount > 0);
+
+    if (sectionsWithWork.length === 0) {
       return {
         summary: emptySummary,
         hasAssignment: false,
         isFutureDate: false,
         excludedNotYetEnrolled: 0,
         problems: [],
+        batchSections: [],
         buckets: [],
         students: [],
         actionGroups: [],
@@ -93,8 +125,9 @@ export class DailyReportService {
       };
     }
 
-    const assignedCount = assignment.problems.length;
-    const allRows = mentor.buckets.flatMap((bucket) => bucket.students);
+    const allRows = sectionsWithWork.flatMap((section) =>
+      section.buckets.flatMap((bucket) => bucket.students),
+    );
 
     // Exclude students who joined after this program day closed — a historical report
     // must reflect who was actually enrolled at the time, not who is enrolled now (§26).
@@ -110,7 +143,11 @@ export class DailyReportService {
 
     const blockers = await this.loadBlockers(dayKey, rows.map((r) => r.studentId));
 
+    // Every student is classified against *their own batch's* problem count, taken from
+    // the row itself. Using a single day-wide `assignedCount` would mark an Intermediate
+    // student who solved 4 of 4 as incomplete on a day Foundation had 5 (§4, §10).
     const students: DailyEmailReportStudentRow[] = rows.map((row) => {
+      const assignedCount = row.assignedCount;
       const tier = actionTierFor(row.solvedCount, assignedCount);
       const blocker = blockers.get(row.studentId) ?? null;
       return {
@@ -119,6 +156,8 @@ export class DailyReportService {
         email: row.email,
         squadName: row.squadName,
         batchName: row.batchName,
+        batchCode: row.batchCode,
+        cohort: row.cohort,
         leetcodeUsername: row.leetcodeUsername,
         assignedCount,
         solvedCount: row.solvedCount,
@@ -136,19 +175,53 @@ export class DailyReportService {
       };
     });
 
-    const buckets = this.buildBuckets(assignedCount, students);
+    const studentById = new Map(students.map((student) => [student.studentId, student]));
+
+    // One block per batch, each sized to that batch's own assignment.
+    const batchSections: DailyEmailReportBatchSection[] = sectionsWithWork.map((section) => {
+      const sectionStudents = section.buckets
+        .flatMap((bucket) => bucket.students)
+        .map((row) => studentById.get(row.studentId))
+        .filter((student): student is DailyEmailReportStudentRow => student !== undefined);
+
+      const sectionSolved = sectionStudents.reduce((sum, s) => sum + s.solvedCount, 0);
+      const sectionAssigned = sectionStudents.reduce((sum, s) => sum + s.assignedCount, 0);
+
+      return {
+        batchId: section.batchId,
+        batchName: section.batchName,
+        batchCode: section.batchCode,
+        assignedCount: section.assignedCount,
+        studentsTracked: sectionStudents.length,
+        completionPercent: overallCompletionPercent(sectionSolved, sectionAssigned),
+        problems: section.assignment?.problems ?? [],
+        buckets: this.buildBuckets(section.assignedCount, sectionStudents),
+      };
+    });
+
+    // The overall bucket list spans the largest assignment in scope, so nobody falls
+    // outside it on a day where the batches were given different numbers of problems.
+    const maxAssigned = Math.max(0, ...students.map((student) => student.assignedCount));
+    const buckets = this.buildBuckets(maxAssigned, students);
     const actionGroups = this.buildActionGroups(students);
     const blockerSummary = this.buildBlockerSummary(students);
 
     const totalSolved = students.reduce((sum, s) => sum + s.solvedCount, 0);
     const totalAssigned = students.reduce((sum, s) => sum + s.assignedCount, 0);
 
+    // A single problem list is only true when one batch is in scope; on an overall
+    // report spanning different sets, `batchSections` carries them per batch instead.
+    const singleSection = batchSections.length === 1 ? batchSections[0] : null;
+
     return {
       summary: {
         dayKey,
         dayLabelLong: formatDayKeyLong(dayKey),
         dayLabelShort: formatDayKeyShort(dayKey),
-        problemsAssigned: assignedCount,
+        batchId,
+        batchName: batch?.name ?? singleSection?.batchName ?? null,
+        batchCode: batch?.code ?? singleSection?.batchCode ?? null,
+        problemsAssigned: singleSection?.assignedCount ?? maxAssigned,
         studentsTracked: students.length,
         bucketCounts: buckets.map((b) => ({
           solvedCount: b.solvedCount,
@@ -161,7 +234,8 @@ export class DailyReportService {
       hasAssignment: true,
       isFutureDate: false,
       excludedNotYetEnrolled,
-      problems: assignment.problems,
+      problems: singleSection?.problems ?? [],
+      batchSections,
       buckets,
       students,
       actionGroups,

@@ -85,14 +85,36 @@ npm run dev                     # API on :4000, web on :3000
 columns the programme's spreadsheet already uses:
 
 ```
-Full Name,Kalvium Email ID,Squad,Leet code user name,Leet code profile link
+Full Name,Kalvium Email ID,Batch,Cohort,Max Belt Level,Squad,Leet code user name,Leet code profile link
 ```
+
+`Batch` accepts a code (`A`, `B`) or a name (`Foundation`, `Intermediate`) and must name
+a batch that already exists — the loader will not invent one from a typo. `Cohort` and
+`Max Belt Level` are numbers; `Max Belt Level` is stored verbatim and is never derived
+from score, solved counts or eligibility. The LeetCode columns are optional: a student
+can be on the roster before their handle has been collected, and the sync skips them
+until one is set rather than reporting a "user not found" that is not true.
 
 > **`roster.csv` is gitignored and must stay that way.** It contains students' real
 > names and email addresses, and this repository is public. `roster.example.csv` is the
 > committed format reference — copy it to `roster.csv` and fill it in. When the file is
 > absent the loader skips quietly, so a fresh clone and the deploy build both work
 > without it.
+
+The loader **synchronises** rather than merely inserting. Matching is on the normalised
+email, so it is safe to re-run at any time:
+
+| Roster says | Database says | Result |
+| --- | --- | --- |
+| present | missing | created |
+| present | present | name, batch, cohort and belt updated in place |
+| present | different batch | moved, and the change recorded in batch history |
+| absent | present, with history | **archived** — hidden from every current view, every historical record kept |
+| absent | present, no history at all | deleted |
+
+Archiving is never deletion. A student who leaves the programme keeps their submissions,
+daily results, streak history, leaderboard entries and email history; only their presence
+in the current roster ends.
 
 Update that file when the cohort changes and re-run the loader:
 
@@ -269,9 +291,10 @@ on volume alone.
 | `npm run build` | Build shared → API → web |
 | `npm run typecheck` | Type-check all three packages |
 | `npm test` | Unit tests |
+| `npm run test:e2e -w @dsa/api` | Integration tests (needs `DATABASE_URL`) |
 | `npm run db:migrate` | Apply migrations |
 | `npm run db:seed` | Seed admin, scoring formula, demo cohort |
-| `npm run db:seed:students` | Load the real roster from `apps/api/prisma/roster.csv` |
+| `npm run db:seed:students` | Synchronise the roster from `apps/api/prisma/roster.csv` (`-- --dry-run` to preview) |
 | `npm run db:studio` | Prisma Studio |
 | `npm run smoke:provider -w @dsa/api` | Live LeetCode contract check |
 

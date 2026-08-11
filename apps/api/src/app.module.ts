@@ -18,6 +18,8 @@ import { ProvidersModule } from './modules/providers/providers.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { StudentsModule } from './modules/students/students.module';
+import { BatchesModule } from './modules/batches/batches.module';
+import { BatchesHttpModule } from './modules/batches/batches-http.module';
 import { AssignmentsModule } from './modules/assignments/assignments.module';
 import { ScoringModule } from './modules/scoring/scoring.module';
 import { SyncModule } from './modules/sync/sync.module';
@@ -69,6 +71,8 @@ class CoreModule {}
 
     AuthModule,
     StudentsModule,
+    BatchesModule,
+    BatchesHttpModule,
     AssignmentsModule,
     ScoringModule,
     SyncModule,

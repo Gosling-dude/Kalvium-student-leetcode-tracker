@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Minus } from 'lucide-react';
 
 import { api } from '@/lib/api';
+import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
 import { cn, formatPercent } from '@/lib/utils';
 import {
   Badge,
@@ -26,11 +27,12 @@ const PERIODS: Period[] = ['DAILY', 'WEEKLY', 'MONTHLY'];
 
 export default function LeaderboardPage() {
   const [period, setPeriod] = useState<Period>('DAILY');
+  const { selected: batch } = useBatchFilter();
   const [scope, setScope] = useState<Scope>('students');
 
   const students = useQuery({
-    queryKey: ['leaderboard', 'students', period],
-    queryFn: () => api.leaderboard({ period }),
+    queryKey: ['leaderboard', 'students', period, batch],
+    queryFn: () => api.leaderboard({ period, batch: batch ?? undefined }),
     enabled: scope === 'students',
   });
 
@@ -53,6 +55,8 @@ export default function LeaderboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Squad rankings are not batch-scoped: a squad already belongs to one batch. */}
+          {scope === 'students' ? <BatchFilter /> : null}
           <SegmentedControl
             options={[
               { value: 'students', label: 'Students' },

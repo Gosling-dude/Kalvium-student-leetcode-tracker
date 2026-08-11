@@ -3,6 +3,9 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger'
 import type { Response } from 'express';
 import { EXPORT_FORMATS, type ExportFormat } from '@dsa/shared';
 
+import { BadRequestException } from '@nestjs/common';
+import { BatchesModule } from '../batches/batches.module';
+import { BatchesService } from '../batches/batches.service';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { LeaderboardModule } from '../leaderboard/leaderboard.module';
 import { ReportsService } from './reports.service';
@@ -11,13 +14,35 @@ import { ReportsService } from './reports.service';
 @ApiBearerAuth()
 @Controller('reports')
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly batches: BatchesService,
+  ) {}
+
+  /** Rejects a non-numeric cohort rather than silently exporting every cohort. */
+  private parseCohort(cohort?: string): number | null {
+    if (!cohort) return null;
+    const parsed = Number.parseInt(cohort, 10);
+    if (Number.isNaN(parsed)) {
+      throw new BadRequestException(`"${cohort}" is not a cohort number.`);
+    }
+    return parsed;
+  }
 
   @Get('daily')
-  @ApiOperation({ summary: 'Daily report data' })
+  @ApiOperation({ summary: 'Daily report data, overall or for one batch/cohort' })
   @ApiQuery({ name: 'dayKey', required: false })
-  daily(@Query('dayKey') dayKey?: string) {
-    return this.reports.dailyReport(dayKey);
+  @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
+  @ApiQuery({ name: 'cohort', required: false })
+  async daily(
+    @Query('dayKey') dayKey?: string,
+    @Query('batch') batch?: string,
+    @Query('cohort') cohort?: string,
+  ) {
+    return this.reports.dailyReport(dayKey, {
+      batchId: await this.batches.resolveSelector(batch),
+      cohort: this.parseCohort(cohort),
+    });
   }
 
   @Get('weekly')
@@ -49,21 +74,39 @@ export class ReportsController {
   @Get('export/daily')
   @ApiOperation({ summary: 'Download the daily report' })
   @ApiQuery({ name: 'format', required: false, enum: EXPORT_FORMATS })
+  @ApiQuery({ name: 'batch', required: false, description: 'Batch-wise export' })
+  @ApiQuery({ name: 'cohort', required: false, description: 'Cohort-wise export' })
   async exportDaily(
     @Res() res: Response,
     @Query('dayKey') dayKey?: string,
     @Query('format') format: ExportFormat = 'XLSX',
+    @Query('batch') batch?: string,
+    @Query('cohort') cohort?: string,
   ): Promise<void> {
-    const report = await this.reports.dailyReport(dayKey);
+    const batchId = await this.batches.resolveSelector(batch);
+    const cohortNumber = this.parseCohort(cohort);
+    const report = await this.reports.dailyReport(dayKey, { batchId, cohort: cohortNumber });
+
+    // The filename names the slice, so a folder of exports stays self-describing.
+    const scope = [
+      report.sections.length === 1 ? report.sections[0]!.batchCode : null,
+      cohortNumber ? `cohort-${cohortNumber}` : null,
+    ]
+      .filter(Boolean)
+      .join('-');
+
     const payload = await this.reports.export(
       format,
-      `daily-report-${report.dayKey}`,
+      `daily-report-${report.dayKey}${scope ? `-${scope}` : ''}`,
       [
         { header: 'Student', key: 'name', width: 26 },
         { header: 'Email', key: 'email', width: 30 },
         { header: 'Squad', key: 'squad', width: 16 },
-        { header: 'Batch', key: 'batch', width: 16 },
+        { header: 'Batch', key: 'batch', width: 20 },
+        { header: 'Cohort', key: 'cohort', width: 8 },
+        { header: 'Max Belt', key: 'maxBeltLevel', width: 10 },
         { header: 'LeetCode', key: 'leetcodeUsername', width: 20 },
+        { header: 'Assigned', key: 'assigned', width: 10 },
         { header: 'Solved', key: 'solved', width: 8 },
         { header: 'Completed At', key: 'completionTime', width: 14 },
         { header: 'Streak', key: 'streak', width: 8 },
@@ -138,7 +181,7 @@ export class ReportsController {
 }
 
 @Module({
-  imports: [DashboardModule, LeaderboardModule],
+  imports: [DashboardModule, LeaderboardModule, BatchesModule],
   controllers: [ReportsController],
   providers: [ReportsService],
   exports: [ReportsService],

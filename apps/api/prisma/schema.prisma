@@ -53,11 +53,37 @@ enum ProblemStatus {
   UNKNOWN
 }
 
+/// `ARCHIVED` means "no longer in the current program" — the state a student reaches
+/// when they fall off the authoritative roster. It is deliberately *not* a delete:
+/// their submissions, daily statuses, streak history, leaderboard entries and email
+/// history all remain, because those are historical facts that stay true after someone
+/// leaves. Every "current" surface (active counts, dashboard, daily tracker,
+/// leaderboards, new assignments, daily emails) filters archived students out; every
+/// historical surface keeps them.
 enum StudentStatus {
   ACTIVE
   INACTIVE
   DROPPED
   PAUSED
+  ARCHIVED
+}
+
+/// Lifecycle of a batch itself, independent of whether students are in it. An archived
+/// batch stops appearing in pickers and current statistics but keeps owning its
+/// historical assignments and daily statuses.
+enum BatchStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+/// What caused a `StudentBatchHistory` row. Distinguishes a mentor's deliberate move
+/// from the roster loader's initial placement, which matters when auditing why a
+/// student's batch changed.
+enum BatchChangeSource {
+  MANUAL
+  ROSTER_SYNC
+  IMPORT
+  MIGRATION
 }
 
 /// Why a student's data looks the way it does. Distinguishes "genuinely solved
@@ -188,16 +214,17 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  mentoredSquads        Squad[]        @relation("SquadMentor")
-  assignments           Assignment[]   @relation("AssignmentAuthor")
+  mentoredSquads        Squad[]               @relation("SquadMentor")
+  assignments           Assignment[]          @relation("AssignmentAuthor")
   notes                 MentorNote[]
   auditLogs             AuditLog[]
   refreshTokens         RefreshToken[]
   apiKeys               ApiKey[]
   syncJobs              SyncJob[]
-  blockersRecorded      Blocker[]      @relation("BlockerRecordedBy")
-  emailReportsGenerated EmailReport[]  @relation("EmailReportGeneratedBy")
-  emailReportsApproved  EmailReport[]  @relation("EmailReportApprovedBy")
+  blockersRecorded      Blocker[]             @relation("BlockerRecordedBy")
+  emailReportsGenerated EmailReport[]         @relation("EmailReportGeneratedBy")
+  emailReportsApproved  EmailReport[]         @relation("EmailReportApprovedBy")
+  batchChanges          StudentBatchHistory[] @relation("BatchChangedBy")
 
   @@index([role])
   @@index([isActive])
@@ -246,19 +273,49 @@ model ApiKey {
 // Cohort structure
 // ---------------------------------------------------------------------------
 
+/// A batch is a first-class organisational unit, not a label on a student.
+///
+/// Two exist today — `A` (Foundation Level) and `B` (Intermediate Level) — but nothing
+/// in the schema or the code below it assumes that number. Batches are looked up by
+/// `code` at the edges (URLs, CSV columns, filter chips) and carried as `batchId`
+/// everywhere else, so adding `C` is a row in this table plus nothing else.
+///
+/// A batch owns its own assignments: two batches can have entirely different problem
+/// sets on the same day, and a student is only ever evaluated against the set belonging
+/// to the batch *they were in on that day* (see `DailyStatus.batchId`).
 model Batch {
-  id        String    @id @default(uuid()) @db.Uuid
-  name      String    @unique
+  id          String      @id @default(uuid()) @db.Uuid
+  /// Human-readable, e.g. "Foundation Level".
+  name        String      @unique
+  /// Short stable key used in URLs, filters and the roster CSV, e.g. "A". Compared
+  /// case-insensitively at the edges and stored uppercase.
+  code        String      @unique
+  description String?
+  status      BatchStatus @default(ACTIVE)
+  /// Display order for pickers and reports, so Foundation always precedes Intermediate
+  /// regardless of name or insertion order.
+  sortOrder   Int         @default(0)
+
   startDate DateTime?
   endDate   DateTime?
+  /// Retained alongside `status` because existing queries and the deploy'd API read it.
+  /// `status` is authoritative; this mirrors it for backward compatibility.
   isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
 
-  students Student[]
-  squads   Squad[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  students           Student[]
+  squads             Squad[]
+  assignments        Assignment[]
+  dailyStatuses      DailyStatus[]
+  leaderboardEntries LeaderboardEntry[]
+  emailReports       EmailReport[]
+  movementsFrom      StudentBatchHistory[] @relation("BatchMovedFrom")
+  movementsTo        StudentBatchHistory[] @relation("BatchMovedTo")
 
   @@index([isActive])
+  @@index([status])
   @@map("batches")
 }
 
@@ -297,13 +354,44 @@ model Student {
   phone               String?
   /// Stored lowercase; LeetCode usernames are case-insensitive for lookup but the
   /// API echoes back the canonical casing, which we keep in `leetcodeDisplayName`.
-  leetcodeUsername    String        @unique
+  ///
+  /// Nullable because roster membership and a linked LeetCode account are genuinely
+  /// separate facts: a student can be on the authoritative roster before anyone has
+  /// collected their handle. The alternative — inventing a placeholder handle — would
+  /// make them permanently indistinguishable from a student whose handle is simply
+  /// wrong, and the sync would keep reporting a "user not found" that is not true.
+  /// Students with no handle are skipped by the sync and shown as never-synced, which
+  /// is exactly what they are.
+  ///
+  /// Postgres treats NULLs as distinct, so the unique index still permits many students
+  /// without a handle while forbidding two students sharing one.
+  leetcodeUsername    String?       @unique
   leetcodeDisplayName String?
   status              StudentStatus @default(ACTIVE)
   avatarUrl           String?
 
+  /// The batch the student is in *now*. Historical placement lives in
+  /// `StudentBatchHistory` and in `DailyStatus.batchId` — never re-derive a past day's
+  /// batch from this column, which changes whenever a mentor moves someone.
   batchId String? @db.Uuid
   squadId String? @db.Uuid
+
+  /// Cohort within the programme (1…6 today, stored as an integer so ordering and
+  /// counting are exact). Not an enum: cohorts are added routinely and a new one must
+  /// not require a migration.
+  cohort Int?
+
+  /// The authoritative belt level from the roster. Deliberately *stored*, never derived
+  /// from score, solved counts, languages or eligibility — those produced a different
+  /// number from the one the programme actually awards. The derived belt fields
+  /// elsewhere are left intact for future use; this is the one that is displayed.
+  maxBeltLevel Int?
+
+  /// Set when the student leaves the current programme (`status = ARCHIVED`). Kept as
+  /// separate columns rather than inferred from `status` so "when did they leave and
+  /// why" survives a later status change.
+  archivedAt     DateTime?
+  archivedReason String?
 
   /// Denormalised aggregates, refreshed after each sync. Always derivable from
   /// `Submission` + `DailyStatus`; cached here so list views need no joins.
@@ -318,8 +406,8 @@ model Student {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch         Batch?               @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  squad         Squad?               @relation(fields: [squadId], references: [id], onDelete: SetNull)
+  batch         Batch?                @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  squad         Squad?                @relation(fields: [squadId], references: [id], onDelete: SetNull)
   submissions   Submission[]
   dailyStatuses DailyStatus[]
   syncState     StudentSyncState?
@@ -328,12 +416,62 @@ model Student {
   entries       LeaderboardEntry[]
   notifications NotificationLog[]
   blockers      Blocker[]
+  batchHistory  StudentBatchHistory[]
 
   @@index([squadId])
   @@index([batchId])
   @@index([status])
   @@index([name])
+  @@index([cohort])
+  /// The shape of nearly every current-roster query: active students in one batch.
+  @@index([status, batchId])
   @@map("students")
+}
+
+/// Immutable log of every batch placement a student has ever had.
+///
+/// This is what makes §7 enforceable: a historical report asks "which batch was this
+/// student in on 10 Aug?" and gets the answer that was true then, not the answer that
+/// is true now. Rows are append-only — moving a student back and forth produces three
+/// rows, not one edited row — so the audit trail survives.
+///
+/// `effectiveFromDayKey` is a program-day string rather than a timestamp because every
+/// other day-scoped comparison in the system is (see the schema header): resolving
+/// "batch on day D" must be a string comparison against the same keys `DailyStatus`
+/// and `Assignment` use, with no timezone maths in the middle.
+model StudentBatchHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @db.Uuid
+
+  /// Null for the very first placement (the student came from nowhere) and for a move
+  /// out of the pre-batch era.
+  fromBatchId String? @db.Uuid
+  toBatchId   String? @db.Uuid
+
+  /// The program day this placement takes effect, inclusive. A move recorded today does
+  /// not rewrite yesterday.
+  effectiveFromDayKey String
+
+  /// Optional but encouraged — the admin UI asks for it on every manual move.
+  reason String?
+  source BatchChangeSource @default(MANUAL)
+
+  changedById   String? @db.Uuid
+  /// Denormalised so the history still reads correctly after a mentor account is deleted.
+  changedByName String?
+
+  changedAt DateTime @default(now())
+
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  fromBatch Batch?  @relation("BatchMovedFrom", fields: [fromBatchId], references: [id], onDelete: SetNull)
+  toBatch   Batch?  @relation("BatchMovedTo", fields: [toBatchId], references: [id], onDelete: SetNull)
+  changedBy User?   @relation("BatchChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  /// The resolver's access path: newest placement at or before a given day.
+  @@index([studentId, effectiveFromDayKey])
+  @@index([toBatchId])
+  @@index([changedAt])
+  @@map("student_batch_history")
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +508,27 @@ model Problem {
   @@map("problems")
 }
 
+/// One day's problem set *for one batch*.
+///
+/// The unique key is `(dayKey, batchId)`, not `dayKey`: Foundation and Intermediate get
+/// different questions on the same date, and a student is evaluated only against their
+/// own batch's row.
+///
+/// `batchId` is nullable, and null means something specific and permanent: this
+/// assignment predates batches and applied to everybody. Those rows are never
+/// retro-assigned to a batch — doing so would be exactly the historical rewrite §7
+/// forbids. Resolution is therefore "the row for the student's batch that day, falling
+/// back to the legacy batch-less row", which is correct in both eras.
+///
+/// Postgres treats NULLs as distinct in a unique index, so `@@unique([dayKey, batchId])`
+/// alone would still permit two legacy rows for one day. A partial unique index on
+/// `day_key WHERE batch_id IS NULL` closes that gap — see the migration.
 model Assignment {
   id     String @id @default(uuid()) @db.Uuid
-  /// `YYYY-MM-DD` in the program timezone. One assignment per program day.
-  dayKey String @unique
+  /// `YYYY-MM-DD` in the program timezone.
+  dayKey String
+
+  batchId String? @db.Uuid
 
   title       String?
   topic       String?
@@ -388,10 +543,13 @@ model Assignment {
   updatedAt DateTime @updatedAt
 
   createdBy     User?               @relation("AssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  batch         Batch?              @relation(fields: [batchId], references: [id], onDelete: Restrict)
   problems      AssignmentProblem[]
   dailyStatuses DailyStatus[]
 
+  @@unique([dayKey, batchId])
   @@index([dayKey])
+  @@index([batchId, dayKey])
   @@map("assignments")
 }
 
@@ -505,6 +663,9 @@ model StudentSyncState {
 
   @@index([status])
   @@index([lastSyncedAt])
+  /// Created by the `track_provider_profile_freshness` migration; declared here so the
+  /// schema and the database agree. Drives "whose profile totals are stale".
+  @@index([providerProfileFetchedAt])
   @@map("student_sync_states")
 }
 
@@ -519,6 +680,16 @@ model DailyStatus {
   studentId    String  @db.Uuid
   dayKey       String
   assignmentId String? @db.Uuid
+
+  /// The batch this student was in *on this day* — a historical fact, frozen.
+  ///
+  /// This column is the reason a batch move cannot rewrite the past. The rollup writes
+  /// it only when it is still null (see `RollupService.persistDailyStatus`); once set it
+  /// is never updated, so recomputing 10 Aug after a 15 Aug move still reports 10 Aug
+  /// under the batch the student was actually in. Null on rows written before batches
+  /// existed, which is why batch-filtered history is explicit about the pre-batch era
+  /// rather than silently attributing it to a batch that did not exist yet.
+  batchId String? @db.Uuid
 
   assignedCount Int @default(0)
   solvedCount   Int @default(0)
@@ -548,6 +719,7 @@ model DailyStatus {
 
   student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
   assignment      Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  batch           Batch?               @relation(fields: [batchId], references: [id], onDelete: SetNull)
   problemStatuses DailyProblemStatus[]
 
   @@unique([studentId, dayKey])
@@ -555,6 +727,8 @@ model DailyStatus {
   @@index([dayKey, solvedCount])
   @@index([studentId])
   @@index([dayKey, score])
+  /// The daily tracker's query: one day, one batch, bucketed by solved count.
+  @@index([dayKey, batchId])
   @@map("daily_statuses")
 }
 
@@ -596,6 +770,12 @@ model LeaderboardEntry {
   periodKey String
   studentId String            @db.Uuid
 
+  /// The batch the student was ranked *as part of* when this snapshot was built.
+  /// Snapshotted rather than joined through `Student.batchId` so a later batch move
+  /// leaves past leaderboards historically correct — the point of materialising ranks
+  /// in the first place.
+  batchId String? @db.Uuid
+
   rank             Int
   previousRank     Int?
   score            Int     @default(0)
@@ -608,10 +788,12 @@ model LeaderboardEntry {
   computedAt DateTime @default(now())
 
   student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  batch   Batch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@unique([period, periodKey, studentId])
   @@index([period, periodKey, rank])
   @@index([studentId])
+  @@index([period, periodKey, batchId, rank])
   @@map("leaderboard_entries")
 }
 
@@ -906,6 +1088,11 @@ model EmailReport {
   dayKey String
   status EmailReportStatus @default(DRAFT)
 
+  /// Which batch this report covers; null means the overall (all-batches) report. A day
+  /// can therefore have a Foundation report, an Intermediate report and an overall one
+  /// side by side, each tracked through its own approval lifecycle.
+  batchId String? @db.Uuid
+
   fromEmail    String
   toRecipients String[]
   ccRecipients String[] @default([])
@@ -935,11 +1122,13 @@ model EmailReport {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  generatedBy User? @relation("EmailReportGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
-  approvedBy  User? @relation("EmailReportApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  generatedBy User?  @relation("EmailReportGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
+  approvedBy  User?  @relation("EmailReportApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  batch       Batch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@index([dayKey])
   @@index([status])
   @@index([dayKey, status])
+  @@index([dayKey, batchId, status])
   @@map("email_reports")
 }

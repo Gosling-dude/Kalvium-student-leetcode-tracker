@@ -15,7 +15,9 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { AssignmentsService } from './assignments.service';
+import { BatchesService } from '../batches/batches.service';
 import {
+  AssignmentDayQueryDto,
   AssignmentQueryDto,
   CreateAssignmentDto,
   PreviewProblemDto,
@@ -26,30 +28,44 @@ import {
 @ApiBearerAuth()
 @Controller('assignments')
 export class AssignmentsController {
-  constructor(private readonly assignments: AssignmentsService) {}
+  constructor(
+    private readonly assignments: AssignmentsService,
+    private readonly batches: BatchesService,
+  ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Assignment history' })
-  findAll(@Query() query: AssignmentQueryDto) {
+  @ApiOperation({ summary: 'Assignment history, optionally for one batch' })
+  async findAll(@Query() query: AssignmentQueryDto) {
     return this.assignments.findAll({
       page: query.page,
       pageSize: query.pageSize,
       from: query.from,
       to: query.to,
       search: query.search,
+      batchId: await this.batches.resolveSelector(query.batch),
     });
   }
 
   @Get('today')
-  @ApiOperation({ summary: "Today's assignment" })
-  today() {
-    return this.assignments.findToday();
+  @ApiOperation({ summary: "Today's assignment for a batch, or every batch's" })
+  async today(@Query() query: AssignmentDayQueryDto) {
+    const batchId = await this.batches.resolveSelector(query.batch);
+    return batchId ? this.assignments.findToday(batchId) : this.assignments.findAllToday();
   }
 
+  /**
+   * Without `?batch=` this returns *every* batch's set for the day, because on a
+   * multi-batch day there is no single assignment that is true for everyone — returning
+   * one batch's problems as "the day's assignment" is how the other batch ends up
+   * measured against work it was never given.
+   */
   @Get('day/:dayKey')
-  @ApiOperation({ summary: 'Assignment for a specific date' })
-  byDay(@Param('dayKey') dayKey: string) {
-    return this.assignments.findByDay(dayKey);
+  @ApiOperation({ summary: "A date's assignment for one batch, or every batch's" })
+  async byDay(@Param('dayKey') dayKey: string, @Query() query: AssignmentDayQueryDto) {
+    const batchId = await this.batches.resolveSelector(query.batch);
+    return batchId
+      ? this.assignments.findByDay(dayKey, batchId)
+      : this.assignments.findAllByDay(dayKey);
   }
 
   @Post('preview')
@@ -63,7 +79,7 @@ export class AssignmentsController {
   @Post()
   @Roles('ADMIN', 'MENTOR')
   @Audit('ASSIGNMENT_CREATED', 'Assignment')
-  @ApiOperation({ summary: 'Create the assignment for a day' })
+  @ApiOperation({ summary: 'Create a day\'s problem set for one, several or all batches' })
   create(@Body() dto: CreateAssignmentDto, @CurrentUser() user: RequestUser) {
     return this.assignments.create(dto, user.id);
   }

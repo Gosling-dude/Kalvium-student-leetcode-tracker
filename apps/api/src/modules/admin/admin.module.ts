@@ -25,6 +25,8 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringModule } from '../scoring/scoring.module';
+import { BatchesModule } from '../batches/batches.module';
+import { BatchesService } from '../batches/batches.service';
 import { RollupService } from '../scoring/rollup.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
 import { AuditService } from '../audit/audit.service';
@@ -62,6 +64,7 @@ export class AdminController {
     private readonly rollup: RollupService,
     private readonly scoringConfig: ScoringConfigService,
     private readonly audit: AuditService,
+    private readonly batches: BatchesService,
   ) {}
 
   // --- Batches -------------------------------------------------------------
@@ -71,15 +74,19 @@ export class AdminController {
   listBatches() {
     return this.prisma.batch.findMany({
       include: { _count: { select: { students: true, squads: true } } },
-      orderBy: { name: 'asc' },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     });
   }
 
   @Post('batches')
   @Audit('BATCH_CREATED', 'Batch')
   @ApiOperation({ summary: 'Create a batch' })
-  createBatch(@Body() dto: UpsertBatchDto) {
-    return this.prisma.batch.create({ data: { name: dto.name } });
+  async createBatch(@Body() dto: UpsertBatchDto) {
+    // `code` is required and unique; derive one so this legacy name-only route keeps
+    // working alongside the richer POST /batches.
+    return this.prisma.batch.create({
+      data: { name: dto.name, code: await this.batches.deriveAvailableCode(dto.name) },
+    });
   }
 
   @Patch('batches/:id')
@@ -267,7 +274,7 @@ export class AdminController {
 }
 
 @Module({
-  imports: [ScoringModule],
+  imports: [ScoringModule, BatchesModule],
   controllers: [AdminController],
 })
 export class AdminModule {}

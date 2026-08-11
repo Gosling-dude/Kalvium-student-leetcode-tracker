@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 import { api } from '@/lib/api';
+import { BatchManagement } from '@/components/batch-management';
 import { timeAgo } from '@/lib/utils';
 import {
   Badge,
@@ -66,9 +67,11 @@ export default function AdminPage() {
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Admin</h1>
         <p className="text-sm text-[var(--color-fg-muted)]">
-          Queue health, sync diagnostics and score recomputation.
+          Batch management, queue health, sync diagnostics and score recomputation.
         </p>
       </header>
+
+      <BatchManagement />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile

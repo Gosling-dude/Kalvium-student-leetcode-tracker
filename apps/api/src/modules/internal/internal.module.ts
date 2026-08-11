@@ -5,6 +5,7 @@ import { ScoringModule } from '../scoring/scoring.module';
 import { AuthModule } from '../auth/auth.module';
 import { AuditModule } from '../audit/audit.module';
 import { EmailReportsModule } from '../email-reports/email-reports.module';
+import { BatchesModule } from '../batches/batches.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CronTasksService } from './cron-tasks.service';
 import { InternalController } from './internal.controller';
@@ -22,6 +23,7 @@ import { InternalController } from './internal.controller';
     AuditModule,
     EmailReportsModule,
     NotificationsModule,
+    BatchesModule,
   ],
   controllers: [InternalController],
   providers: [CronTasksService],

@@ -23,6 +23,7 @@ import {
   assignmentWindow,
   calculateAssignmentCompletion,
   computeStreaks,
+  selectAssignmentForBatch,
   type AssignedProblemRef,
   type AssignmentCompletionResult,
   type CompletionSubmission,
@@ -34,6 +35,7 @@ import {
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringConfigService } from './scoring-config.service';
+import { BatchesService } from '../batches/batches.service';
 
 /** How far back a streak is traced. Beyond this it is not meaningfully "current". */
 const STREAK_HISTORY_DAYS = 400;
@@ -52,6 +54,7 @@ export class StudentMetricsService {
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
     private readonly scoringConfig: ScoringConfigService,
+    private readonly batches: BatchesService,
   ) {}
 
   // --- 1. Lifetime LeetCode solved -----------------------------------------
@@ -128,15 +131,27 @@ export class StudentMetricsService {
    *
    * Returns `null` when there was no assignment that day — which is *not* the same as
    * "solved nothing", and callers must not treat it as a zero.
+   *
+   * The problem set is the one belonging to the batch the student was in *on that day*,
+   * resolved from their placement history. A Foundation student is never measured
+   * against Intermediate's problems, and a student who has since moved is still measured
+   * against the set they were actually given (§4, §7).
    */
   async calculateAssignmentCompletionForStudent(
     studentId: string,
     dayKey: DayKey,
   ): Promise<AssignmentCompletionResult | null> {
-    const assignment = await this.prisma.assignment.findUnique({
-      where: { dayKey },
+    const batchIdOnDay = await this.batches.batchOnDay(studentId, dayKey);
+
+    const candidates = await this.prisma.assignment.findMany({
+      where: {
+        dayKey,
+        ...(batchIdOnDay ? { OR: [{ batchId: batchIdOnDay }, { batchId: null }] } : { batchId: null }),
+      },
       include: { problems: { include: { problem: true }, orderBy: { position: 'asc' } } },
     });
+
+    const assignment = selectAssignmentForBatch(candidates, batchIdOnDay);
     if (!assignment || assignment.problems.length === 0) return null;
 
     const assigned: AssignedProblemRef[] = assignment.problems.map((link) => ({

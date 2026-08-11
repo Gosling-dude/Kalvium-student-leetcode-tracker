@@ -38,19 +38,26 @@ export class LeaderboardService {
         where: {
           period,
           periodKey,
+          // Batch filtering uses the batch snapshotted on the *entry* — who was ranked
+          // as part of that batch for this period — not the student's current batch.
+          // Filtering on the student would move an old ranking between leaderboards the
+          // moment someone changes batch, silently rewriting settled standings (§12).
+          ...(options.batchId ? { batchId: options.batchId } : {}),
           student: {
+            // Archived students are out of the current programme, so out of current
+            // leaderboards (§12). Their past entries stay in the table untouched.
             status: 'ACTIVE',
             ...(options.squadId ? { squadId: options.squadId } : {}),
-            ...(options.batchId ? { batchId: options.batchId } : {}),
           },
         },
         include: {
           student: {
             include: {
               squad: { select: { name: true } },
-              batch: { select: { name: true } },
+              batch: { select: { name: true, code: true } },
             },
           },
+          batch: { select: { name: true, code: true } },
         },
         orderBy: { rank: 'asc' },
         ...(options.limit ? { take: options.limit } : {}),
@@ -64,7 +71,12 @@ export class LeaderboardService {
           studentId: student.id,
           name: student.name,
           squadName: student.squad?.name ?? null,
-          batchName: student.batch?.name ?? null,
+          // The batch this ranking belongs to, falling back to the student's current
+          // batch only for entries snapshotted before the column existed.
+          batchName: entry.batch?.name ?? student.batch?.name ?? null,
+          batchCode: entry.batch?.code ?? student.batch?.code ?? null,
+          cohort: student.cohort,
+          maxBeltLevel: student.maxBeltLevel,
           avatarUrl: student.avatarUrl,
           solvedCount: entry.solvedCount,
           currentStreak: entry.currentStreak,

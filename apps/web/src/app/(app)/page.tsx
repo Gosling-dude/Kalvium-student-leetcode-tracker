@@ -14,6 +14,7 @@ import { SYNC_STATUS_LABELS, type SyncStatus } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { formatPercent, timeAgo } from '@/lib/utils';
+import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
 import {
   Badge,
   Card,
@@ -27,9 +28,13 @@ import {
 } from '@/components/ui';
 
 export default function DashboardPage() {
+  const { selected: batch } = useBatchFilter();
+
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: () => api.dashboard(),
+    // The batch is part of the key, so switching filters refetches rather than showing
+    // the previous batch's numbers under the new heading.
+    queryKey: ['dashboard', batch],
+    queryFn: () => api.dashboard(undefined, batch ?? undefined),
   });
 
   if (isLoading) {
@@ -49,7 +54,13 @@ export default function DashboardPage() {
   if (!data) return null;
 
   const bucket = (n: number): number => data.solvedBuckets[n] ?? 0;
-  const assignedCount = data.assignment?.problems.length ?? 4;
+
+  // Never assume four. On a filtered view this is that batch's own count; unfiltered it
+  // spans the largest assignment of the day so no student falls outside the chart (§10).
+  const assignedCount =
+    data.assignment?.problems.length ??
+    (Math.max(0, ...data.batchBreakdown.map((b) => b.assignedCount)) ||
+      Math.max(0, data.solvedBuckets.length - 1));
 
   const unreliable = Object.entries(data.unreliableSyncCounts) as [SyncStatus, number][];
   const unreliableTotal = unreliable.reduce((sum, [, count]) => sum + count, 0);
@@ -63,12 +74,15 @@ export default function DashboardPage() {
             {data.dayKey} · last synced {timeAgo(data.lastSyncAt)}
           </p>
         </div>
-        {data.lastSyncStatus === 'COMPLETED_WITH_ERRORS' ? (
-          <Badge tone="warning">
-            <AlertTriangle className="size-3" aria-hidden />
-            Last sync had errors
-          </Badge>
-        ) : null}
+        <div className="flex items-center gap-3">
+          <BatchFilter />
+          {data.lastSyncStatus === 'COMPLETED_WITH_ERRORS' ? (
+            <Badge tone="warning">
+              <AlertTriangle className="size-3" aria-hidden />
+              Last sync had errors
+            </Badge>
+          ) : null}
+        </div>
       </header>
 
       {/*
@@ -131,6 +145,45 @@ export default function DashboardPage() {
           tone="warning"
         />
       </div>
+
+      {/*
+        Per-batch figures. Each batch is measured against its own assignment, so a day
+        where Foundation had 4 problems and Intermediate had 5 reads correctly instead of
+        being averaged into one misleading denominator (§10).
+      */}
+      {data.batchBreakdown.length > 1 ? (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {data.batchBreakdown.map((batchRow) => (
+            <Card key={batchRow.batchId ?? 'none'} className="p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">{batchRow.batchName ?? 'No batch'}</p>
+                  <p className="text-xs text-[var(--color-fg-muted)]">
+                    {batchRow.activeStudents} student{batchRow.activeStudents === 1 ? '' : 's'} ·{' '}
+                    {batchRow.assignedCount} assigned
+                  </p>
+                </div>
+                <span className="text-lg font-semibold tabular-nums">
+                  {formatPercent(batchRow.completionPercent)}
+                </span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {batchRow.solvedBuckets
+                  .map((count, solved) => ({ count, solved }))
+                  .reverse()
+                  .map(({ count, solved }) => (
+                    <Badge
+                      key={solved}
+                      tone={solved === batchRow.assignedCount && solved > 0 ? 'success' : 'neutral'}
+                    >
+                      Solved {solved}: {count}
+                    </Badge>
+                  ))}
+              </div>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">

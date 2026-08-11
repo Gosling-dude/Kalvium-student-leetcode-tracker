@@ -36,22 +36,42 @@ export class ReportsService {
     private readonly leaderboard: LeaderboardService,
   ) {}
 
-  /** Daily report: every student's outcome for a day. */
-  async dailyReport(dayKey?: DayKey) {
+  /**
+   * Daily report: every student's outcome for a day, optionally narrowed to one batch
+   * and/or cohort — the batch-wise, cohort-wise and all-students exports (§5).
+   */
+  async dailyReport(
+    dayKey?: DayKey,
+    filter: { batchId?: string | null; cohort?: number | null } = {},
+  ) {
     const day = dayKey ?? this.time.today();
-    const mentor = await this.dashboard.getMentorDashboard(day);
+    const mentor = await this.dashboard.getMentorDashboard(day, { batchId: filter.batchId });
+
+    const students = mentor.buckets
+      .flatMap((bucket) => bucket.students)
+      .filter((student) => filter.cohort == null || student.cohort === filter.cohort);
 
     return {
       dayKey: day,
+      batchId: mentor.batchId,
       assignment: mentor.assignment,
-      totalStudents: mentor.totalStudents,
-      rows: mentor.buckets.flatMap((bucket) =>
-        bucket.students.map((student) => ({
+      sections: mentor.sections.map((section) => ({
+        batchId: section.batchId,
+        batchName: section.batchName,
+        batchCode: section.batchCode,
+        assignedCount: section.assignedCount,
+        totalStudents: section.totalStudents,
+      })),
+      totalStudents: students.length,
+      rows: students.map((student) => ({
           name: student.name,
           email: student.email,
           squad: student.squadName ?? '',
           batch: student.batchName ?? '',
+          cohort: student.cohort ?? '',
+          maxBeltLevel: student.maxBeltLevel ?? '',
           leetcodeUsername: student.leetcodeUsername,
+          assigned: student.assignedCount,
           solved: student.solvedCount,
           completionTime: student.completionTime ?? '',
           streak: student.currentStreak,
@@ -60,8 +80,7 @@ export class ReportsService {
           missing: student.missingProblems.join(' | '),
           syncStatus: student.syncStatus,
           reason: student.reason ?? '',
-        })),
-      ),
+      })),
     };
   }
 

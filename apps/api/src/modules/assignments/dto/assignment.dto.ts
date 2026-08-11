@@ -22,6 +22,29 @@ export class CreateAssignmentDto {
   @Matches(DAY_KEY, { message: 'date must be in YYYY-MM-DD format' })
   dayKey!: string;
 
+  /**
+   * Which batches receive this problem set.
+   *
+   * Omitted means every active batch — the "All" option in the UI — and creates one
+   * assignment *per batch* rather than a single shared row. Separate rows are what let
+   * a batch's problems be edited later without touching the other's, and what make
+   * "which set was this student evaluated against" answerable from the row itself.
+   *
+   * To give two batches *different* problems on the same day, post twice: once per
+   * batch, each with its own `problemUrls`.
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['A'],
+    description: 'Batch ids, codes (A/B) or aliases. Omit for all active batches.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  batches?: string[];
+
   @ApiProperty({
     type: [String],
     example: [
@@ -112,6 +135,21 @@ export class AssignmentQueryDto extends PaginationQueryDto {
   @IsOptional()
   @Matches(DAY_KEY)
   to?: string;
+
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias. Omit for all batches.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  batch?: string;
+}
+
+/** `GET /assignments/day/:dayKey?batch=` — the day's set for one batch, or all of them. */
+export class AssignmentDayQueryDto {
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias. Omit for all batches.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  batch?: string;
 }
 
 export class PreviewProblemDto {

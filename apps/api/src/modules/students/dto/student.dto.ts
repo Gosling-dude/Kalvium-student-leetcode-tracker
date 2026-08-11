@@ -12,6 +12,7 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -40,13 +41,18 @@ export class CreateStudentDto {
   @Transform(({ value }) => (typeof value === 'string' ? value.toLowerCase().trim() : value))
   email!: string;
 
-  @ApiProperty({ example: 'asha_menon', description: 'Handle or full profile URL' })
+  /**
+   * Optional: a student can be on the roster before their handle has been collected.
+   * They are simply skipped by the sync until one is set (see the schema note).
+   */
+  @ApiPropertyOptional({ example: 'asha_menon', description: 'Handle or full profile URL' })
+  @IsOptional()
   @IsString()
   @Matches(/^[A-Za-z0-9_-]{1,39}$/, {
     message: 'LeetCode username may contain letters, digits, underscore and hyphen only',
   })
   @Transform(normaliseUsername)
-  leetcodeUsername!: string;
+  leetcodeUsername?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -63,6 +69,27 @@ export class CreateStudentDto {
   @IsOptional()
   @IsUUID()
   squadId?: string;
+
+
+  @ApiPropertyOptional({ description: 'Cohort number within the programme', minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(99)
+  cohort?: number | null;
+
+  /**
+   * The authoritative belt level, set from the roster and editable by an admin (§9).
+   * Never computed from score, solved counts, languages or eligibility.
+   */
+  @ApiPropertyOptional({ description: 'Max belt level (authoritative, not derived)', minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  maxBeltLevel?: number | null;
 
   @ApiPropertyOptional({ enum: STUDENT_STATUSES })
   @IsOptional()
@@ -107,6 +134,27 @@ export class UpdateStudentDto {
   @IsUUID()
   squadId?: string | null;
 
+
+  @ApiPropertyOptional({ description: 'Cohort number within the programme', minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(99)
+  cohort?: number | null;
+
+  /**
+   * The authoritative belt level, set from the roster and editable by an admin (§9).
+   * Never computed from score, solved counts, languages or eligibility.
+   */
+  @ApiPropertyOptional({ description: 'Max belt level (authoritative, not derived)', minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20)
+  maxBeltLevel?: number | null;
+
   @ApiPropertyOptional({ enum: STUDENT_STATUSES })
   @IsOptional()
   @IsIn(STUDENT_STATUSES)
@@ -123,6 +171,33 @@ export class StudentQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID()
   batchId?: string;
+
+  /**
+   * Batch by id, code (`A`) or alias (`foundation`). Resolved to `batchId` by the
+   * controller before the service sees it, so the service only ever deals in ids.
+   */
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias (foundation/intermediate)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  batch?: string;
+
+  @ApiPropertyOptional({ description: 'Cohort number', minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  cohort?: number;
+
+  /**
+   * Archived students are hidden by default — they have left the programme (§24). This
+   * opts them back in alongside current students; `status=ARCHIVED` selects only them.
+   */
+  @ApiPropertyOptional({ description: 'Include students archived out of the programme' })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === true || value === 'true')
+  includeArchived?: boolean;
 
   @ApiPropertyOptional({ enum: STUDENT_STATUSES })
   @IsOptional()
