@@ -1,16 +1,27 @@
 /**
  * Streak computation.
  *
- * Two real-world rules shape this module and neither is obvious from the spec:
+ * Three real-world rules shape this module and none is obvious from the spec:
  *
- * 1. **Days without an assignment are neutral.** If mentors skip a Sunday, nobody's
+ * 1. **One problem is enough.** A day counts towards the DSA streak when the student
+ *    solved *at least one* of that day's assigned problems. Requiring all four punished
+ *    students who showed up and did partial work exactly as hard as students who did
+ *    nothing, which is the opposite of what a streak is for. The threshold still comes
+ *    from `ScoringConfig.streakQualification` so an admin can tighten it, but the
+ *    shipped default is `AT_LEAST_ONE`.
+ *
+ * 2. **Days without an assignment are neutral.** If mentors skip a Sunday, nobody's
  *    streak should break. Streaks run over the sequence of *assigned* days, not the
  *    calendar — so consecutiveness means "adjacent assigned days", not "adjacent dates".
  *
- * 2. **Today is in progress until the day ends.** A student who has not yet solved
+ * 3. **Today is in progress until the day ends.** A student who has not yet solved
  *    today's problems at 10:00 has not broken their streak. The current streak is
  *    therefore measured from the most recent *concluded* day, with today counted only
  *    when it already qualifies.
+ *
+ * Whether a day qualifies is decided from `solvedCount`, which callers must derive with
+ * `calculateAssignmentCompletion` — including its backwards lookback — so that a day
+ * cleared by an early solve is not recorded as a break.
  */
 
 import type { DayKey } from './time';
@@ -55,6 +66,15 @@ function qualifies(day: StreakDay, config: ScoringConfig): boolean {
   return day.solvedCount >= requiredSolvedForStreak(day.assignedCount, config);
 }
 
+export interface StreakOptions {
+  /**
+   * First program day the student was enrolled. Assignment days before this are dropped
+   * entirely rather than counted as misses — a student who joined in week 3 has not
+   * "broken" a streak by not existing in week 2.
+   */
+  enrolledFromDayKey?: DayKey | null;
+}
+
 /**
  * @param days       Any order; only days with `assignedCount > 0` participate.
  * @param referenceDay The program day to measure "current" from — normally today.
@@ -63,9 +83,13 @@ export function computeStreaks(
   days: StreakDay[],
   referenceDay: DayKey,
   config: ScoringConfig = DEFAULT_SCORING_CONFIG,
+  options: StreakOptions = {},
 ): StreakResult {
+  const enrolledFrom = options.enrolledFromDayKey ?? null;
+
   const assignedDays = days
     .filter((d) => d.assignedCount > 0)
+    .filter((d) => (enrolledFrom ? d.dayKey >= enrolledFrom : true))
     .sort((a, b) => (a.dayKey < b.dayKey ? -1 : a.dayKey > b.dayKey ? 1 : 0));
 
   if (assignedDays.length === 0) return { ...EMPTY_RESULT };

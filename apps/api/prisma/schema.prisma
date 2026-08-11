@@ -152,12 +152,21 @@ enum BlockerCategory {
   OTHER
 }
 
-/// Lifecycle of one generated daily report email. `SENT` is terminal for the approval
-/// gate — `EmailReportsService` refuses to call the transport for anything else.
+/// Lifecycle of one generated daily report email:
+/// DRAFT → PENDING_APPROVAL → APPROVED → SENDING → SENT, or SENDING → FAILED.
+///
+/// `SENDING` is the in-flight claim. It exists so a send can never be started twice: the
+/// transition APPROVED → SENDING is a conditional UPDATE, and only the request that wins
+/// it calls the provider. It also distinguishes "crashed mid-send, delivery unknown"
+/// from "never attempted", which a straight APPROVED → SENT jump cannot.
+///
+/// `SENT` is terminal — it is written only after the provider has accepted the message
+/// and returned an id, never optimistically.
 enum EmailReportStatus {
   DRAFT
   PENDING_APPROVAL
   APPROVED
+  SENDING
   SENT
   FAILED
 }
@@ -447,6 +456,12 @@ model Submission {
   @@index([studentId, submittedAt])
   @@index([titleSlug])
   @@index([dayKey])
+  /// Lifetime distinct-solved: COUNT(DISTINCT titleSlug) per student over accepted rows.
+  /// Covers the whole aggregate, so it never touches the heap for ~250 students.
+  @@index([studentId, status, titleSlug])
+  /// Assignment completion over the lookback window: a day-range scan narrowed to the
+  /// handful of assigned slugs, for every student at once.
+  @@index([dayKey, titleSlug])
   @@map("submissions")
 }
 

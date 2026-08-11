@@ -7,12 +7,23 @@
  * around that. See docs/DAILY_EMAIL_REPORTING.md#approval-workflow.
  */
 
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { defaultEmailSubject, type DayKey, type EmailReportRecord } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { EmailService } from '../../infra/email/email.service';
+import {
+  EmailProviderNotConfiguredError,
+  EmailSendError,
+} from '../../infra/email/email.types';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
 import { DailyReportService } from './daily-report.service';
@@ -29,6 +40,8 @@ type EmailReportWithNames = Prisma.EmailReportGetPayload<{
 
 @Injectable()
 export class EmailReportsService {
+  private readonly logger = new Logger(EmailReportsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
@@ -80,10 +93,16 @@ export class EmailReportsService {
   async previewOrEdit(dto: PreviewEmailDto): Promise<EmailReportRecord> {
     const existing = await this.mustFind(dto.emailReportId);
 
-    if (existing.status === 'APPROVED' || existing.status === 'SENT') {
+    // Approval freezes the content: what a mentor approved must be what goes out, and
+    // once it is in flight or delivered, editing it would falsify the history record.
+    if (
+      existing.status === 'APPROVED' ||
+      existing.status === 'SENDING' ||
+      existing.status === 'SENT'
+    ) {
       throw new ConflictException(
-        `This email is already ${existing.status.toLowerCase()} and can no longer be edited. ` +
-          `Generate a new draft instead.`,
+        `This email is already ${existing.status.toLowerCase().replace('_', ' ')} and can no ` +
+          `longer be edited. Generate a new draft instead.`,
       );
     }
 
@@ -125,6 +144,11 @@ export class EmailReportsService {
     if (existing.status === 'SENT') {
       throw new ConflictException('This report has already been sent.');
     }
+    if (existing.status === 'SENDING') {
+      throw new ConflictException('This report is already being sent.');
+    }
+    // Idempotent: clicking Approve twice is not an error, and the frontend's
+    // "Approve & Send" relies on being able to re-approve a retried FAILED report.
     if (existing.status === 'APPROVED') {
       return this.toRecord(existing);
     }
@@ -139,15 +163,34 @@ export class EmailReportsService {
   }
 
   /**
-   * The only method in the codebase that calls `EmailService.sendEmail`. Refuses
-   * anything not `APPROVED` (or a `FAILED` retry of a report that *was* approved), and
-   * refuses a second send for a day that already has one unless `force` is explicit.
+   * The only method in the codebase that calls `EmailService.sendEmail`.
+   *
+   * Walks APPROVED → SENDING → SENT, or SENDING → FAILED. Three properties matter:
+   *
+   *  - **The provider decides `SENT`.** The row is marked sent only after the transport
+   *    returns a message id. A throw anywhere leaves FAILED with the reason recorded.
+   *  - **Exactly one send per report.** The APPROVED → SENDING transition is a
+   *    conditional `updateMany`; a second concurrent click matches zero rows and is
+   *    rejected instead of producing a duplicate email.
+   *  - **Failures are explained.** Provider, HTTP status, provider code and the report
+   *    id go to the server log; the client gets `safeMessage`, which never contains a
+   *    key or a raw provider echo.
    */
   async send(emailReportId: string, userId: string, force = false): Promise<EmailReportRecord> {
     const existing = await this.mustFind(emailReportId);
 
     if (existing.status === 'SENT') {
-      throw new ConflictException('This report has already been sent.');
+      throw new ConflictException({
+        message:
+          'This report has already been sent. Generate a new draft if you need to send it again.',
+        emailReportId: existing.id,
+        sentAt: existing.sentAt,
+      });
+    }
+    if (existing.status === 'SENDING') {
+      throw new ConflictException(
+        'This report is already being sent. Refresh in a moment to see the result.',
+      );
     }
     if (existing.status !== 'APPROVED' && existing.status !== 'FAILED') {
       throw new ConflictException(
@@ -155,16 +198,42 @@ export class EmailReportsService {
       );
     }
 
+    // A different report already went out for this day. Resending is legitimate but has
+    // to be deliberate, so it needs `force` — the UI turns this into a confirm step.
     const priorSent = await this.prisma.emailReport.findFirst({
       where: { dayKey: existing.dayKey, status: 'SENT', id: { not: emailReportId } },
       orderBy: { sentAt: 'desc' },
     });
     if (priorSent && !force) {
       throw new ConflictException({
-        message: 'This report has already been sent.',
+        message: `A report for ${existing.dayKey} has already been sent. Confirm to send it again.`,
         previousEmailReportId: priorSent.id,
         sentAt: priorSent.sentAt,
       });
+    }
+
+    // Fail before claiming the row: a misconfigured server should leave the report
+    // APPROVED and retryable, not stranded in FAILED for a reason that is not its fault.
+    const configProblem = this.emailService.configurationProblem();
+    if (configProblem) {
+      this.logger.error(
+        `Send refused for report ${emailReportId} (${existing.dayKey}): ${configProblem}`,
+      );
+      throw new HttpException(
+        new EmailProviderNotConfiguredError().safeMessage,
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    // Claim it. Only the request that flips APPROVED/FAILED → SENDING proceeds.
+    const claimed = await this.prisma.emailReport.updateMany({
+      where: { id: emailReportId, status: { in: ['APPROVED', 'FAILED'] } },
+      data: { status: 'SENDING', failedError: null },
+    });
+    if (claimed.count === 0) {
+      throw new ConflictException(
+        'This report is already being sent or has changed state. Refresh and try again.',
+      );
     }
 
     try {
@@ -191,14 +260,66 @@ export class EmailReportsService {
           approvedBy: { select: { name: true } },
         },
       });
+
+      this.logger.log(
+        `Email report ${emailReportId} (${existing.dayKey}) sent via ` +
+          `${this.emailService.providerName}, provider message id ${result.providerMessageId}`,
+      );
       return this.toRecord(row);
     } catch (error) {
-      await this.prisma.emailReport.update({
-        where: { id: emailReportId },
-        data: { status: 'FAILED', failedError: (error as Error).message },
-      });
-      throw error;
+      throw await this.recordFailure(emailReportId, existing.dayKey, error);
     }
+  }
+
+  /**
+   * Move a claimed report to FAILED, log the diagnosis, and return the exception to
+   * throw. Splitting this out keeps `send`'s happy path readable and guarantees the two
+   * always agree about what gets persisted versus what gets returned.
+   */
+  private async recordFailure(
+    emailReportId: string,
+    dayKey: string,
+    error: unknown,
+  ): Promise<HttpException> {
+    const isProviderError = error instanceof EmailSendError;
+    const detail = isProviderError ? error.detail : null;
+
+    // Server-side: everything needed to diagnose, including the provider's own words.
+    this.logger.error(
+      `Email send FAILED for report ${emailReportId} (${dayKey}) — ` +
+        `provider=${detail?.provider ?? this.emailService.providerName} ` +
+        `httpStatus=${detail?.httpStatus ?? 'n/a'} ` +
+        `providerCode=${detail?.providerCode ?? 'n/a'} ` +
+        `providerMessage=${detail?.providerMessage ?? (error as Error).message}`,
+      error instanceof Error ? error.stack : undefined,
+    );
+
+    // Stored on the row so "View previous email" and the history table can explain it.
+    // The provider's message is safe here (it is our own error text, not the API key)
+    // but it is truncated so a verbose provider cannot bloat the column.
+    const storedError = (
+      isProviderError
+        ? `[${detail?.provider}${detail?.httpStatus ? ` ${detail.httpStatus}` : ''}` +
+          `${detail?.providerCode ? `/${detail.providerCode}` : ''}] ${error.message}`
+        : (error as Error).message
+    ).slice(0, 1000);
+
+    await this.prisma.emailReport.update({
+      where: { id: emailReportId },
+      data: { status: 'FAILED', failedError: storedError },
+    });
+
+    if (error instanceof EmailProviderNotConfiguredError) {
+      return new HttpException(error.safeMessage, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    if (isProviderError) {
+      // 502: the fault is upstream of this service, not in the caller's request.
+      return new HttpException(error.safeMessage, HttpStatus.BAD_GATEWAY);
+    }
+    return new HttpException(
+      'Email could not be sent. Please verify the email configuration.',
+      HttpStatus.BAD_GATEWAY,
+    );
   }
 
   async findById(id: string): Promise<EmailReportRecord> {

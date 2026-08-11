@@ -5,6 +5,7 @@ import {
   computeDailyScore,
   computeMonthlyBonus,
   computeWeeklyBonus,
+  isPerfectDay,
   requiredSolvedForStreak,
   type ScoringConfig,
 } from './scoring';
@@ -208,14 +209,21 @@ describe('period bonuses', () => {
 });
 
 describe('requiredSolvedForStreak', () => {
-  it('defaults to requiring the whole assignment', () => {
-    expect(requiredSolvedForStreak(4, DEFAULT_SCORING_CONFIG)).toBe(4);
+  it('defaults to a single problem — the DSA streak rule is deliberately lenient', () => {
+    expect(DEFAULT_SCORING_CONFIG.streakQualification).toBe('AT_LEAST_ONE');
+    expect(requiredSolvedForStreak(4, DEFAULT_SCORING_CONFIG)).toBe(1);
   });
 
   it('honours AT_LEAST_ONE', () => {
     expect(
       requiredSolvedForStreak(4, { ...DEFAULT_SCORING_CONFIG, streakQualification: 'AT_LEAST_ONE' }),
     ).toBe(1);
+  });
+
+  it('honours ALL_ASSIGNED when explicitly selected', () => {
+    expect(
+      requiredSolvedForStreak(4, { ...DEFAULT_SCORING_CONFIG, streakQualification: 'ALL_ASSIGNED' }),
+    ).toBe(4);
   });
 
   it('never demands more than were assigned', () => {
@@ -227,6 +235,22 @@ describe('requiredSolvedForStreak', () => {
         streakCustomMinSolved: 4,
       }),
     ).toBe(2);
+  });
+});
+
+describe('isPerfectDay', () => {
+  it('means the whole assignment, not the streak threshold', () => {
+    // The regression this guards: when the streak bar dropped to one problem, a shared
+    // expression would have relabelled every 1-of-4 day as "perfect".
+    expect(requiredSolvedForStreak(4, DEFAULT_SCORING_CONFIG)).toBe(1);
+    expect(isPerfectDay(1, 4)).toBe(false);
+    expect(isPerfectDay(3, 4)).toBe(false);
+    expect(isPerfectDay(4, 4)).toBe(true);
+  });
+
+  it('treats over-solving as perfect and a zero-assignment day as not perfect', () => {
+    expect(isPerfectDay(5, 4)).toBe(true);
+    expect(isPerfectDay(0, 0)).toBe(false);
   });
 });
 

@@ -69,7 +69,11 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   ],
   perfectWeekBonus: 100,
   perfectMonthBonus: 400,
-  streakQualification: 'ALL_ASSIGNED',
+  // A day counts towards the DSA streak as soon as the student clears *one* assigned
+  // problem. `ALL_ASSIGNED` was the original default and it made streaks all-or-nothing:
+  // a student who solved 3 of 4 was recorded identically to one who solved none, so
+  // partial-progress days silently reset the streak. See domain/streak.ts.
+  streakQualification: 'AT_LEAST_ONE',
   streakCustomMinSolved: 4,
 };
 
@@ -240,6 +244,19 @@ function computePeriodBonus(
   }
 
   return { total, components };
+}
+
+/**
+ * A "perfect day" is clearing the *whole* assignment — always, regardless of how lenient
+ * the streak threshold is.
+ *
+ * Kept separate from `requiredSolvedForStreak` deliberately: the two were previously the
+ * same expression, so relaxing the streak rule to `AT_LEAST_ONE` would silently have
+ * relabelled every 1-of-4 day as "perfect" and corrupted perfect-day counts, the
+ * Weekend Warrior achievement, and the squad leaderboard's qualifying-day tally.
+ */
+export function isPerfectDay(solvedCount: number, assignedCount: number): boolean {
+  return assignedCount > 0 && solvedCount >= assignedCount;
 }
 
 /** The number of solved problems a day needs to qualify for streaks under `config`. */

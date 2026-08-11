@@ -118,13 +118,47 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         </Card>
       ) : null}
 
+      {/*
+        Five distinct quantities, deliberately labelled so they cannot be read as one
+        another. "Total LeetCode solved" is lifetime distinct problems across everything
+        the student does; it is not — and previously was — today's assignment count.
+      */}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
-          label="Current streak"
-          value={<StreakFlame streak={data.currentStreak} />}
-          hint={`Longest ${data.longestStreak} days`}
+          label="Total LeetCode solved"
+          value={data.metrics.totalLeetcodeSolved}
+          hint="distinct problems, all time"
+          tone="brand"
+        />
+        <StatTile
+          label="Today's assignment"
+          value={
+            data.metrics.todayAssignment.hasAssignment
+              ? `${data.metrics.todayAssignment.solvedCount} / ${data.metrics.todayAssignment.assignedCount}`
+              : '—'
+          }
+          hint={
+            data.metrics.todayAssignment.hasAssignment
+              ? `${formatPercent(data.metrics.todayAssignment.completionPercent)} complete`
+              : 'nothing assigned today'
+          }
+          tone="info"
+        />
+        <StatTile
+          label="Current DSA streak"
+          value={<StreakFlame streak={data.metrics.currentDsaStreak} />}
+          hint={`Longest ${data.metrics.longestDsaStreak} days · ≥1 problem/day`}
           tone="warning"
         />
+        <StatTile
+          label="Assignment problems done"
+          value={data.metrics.totalAssignmentProblemsCompleted}
+          hint="across the programme"
+          tone="success"
+        />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile label="Total score" value={data.totalScore} tone="brand" />
         <StatTile
           label="This week"
@@ -135,6 +169,7 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         <StatTile
           label="This month"
           value={formatPercent(data.monthlyCompletionPercent)}
+          hint="of assigned problems"
           tone="success"
         />
       </div>

@@ -81,6 +81,36 @@ The one exception is a mentor's **manual override**: `DailyStatus.isOverridden` 
 row authoritative, and recomputation skips it rather than silently undoing a deliberate
 correction.
 
+### The three student metrics
+
+These are separate quantities and must never be substituted for one another. Each has
+exactly one implementation — `StudentMetricsService` (`modules/scoring`), over pure
+rules in `@dsa/shared` — so the dashboard, daily/email report, student details,
+leaderboards and analytics cannot disagree about the same student.
+
+| Metric | Means | Does **not** mean |
+|---|---|---|
+| **Total LeetCode solved** (`calculateStudentLeetcodeTotalSolved`) | Lifetime *distinct* problems the student has ever solved | Assignment completion, accepted-submission rows, or anything about today |
+| **Assignment completion** (`calculateAssignmentCompletion`) | Distinct assigned problems accepted within the day's window, as X/Y | Total LeetCode output |
+| **DSA streak** (`calculateStudentDsaStreak`) | Consecutive *assignment* days with ≥1 assigned problem solved | Consecutive days with any LeetCode activity |
+
+Three rules are load-bearing and non-obvious:
+
+1. **Assignment completion looks backwards.** Assignments are often published a day or
+   two after students have started, so completion searches
+   `[D - ASSIGNMENT_LOOKBACK_DAYS, D]` in program-local days, not `D` alone. Matching
+   `submission.dayKey === assignment.dayKey` recorded genuinely-solved problems as
+   missed, which is the defect this replaced.
+2. **A streak needs one problem, not all four.** `streakQualification` defaults to
+   `AT_LEAST_ONE`. Requiring the whole assignment scored a 3-of-4 day identically to a
+   0-of-4 day. `isPerfectDay` stays "solved everything" and is deliberately a separate
+   function, so relaxing the streak bar cannot relabel partial days as perfect.
+3. **Lifetime solved reconciles two sources.** The submission mirror is a *floor* — the
+   provider only exposes the 20 most recent submissions, so history before a student's
+   first sync was never observable. The larger of the mirror's distinct count and the
+   provider profile's lifetime total is used, so neither a cold mirror nor a stale
+   profile can understate the figure.
+
 ## The sync path
 
 ```mermaid

@@ -13,6 +13,7 @@ import {
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
+import { StudentMetricsService } from '../scoring/student-metrics.service';
 import { paginate, safeSortField } from '../../common/dto/pagination.dto';
 import type { CreateStudentDto, StudentQueryDto, UpdateStudentDto } from './dto/student.dto';
 
@@ -37,6 +38,7 @@ export class StudentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
+    private readonly metrics: StudentMetricsService,
   ) {}
 
   async findAll(query: StudentQueryDto): Promise<Paginated<StudentSummary>> {
@@ -203,10 +205,21 @@ export class StudentsService {
       _min: { rank: true },
     });
 
+    // The five headline numbers, each derived by `StudentMetricsService` so this page
+    // cannot disagree with the dashboard or the daily report about the same student.
+    // "Total solved" here is lifetime LeetCode output — never today's assignment count.
+    const [totalLeetcodeSolved, todayAssignment, dsaStreak, assignmentProblemsCompleted] =
+      await Promise.all([
+        this.metrics.calculateStudentLeetcodeTotalSolved(id),
+        this.metrics.assignmentMetricsFor(id, today),
+        this.metrics.calculateStudentDsaStreak(id, today),
+        this.metrics.totalAssignmentProblemsCompleted(id),
+      ]);
+
     const context = {
-      currentStreak: student.currentStreak,
-      longestStreak: student.longestStreak,
-      totalSolved: student.totalSolved,
+      currentStreak: dsaStreak.current,
+      longestStreak: Math.max(student.longestStreak, dsaStreak.longest),
+      totalSolved: totalLeetcodeSolved,
       perfectDays,
       perfectWeeks: 0,
       earlyFinishes,
@@ -229,13 +242,30 @@ export class StudentsService {
 
     return {
       ...this.toSummary(student as StudentWithRelations),
+      // Keep the summary's cached figures honest with what we just computed, so the
+      // header and the metric tiles cannot show two different streaks.
+      totalSolved: totalLeetcodeSolved,
+      currentStreak: dsaStreak.current,
       levelProgress: levelProgress(student.totalScore),
       achievements: evaluated,
       difficultyBreakdown: {
         easy: student.easySolved,
         medium: student.mediumSolved,
         hard: student.hardSolved,
-        total: student.totalSolved,
+        total: totalLeetcodeSolved,
+      },
+      metrics: {
+        totalLeetcodeSolved,
+        dayKey: today,
+        todayAssignment: {
+          solvedCount: todayAssignment.solvedCount,
+          assignedCount: todayAssignment.assignedCount,
+          completionPercent: todayAssignment.completionPercent,
+          hasAssignment: todayAssignment.hasAssignment,
+        },
+        currentDsaStreak: dsaStreak.current,
+        longestDsaStreak: Math.max(student.longestStreak, dsaStreak.longest),
+        totalAssignmentProblemsCompleted: assignmentProblemsCompleted,
       },
       heatmap: statuses.map((s) => ({
         dayKey: s.dayKey,

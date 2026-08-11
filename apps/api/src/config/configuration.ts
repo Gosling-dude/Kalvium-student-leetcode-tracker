@@ -81,6 +81,13 @@ export interface AppConfig {
     /** Default recipients the daily-report GitHub Action uses when nobody has set any. */
     defaultTo: string[];
     defaultCc: string[];
+    /**
+     * Override for the provider's API endpoint. Unset in production, where the transport
+     * uses the provider's own URL. Exists so the real send path — transport, HTTP,
+     * response parsing, error mapping — can be exercised end to end against a local
+     * stub, instead of being the one code path that only ever runs in production.
+     */
+    apiBaseUrl: string | null;
   };
 }
 
@@ -251,6 +258,7 @@ export function loadConfiguration(): AppConfig {
       fromEmail: process.env.EMAIL_FROM || null,
       defaultTo: toList(process.env.EMAIL_DEFAULT_TO, []),
       defaultCc: toList(process.env.EMAIL_DEFAULT_CC, []),
+      apiBaseUrl: process.env.EMAIL_API_BASE_URL || null,
     },
   };
 }

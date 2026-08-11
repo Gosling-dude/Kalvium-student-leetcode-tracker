@@ -135,6 +135,7 @@ refused, with `EmailProviderNotConfiguredError` naming exactly what to set.
 | `EMAIL_FROM`         | for send | Sender address, must be on a domain verified with the provider   |
 | `EMAIL_DEFAULT_TO`   | for automation | Comma-separated default "to" list the daily GitHub Action uses |
 | `EMAIL_DEFAULT_CC`   | optional | Comma-separated default "cc" list for automation                 |
+| `EMAIL_API_BASE_URL` | never in prod | Overrides the provider endpoint. Exists so the real send path can be exercised against a local stub in testing; leave unset and the transport uses the provider's own URL. |
 
 Sending happens **server-side only** — the API key never reaches the frontend. Every
 send is role-gated (`ADMIN`/`MENTOR`) and rate-limited (`5/min`) on top of the app's
@@ -142,12 +143,14 @@ global throttle.
 
 ## Approval workflow
 
-`EmailReport.status`: `DRAFT → PENDING_APPROVAL → APPROVED → SENT` (or `FAILED`).
+`EmailReport.status`:
+`DRAFT → PENDING_APPROVAL → APPROVED → SENDING → SENT`, or `SENDING → FAILED`.
 
 1. **Generate** (`POST /reports/daily/:date/generate-email`) renders the report as an
    email and saves it `DRAFT`.
 2. **Preview / Edit** (`POST /reports/email/preview`) re-renders with edited
-   recipients/subject, persisting the edit — locked once `APPROVED` or `SENT`.
+   recipients/subject, persisting the edit — locked once `APPROVED`, `SENDING` or
+   `SENT`, so what a mentor approved is exactly what goes out.
 3. **Approve** (`POST /reports/email/approve`) — the gate. Only a signed-in
    ADMIN/MENTOR can call this.
 4. **Send** (`POST /reports/email/send`) is the *only* method that calls
@@ -156,10 +159,44 @@ global throttle.
    there is no way to reach the transport by skipping a step, including from
    automation.
 
+**`SENDING` is a claim, not decoration.** The `APPROVED → SENDING` transition is a
+single conditional `UPDATE ... WHERE status IN ('APPROVED','FAILED')`. Only the request
+that wins it calls the provider, so two concurrent clicks cannot both send. It also
+distinguishes "crashed mid-send, delivery unknown" from "never attempted".
+
+**`SENT` is written only on provider confirmation** — after the transport returns a
+message id, never optimistically. Any failure records `FAILED` plus the reason; a
+report is never left claiming it was delivered when it was not.
+
+**Configuration failures do not mark a report `FAILED`.** If the server has no provider
+configured, the send is refused *before* the report is claimed, so it stays `APPROVED`
+and retryable once the deployment is fixed — the report did nothing wrong.
+
 **Duplicate-send protection:** before sending, the service checks for an existing
 `SENT` report for the same `dayKey`. If one exists, the request is rejected with
 "This report has already been sent" unless the caller explicitly passes `force: true`
-(the UI's **Send Again** confirmation) — see `EmailReportsService.send`.
+(the UI's **Send Again** confirmation) — see `EmailReportsService.send`. Re-sending a
+report that is itself already `SENT` is refused outright, `force` or not.
+
+### Error reporting
+
+A failed send returns a specific, human-readable reason rather than a generic 500 —
+`503` for a configuration problem, `502` for a provider rejection:
+
+| Provider condition            | What the mentor sees                                            |
+| ----------------------------- | ---------------------------------------------------------------- |
+| no provider configured        | "…no email provider is configured. Set EMAIL_PROVIDER, EMAIL_API_KEY and EMAIL_FROM…" |
+| sender domain not verified    | "Sender email is not verified. Verify the sending domain…"       |
+| API key rejected              | "…the email provider rejected the API key. Check EMAIL_API_KEY…" |
+| quota / rate limit            | "…the provider's sending limit has been reached. Try again later." |
+| provider 5xx or unreachable   | "…the email provider is currently unavailable / could not be reached." |
+| anything unrecognised         | "Email could not be sent. Please verify the email configuration." |
+
+The server log additionally records provider, HTTP status, provider error code, the
+provider's own message, and the report id. **Secrets are never included** in either the
+HTTP response or the stored `failedError` — unrecognised provider prose is deliberately
+*not* echoed to the client, because a provider may quote the request back to us
+including the `Authorization` header.
 
 ## Daily automation
 
@@ -237,7 +274,20 @@ under `/reports/daily/:date` (path param) specifically to avoid colliding with i
 
 **"No email provider is configured"** when clicking Approve & Send — set
 `EMAIL_PROVIDER=resend`, `EMAIL_API_KEY`, and `EMAIL_FROM`, then redeploy the API.
-Preview/approve still work with none of this set; only the transport call fails.
+Preview/approve still work with none of this set; only the transport call fails. This
+is the single most common cause of a send failing on a fresh deployment: the report
+stays `APPROVED`, so once the variables are set you can simply click send again.
+
+**"Sender email is not verified"** — `EMAIL_FROM` is on a domain the provider has not
+verified. Verify the domain in the Resend dashboard, or set `EMAIL_FROM` to an address
+on a domain that already is. The report is left `FAILED`; use **Retry Send**.
+
+**A report is stuck in `SENDING`** — the process died between claiming the report and
+recording the provider's answer, so whether the email went out is genuinely unknown.
+Check the provider dashboard for a message matching the subject and day before
+deciding: if it was delivered, leave it; if not, generate a fresh draft. The status is
+deliberately not auto-reset, because guessing here means either a silent non-delivery
+or a duplicate to the whole campus team.
 
 **"This report has already been sent"** — expected duplicate-send protection. Use
 **View Previous Email** to see what went out, or confirm **Send Again** if you

@@ -484,6 +484,12 @@ export function EmailPreviewModal({
   onSent?: (record: EmailReportRecord) => void;
 }) {
   const [confirmingSend, setConfirmingSend] = useState(false);
+  /**
+   * Last failure, kept on screen. A toast disappears after a few seconds, which is not
+   * long enough to act on "Sender email is not verified" — the reason has to stay
+   * visible next to the button that produced it.
+   */
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const { data: sentStatus } = useQuery({
     queryKey: ['email-status', emailReport?.dayKey],
@@ -497,7 +503,10 @@ export function EmailPreviewModal({
       toast.success('Email approved');
       onApproved?.(record);
     },
-    onError: (error: Error) => toast.error('Approval failed', { description: error.message }),
+    onError: (error: Error) => {
+      setSendError(error.message);
+      toast.error('Approval failed', { description: error.message });
+    },
   });
 
   const send = useMutation({
@@ -505,9 +514,14 @@ export function EmailPreviewModal({
     onSuccess: (record) => {
       toast.success('Email sent');
       setConfirmingSend(false);
+      setSendError(null);
       onSent?.(record);
     },
     onError: (error: Error) => {
+      // The backend now returns a specific, human-readable reason (missing provider
+      // config, unverified sender, rate limit). Show it verbatim rather than a generic
+      // failure line — it is the whole point of the error being typed server-side.
+      setSendError(error.message);
       toast.error('Send failed', { description: error.message });
       setConfirmingSend(false);
     },
@@ -518,13 +532,18 @@ export function EmailPreviewModal({
   const alreadySentElsewhere =
     sentStatus?.sent && sentStatus.sent.id !== emailReport.id ? sentStatus.sent : null;
 
+  const inFlight = approve.isPending || send.isPending || emailReport.status === 'SENDING';
+
   const handleApproveAndSend = async (): Promise<void> => {
-    if (emailReport.status === 'SENT') return;
+    if (emailReport.status === 'SENT' || emailReport.status === 'SENDING') return;
     if (alreadySentElsewhere && !confirmingSend) {
       setConfirmingSend(true);
       return;
     }
-    if (emailReport.status !== 'APPROVED') {
+    setSendError(null);
+    // FAILED reports are already approved; re-approving would be rejected, and the
+    // send path accepts FAILED directly as a retry.
+    if (emailReport.status !== 'APPROVED' && emailReport.status !== 'FAILED') {
       await approve.mutateAsync();
     }
     send.mutate(Boolean(alreadySentElsewhere));
@@ -555,10 +574,15 @@ export function EmailPreviewModal({
             ) : (
               <Button
                 variant="primary"
-                loading={approve.isPending || send.isPending}
+                loading={inFlight}
+                disabled={inFlight}
                 onClick={() => void handleApproveAndSend()}
               >
-                {confirmingSend ? 'Confirm — Send Anyway' : 'Approve & Send'}
+                {confirmingSend
+                  ? 'Confirm — Send Anyway'
+                  : emailReport.status === 'FAILED'
+                    ? 'Retry Send'
+                    : 'Approve & Send'}
               </Button>
             )}
           </>
@@ -566,6 +590,16 @@ export function EmailPreviewModal({
       }
     >
       <div className="space-y-3">
+        {sendError ?? emailReport.failedError ? (
+          <div
+            role="alert"
+            className="rounded-lg border border-[var(--color-danger)] bg-[var(--color-danger-soft)] p-3 text-sm text-[var(--color-danger)]"
+          >
+            <p className="font-semibold">This email was not sent.</p>
+            <p className="mt-0.5">{sendError ?? emailReport.failedError}</p>
+          </div>
+        ) : null}
+
         {alreadySentElsewhere ? (
           <div className="rounded-lg border border-[var(--color-warning)] bg-[var(--color-warning-soft)] p-3 text-sm text-[var(--color-warning)]">
             This report has already been sent ({new Date(alreadySentElsewhere.sentAt ?? '').toLocaleString()}).
@@ -625,6 +659,7 @@ export function HistoryTable({
     DRAFT: 'neutral',
     PENDING_APPROVAL: 'warning',
     APPROVED: 'info',
+    SENDING: 'info',
     SENT: 'success',
     FAILED: 'danger',
   };
@@ -658,6 +693,16 @@ export function HistoryTable({
               <Badge tone={statusTone[record.status] ?? 'neutral'}>
                 {EMAIL_REPORT_STATUS_LABELS[record.status]}
               </Badge>
+              {/* Why it failed, on the row itself — otherwise a FAILED report in the
+                  history is a dead end that says nothing about what to fix. */}
+              {record.status === 'FAILED' && record.failedError ? (
+                <p
+                  title={record.failedError}
+                  className="mt-1 max-w-[16rem] truncate text-xs text-[var(--color-danger)]"
+                >
+                  {record.failedError}
+                </p>
+              ) : null}
             </Td>
             <Td className="text-xs text-[var(--color-fg-muted)]">
               {record.sentAt ? new Date(record.sentAt).toLocaleString() : '—'}

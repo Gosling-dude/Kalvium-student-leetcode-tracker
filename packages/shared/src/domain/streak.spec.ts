@@ -17,6 +17,12 @@ const LENIENT: ScoringConfig = {
   streakQualification: 'AT_LEAST_ONE',
 };
 
+/** The old default, retained as an option an admin can still choose. */
+const STRICT: ScoringConfig = {
+  ...DEFAULT_SCORING_CONFIG,
+  streakQualification: 'ALL_ASSIGNED',
+};
+
 describe('computeStreaks — current streak', () => {
   it('counts an unbroken run ending today', () => {
     const result = computeStreaks(days('2026-08-01', [4, 4, 4, 4]), '2026-08-04');
@@ -87,14 +93,19 @@ describe('computeStreaks — non-assignment days are neutral', () => {
 });
 
 describe('computeStreaks — qualification mode', () => {
-  it('requires the whole assignment by default', () => {
+  it('accepts partial completion by default (one problem is enough)', () => {
     const result = computeStreaks(days('2026-08-01', [3, 3, 3]), '2026-08-03');
-    expect(result.current).toBe(0);
+    expect(result.current).toBe(3);
   });
 
   it('accepts partial completion under AT_LEAST_ONE', () => {
     const result = computeStreaks(days('2026-08-01', [3, 1, 2]), '2026-08-03', LENIENT);
     expect(result.current).toBe(3);
+  });
+
+  it('still supports the strict all-assigned mode when an admin selects it', () => {
+    expect(computeStreaks(days('2026-08-01', [3, 3, 3]), '2026-08-03', STRICT).current).toBe(0);
+    expect(computeStreaks(days('2026-08-01', [4, 4, 4]), '2026-08-03', STRICT).current).toBe(3);
   });
 
   it('adapts the bar to short assignment days', () => {
@@ -154,6 +165,106 @@ describe('computeStreaks — weekly and monthly', () => {
       { dayKey: '2026-08-01', solvedCount: 4, assignedCount: 4 },
     ];
     expect(computeStreaks(input, '2026-08-04').monthly).toBe(3);
+  });
+});
+
+/**
+ * The DSA streak rule as stated by the programme: any day with at least one assigned
+ * problem solved keeps the streak alive; a day with zero resets it to 0.
+ */
+describe('DSA streak regression suite', () => {
+  it('TEST 7: solving 1 of 4 continues the streak', () => {
+    const result = computeStreaks(days('2026-08-01', [4, 1]), '2026-08-02');
+    expect(result.current).toBe(2);
+  });
+
+  it('TEST 9: solving 2 of 4 continues the streak', () => {
+    const result = computeStreaks(days('2026-08-01', [4, 2]), '2026-08-02');
+    expect(result.current).toBe(2);
+  });
+
+  it('TEST 8: solving 0 of 4 resets the streak to 0', () => {
+    // The zero day is in the past, so it is a concluded failure rather than a day
+    // still in progress.
+    const result = computeStreaks(days('2026-08-01', [4, 4, 0]), '2026-08-04');
+    expect(result.current).toBe(0);
+  });
+
+  it('follows the worked example: 2, 1, 4, 0, 3 gives a current streak of 1', () => {
+    // Aug 5→2 solved, Aug 6→1, Aug 7→4, Aug 8→0 (breaks), Aug 9→3 (restarts at 1).
+    const result = computeStreaks(days('2026-08-05', [2, 1, 4, 0, 3]), '2026-08-09');
+    expect(result.current).toBe(1);
+    expect(result.brokenOn).toBe('2026-08-08');
+    expect(result.longest).toBe(3);
+    expect(result.currentStartedOn).toBe('2026-08-09');
+  });
+
+  it('runs 4/4, 2/4, 1/4 then breaks on 0/4 and restarts at 1 on 3/4', () => {
+    const result = computeStreaks(days('2026-08-01', [4, 2, 1, 0, 3]), '2026-08-05');
+    expect(result.current).toBe(1);
+    expect(result.longest).toBe(3);
+  });
+
+  it('TEST 12: a date with no assignment does not break the streak', () => {
+    const input: StreakDay[] = [
+      { dayKey: '2026-08-05', solvedCount: 2, assignedCount: 4 },
+      { dayKey: '2026-08-06', solvedCount: 1, assignedCount: 4 },
+      // No assignment on the 7th or the 8th — a weekend, say.
+      { dayKey: '2026-08-07', solvedCount: 0, assignedCount: 0 },
+      { dayKey: '2026-08-08', solvedCount: 0, assignedCount: 0 },
+      { dayKey: '2026-08-09', solvedCount: 3, assignedCount: 4 },
+    ];
+    const result = computeStreaks(input, '2026-08-09');
+    expect(result.current).toBe(3);
+    expect(result.brokenOn).toBeNull();
+  });
+
+  it('does not hold pre-enrollment assignment days against a late joiner', () => {
+    // The rollup writes a DailyStatus row for every active student on every assignment
+    // day, so a student who joined on the 8th still has 0-solved rows for the 5th–7th.
+    // Those are days they did not exist, not days they failed.
+    const input = days('2026-08-05', [0, 0, 0, 2, 1]);
+
+    const joined = computeStreaks(input, '2026-08-09', DEFAULT_SCORING_CONFIG, {
+      enrolledFromDayKey: '2026-08-08',
+    });
+    expect(joined.current).toBe(2);
+    expect(joined.currentStartedOn).toBe('2026-08-08');
+    expect(joined.brokenOn).toBeNull();
+    // Their record since joining is unblemished: two assigned days, both qualifying.
+    expect(joined.totalQualifyingDays).toBe(2);
+  });
+
+  it('does not break a late joiner’s weekly streak on weeks before they joined', () => {
+    // This is where pre-enrollment days actually bite: a week with assignments but no
+    // qualifying days ends the weekly streak, even if the student had not yet joined.
+    const input: StreakDay[] = [
+      // Week 31 — assignments ran, but this student was not enrolled yet.
+      { dayKey: '2026-07-28', solvedCount: 0, assignedCount: 4 },
+      { dayKey: '2026-07-30', solvedCount: 0, assignedCount: 4 },
+      // Week 32 — joined on 3 Aug and has solved since.
+      { dayKey: '2026-08-03', solvedCount: 2, assignedCount: 4 },
+      { dayKey: '2026-08-05', solvedCount: 1, assignedCount: 4 },
+    ];
+
+    expect(computeStreaks(input, '2026-08-05').weekly).toBe(1);
+
+    const joined = computeStreaks(input, '2026-08-05', DEFAULT_SCORING_CONFIG, {
+      enrolledFromDayKey: '2026-08-03',
+    });
+    expect(joined.weekly).toBe(1);
+    // The pre-enrollment week is gone entirely rather than counted as a failed week.
+    expect(joined.totalQualifyingDays).toBe(2);
+    expect(joined.longest).toBe(2);
+  });
+
+  it('ignores an enrollment date that predates all history', () => {
+    const input = days('2026-08-01', [4, 4, 4]);
+    expect(
+      computeStreaks(input, '2026-08-03', DEFAULT_SCORING_CONFIG, {
+        enrolledFromDayKey: '2020-01-01',
+      }).current,
+    ).toBe(3);
   });
 });
 

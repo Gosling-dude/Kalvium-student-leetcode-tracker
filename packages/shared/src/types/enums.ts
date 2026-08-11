@@ -122,10 +122,16 @@ export const BLOCKER_CATEGORY_LABELS: Record<BlockerCategory, string> = {
 };
 
 /** Lifecycle of one generated daily report email. See `domain/daily-email-report.ts`. */
+/**
+ * DRAFT → PENDING_APPROVAL → APPROVED → SENDING → SENT, with SENDING → FAILED on error.
+ * `SENDING` is the in-flight claim that makes a duplicate send impossible; see the
+ * `EmailReportStatus` enum in schema.prisma.
+ */
 export const EMAIL_REPORT_STATUSES = [
   'DRAFT',
   'PENDING_APPROVAL',
   'APPROVED',
+  'SENDING',
   'SENT',
   'FAILED',
 ] as const;
@@ -135,6 +141,7 @@ export const EMAIL_REPORT_STATUS_LABELS: Record<EmailReportStatus, string> = {
   DRAFT: 'Draft',
   PENDING_APPROVAL: 'Pending approval',
   APPROVED: 'Approved',
+  SENDING: 'Sending…',
   SENT: 'Sent',
   FAILED: 'Failed',
 };

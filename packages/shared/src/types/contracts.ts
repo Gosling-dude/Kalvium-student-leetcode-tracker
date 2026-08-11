@@ -321,10 +321,39 @@ export interface AnalyticsOverview {
   bottomPerformers: { studentId: string; name: string; completionPercent: number }[];
 }
 
+/**
+ * The student-details metrics, kept as five separate named quantities.
+ *
+ * They were previously conflated — "Total Solved" was showing assignment completion —
+ * so each one states exactly what it counts. Nothing here may be substituted for
+ * anything else here.
+ */
+export interface StudentMetrics {
+  /** Lifetime distinct LeetCode problems solved, across everything the student does. */
+  totalLeetcodeSolved: number;
+  /** The day `todayAssignment` describes, in program-local time. */
+  dayKey: DayKey;
+  /** Assigned problems completed for that day, and how many were assigned. */
+  todayAssignment: {
+    solvedCount: number;
+    assignedCount: number;
+    completionPercent: number;
+    /** False when nothing was assigned that day — not the same as solving nothing. */
+    hasAssignment: boolean;
+  };
+  /** Consecutive assignment days ending at the latest relevant one with ≥1 solved. */
+  currentDsaStreak: number;
+  longestDsaStreak: number;
+  /** Assigned problems completed across the whole programme. */
+  totalAssignmentProblemsCompleted: number;
+}
+
 export interface StudentProfile extends StudentSummary {
   levelProgress: LevelProgress;
   achievements: EvaluatedAchievement[];
   difficultyBreakdown: DifficultyBreakdown;
+  /** Explicitly separated headline numbers — see `StudentMetrics`. */
+  metrics: StudentMetrics;
   heatmap: { dayKey: DayKey; solvedCount: number; assignedCount: number; intensity: number }[];
   recentDays: {
     dayKey: DayKey;

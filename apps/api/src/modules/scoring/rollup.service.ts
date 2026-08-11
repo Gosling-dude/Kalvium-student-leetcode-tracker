@@ -13,11 +13,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import {
+  ASSIGNMENT_LOOKBACK_DAYS,
+  assignmentWindow,
+  calculateAssignmentCompletion,
   computeDailyScore,
   computeStreaks,
+  isPerfectDay,
   rankEntries,
   rankSquads,
-  requiredSolvedForStreak,
+  type AssignedProblemRef,
+  type CompletionSubmission,
   type DayKey,
   type Difficulty,
   type ProblemStatus,
@@ -31,6 +36,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringConfigService } from './scoring-config.service';
+import { StudentMetricsService } from './student-metrics.service';
 
 /** How far back streak computation looks. Beyond this, a streak is not meaningfully "current". */
 const STREAK_HISTORY_DAYS = 400;
@@ -60,6 +66,7 @@ export class RollupService {
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
     private readonly scoringConfig: ScoringConfigService,
+    private readonly metrics: StudentMetricsService,
   ) {}
 
   /**
@@ -76,7 +83,12 @@ export class RollupService {
 
     const students = await this.prisma.student.findMany({
       where: { status: 'ACTIVE' },
-      select: { id: true, leetcodeUsername: true, syncState: { select: { status: true } } },
+      select: {
+        id: true,
+        leetcodeUsername: true,
+        createdAt: true,
+        syncState: { select: { status: true } },
+      },
     });
 
     // A day with no assignment still gets rows, all with assignedCount 0. Those days
@@ -116,7 +128,11 @@ export class RollupService {
 
       const days = [...(historyByStudent.get(student.id) ?? [])];
       days.push({ dayKey, solvedCount, assignedCount });
-      const streaks = computeStreaks(days, dayKey, config);
+      // Assignment days before the student joined are not misses — drop them rather
+      // than let them zero out a streak the student never had a chance to earn.
+      const streaks = computeStreaks(days, dayKey, config, {
+        enrolledFromDayKey: this.time.dayKeyOf(student.createdAt),
+      });
 
       const completionMinute = result?.completedAt
         ? this.time.minuteOfDay(result.completedAt)
@@ -137,8 +153,9 @@ export class RollupService {
         config,
       );
 
-      const isPerfect =
-        assignedCount > 0 && solvedCount >= requiredSolvedForStreak(assignedCount, config);
+      // "Perfect" is always the whole assignment. It must not follow the streak
+      // threshold, which is deliberately lenient (one problem is enough).
+      const isPerfect = isPerfectDay(solvedCount, assignedCount);
 
       await this.persistDailyStatus({
         studentId: student.id,
@@ -180,7 +197,9 @@ export class RollupService {
     const today = this.time.today();
     const from = this.time.addDays(today, -STREAK_HISTORY_DAYS);
 
-    const students = await this.prisma.student.findMany({ select: { id: true } });
+    const students = await this.prisma.student.findMany({
+      select: { id: true, createdAt: true },
+    });
 
     const statuses = await this.prisma.dailyStatus.findMany({
       where: { dayKey: { gte: from, lte: today } },
@@ -200,17 +219,11 @@ export class RollupService {
       byStudent.set(row.studentId, list);
     }
 
-    // All-time solved counts come from the submission mirror, not from DailyStatus:
-    // students solve far more problems than we assign, and the profile page shows
-    // their whole LeetCode output.
-    const solvedByDifficulty = await this.prisma.submission.groupBy({
-      by: ['studentId'],
-      where: { status: 'ACCEPTED' },
-      _count: { _all: true },
-    });
-    const totalSolvedMap = new Map(
-      solvedByDifficulty.map((row) => [row.studentId, row._count._all]),
-    );
+    // Lifetime solved comes from the submission mirror and the provider profile, never
+    // from DailyStatus — `totalSolved` means "distinct LeetCode problems this student
+    // has ever solved", not "assigned problems completed". Those are different numbers
+    // and conflating them made the profile page show today's assignment count.
+    const totalSolvedMap = await this.metrics.lifetimeSolvedByStudent();
 
     for (const student of students) {
       const rows = byStudent.get(student.id) ?? [];
@@ -222,6 +235,7 @@ export class RollupService {
         })),
         today,
         config,
+        { enrolledFromDayKey: this.time.dayKeyOf(student.createdAt) },
       );
 
       await this.prisma.student.update({
@@ -429,7 +443,19 @@ export class RollupService {
 
   // -------------------------------------------------------------------------
 
-  /** Match each student's accepted submissions for the day against the assigned problems. */
+  /**
+   * Match each student's accepted submissions against the day's assigned problems.
+   *
+   * The window is `[dayKey - ASSIGNMENT_LOOKBACK_DAYS, dayKey]`, not the single day:
+   * assignments are routinely published a day or two after students have started, and
+   * matching on the assignment date alone recorded already-solved problems as missed.
+   * The actual matching rules (distinct problems, accepted-only, earliest solve wins)
+   * live in `calculateAssignmentCompletion` so that every other surface in the app
+   * derives completion the same way — see `StudentMetricsService`.
+   *
+   * One batched query covers every student, so this is O(1) queries per day rather than
+   * O(students × problems).
+   */
   private async evaluateDay(
     dayKey: DayKey,
     assignedProblems: {
@@ -437,85 +463,68 @@ export class RollupService {
       problem: { id: string; titleSlug: string };
     }[],
   ): Promise<Map<string, StudentDayResult>> {
-    const { start, end } = this.time.bounds(dayKey);
-    const slugToProblem = new Map(
-      assignedProblems.map((link) => [
-        link.problem.titleSlug.toLowerCase(),
-        { problemId: link.problem.id, position: link.position },
-      ]),
-    );
+    const { startDayKey, endDayKey } = assignmentWindow(dayKey, ASSIGNMENT_LOOKBACK_DAYS);
+    const windowStart = this.time.bounds(startDayKey).start;
+    const windowEnd = this.time.bounds(endDayKey).end;
+
+    const assigned: AssignedProblemRef[] = assignedProblems.map((link) => ({
+      problemId: link.problem.id,
+      titleSlug: link.problem.titleSlug.toLowerCase(),
+      position: link.position,
+    }));
 
     const submissions = await this.prisma.submission.findMany({
       where: {
-        // Filter on the precomputed dayKey *and* the timestamp bounds. The dayKey is
-        // the indexed fast path; the bounds guard against a stale dayKey written by an
-        // earlier run under a different program timezone.
-        dayKey,
-        submittedAt: { gte: start, lt: end },
-        titleSlug: { in: [...slugToProblem.keys()] },
+        // `dayKey` is the indexed fast path; the timestamp bounds additionally guard
+        // against a stale dayKey written by an earlier run under a different program
+        // timezone. Both are expressed in program-local (Asia/Kolkata) days.
+        dayKey: { gte: startDayKey, lte: endDayKey },
+        submittedAt: { gte: windowStart, lt: windowEnd },
+        titleSlug: { in: assigned.map((a) => a.titleSlug) },
       },
-      orderBy: { submittedAt: 'asc' },
+      select: {
+        studentId: true,
+        problemId: true,
+        titleSlug: true,
+        status: true,
+        submittedAt: true,
+        dayKey: true,
+        language: true,
+      },
     });
+
+    const byStudent = new Map<string, CompletionSubmission[]>();
+    for (const submission of submissions) {
+      const list = byStudent.get(submission.studentId) ?? [];
+      list.push(submission);
+      byStudent.set(submission.studentId, list);
+    }
 
     const results = new Map<string, StudentDayResult>();
 
-    for (const submission of submissions) {
-      const assigned = slugToProblem.get(submission.titleSlug.toLowerCase());
-      if (!assigned) continue;
+    for (const [studentId, rows] of byStudent) {
+      const completion = calculateAssignmentCompletion(
+        dayKey,
+        assigned,
+        rows,
+        ASSIGNMENT_LOOKBACK_DAYS,
+      );
 
-      const result =
-        results.get(submission.studentId) ??
-        ({
-          studentId: submission.studentId,
-          solvedCount: 0,
-          firstSolvedAt: null,
-          lastSolvedAt: null,
-          completedAt: null,
-          problemStatuses: assignedProblems.map((link) => ({
-            problemId: link.problem.id,
-            position: link.position,
-            status: 'NOT_ATTEMPTED' as ProblemStatus,
-            solvedAt: null,
-            language: null,
-            attempts: 0,
-          })),
-        } satisfies StudentDayResult);
-
-      const slot = result.problemStatuses.find((p) => p.problemId === assigned.problemId);
-      if (!slot) continue;
-
-      slot.attempts += 1;
-
-      if (submission.status === 'ACCEPTED') {
-        // Keep the *earliest* accepted submission: re-solving a problem later in the
-        // day must not push the student's completion time backwards.
-        if (slot.status !== 'ACCEPTED') {
-          slot.status = 'ACCEPTED';
-          slot.solvedAt = submission.submittedAt;
-          slot.language = submission.language;
-        }
-      } else if (slot.status === 'NOT_ATTEMPTED') {
-        slot.status = 'ATTEMPTED_NOT_ACCEPTED';
-        slot.language = submission.language;
-      }
-
-      results.set(submission.studentId, result);
-    }
-
-    for (const result of results.values()) {
-      const accepted = result.problemStatuses.filter((p) => p.status === 'ACCEPTED');
-      result.solvedCount = accepted.length;
-
-      const times = accepted
-        .map((p) => p.solvedAt)
-        .filter((d): d is Date => d !== null)
-        .sort((a, b) => a.getTime() - b.getTime());
-
-      result.firstSolvedAt = times[0] ?? null;
-      result.lastSolvedAt = times[times.length - 1] ?? null;
-      // "Completed" means the whole assignment; the timestamp is the last one needed.
-      result.completedAt =
-        accepted.length === assignedProblems.length ? (result.lastSolvedAt ?? null) : null;
+      results.set(studentId, {
+        studentId,
+        solvedCount: completion.solvedCount,
+        firstSolvedAt: completion.firstSolvedAt,
+        lastSolvedAt: completion.lastSolvedAt,
+        completedAt: completion.completedAt,
+        problemStatuses: completion.problems.map((p) => ({
+          problemId: p.problemId,
+          position: p.position,
+          status: p.status as ProblemStatus,
+          solvedAt: p.solvedAt,
+          language: p.language,
+          attempts: p.attempts,
+        })),
+      });
     }
 
     return results;

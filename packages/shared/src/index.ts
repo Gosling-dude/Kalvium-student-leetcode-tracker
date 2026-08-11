@@ -8,6 +8,7 @@
 
 export * from './domain/time';
 export * from './domain/scoring';
+export * from './domain/assignment-completion';
 export * from './domain/streak';
 export * from './domain/ranking';
 export * from './domain/gamification';

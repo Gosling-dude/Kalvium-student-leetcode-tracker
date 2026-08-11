@@ -19,6 +19,10 @@ import { Prisma } from '@prisma/client';
 import type { Request, Response } from 'express';
 
 import { ProviderError } from '../../modules/providers/provider.errors';
+import {
+  EmailProviderNotConfiguredError,
+  EmailSendError,
+} from '../../infra/email/email.types';
 
 export interface ErrorResponseBody {
   statusCode: number;
@@ -95,6 +99,28 @@ export class AllExceptionsFilter implements ExceptionFilter {
         message: exception.message,
         error: this.reasonFor(status),
         code: exception.syncStatus,
+      };
+    }
+
+    // Email failures are configuration or upstream problems, never "we broke". A bare
+    // 500 here is what made "Approve & Send" report only "Something went wrong": the
+    // real reason (no provider configured, sender domain unverified) was thrown away.
+    // `safeMessage` is vetted for the client — it never carries a key or a raw echo.
+    if (exception instanceof EmailProviderNotConfiguredError) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        message: exception.safeMessage,
+        error: this.reasonFor(HttpStatus.SERVICE_UNAVAILABLE),
+        code: 'EMAIL_NOT_CONFIGURED',
+      };
+    }
+
+    if (exception instanceof EmailSendError) {
+      return {
+        status: HttpStatus.BAD_GATEWAY,
+        message: exception.safeMessage,
+        error: this.reasonFor(HttpStatus.BAD_GATEWAY),
+        code: exception.detail.providerCode ?? 'EMAIL_SEND_FAILED',
       };
     }
 

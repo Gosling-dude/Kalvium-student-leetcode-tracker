@@ -11,7 +11,7 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
-import { BLOCKER_CATEGORIES, type BlockerCategory } from '@dsa/shared';
+import { BLOCKER_CATEGORIES, EMAIL_REPORT_STATUSES, type BlockerCategory } from '@dsa/shared';
 
 const trim = ({ value }: { value: unknown }): unknown =>
   typeof value === 'string' ? value.trim() : value;
@@ -212,9 +212,9 @@ export class ListEmailHistoryDto {
   @IsString()
   dayKey?: string;
 
-  @ApiPropertyOptional({ enum: ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SENT', 'FAILED'] })
+  @ApiPropertyOptional({ enum: EMAIL_REPORT_STATUSES })
   @IsOptional()
-  @IsIn(['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'SENT', 'FAILED'])
+  @IsIn(EMAIL_REPORT_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ minimum: 1, default: 1 })
