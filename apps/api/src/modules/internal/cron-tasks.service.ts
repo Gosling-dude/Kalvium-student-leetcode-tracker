@@ -115,10 +115,18 @@ export class CronTasksService {
       return [];
     }
 
-    // One report per active batch, so mentors receive a Foundation report and an
-    // Intermediate report rather than one email averaging two different assignments
-    // together (§13). Each is generated, queued and approved independently.
-    const batches = await this.batches.findAll();
+    // One report per active batch *that has students*, so mentors receive a Foundation
+    // report and an Intermediate report rather than one email averaging two different
+    // assignments together (§13). Each is generated, queued and approved independently.
+    //
+    // Empty batches are skipped deliberately. A batch that exists but holds nobody —
+    // freshly created, or emptied by a roster change — would otherwise produce a report
+    // about zero students every night, and a queue of empty approvals is how mentors
+    // learn to ignore the ones that matter.
+    const batches = (await this.batches.findAll()).filter((batch) => batch.studentCount > 0);
+
+    // No batch holds anyone: fall back to a single overall report rather than sending
+    // nothing, so a programme that has not been split into batches still gets its email.
     const targets: { batchId: string | null; label: string }[] =
       batches.length > 0
         ? batches.map((batch) => ({ batchId: batch.id, label: batch.name }))
