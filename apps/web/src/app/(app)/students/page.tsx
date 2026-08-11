@@ -190,7 +190,10 @@ export default function StudentsPage() {
                 <tr>
                   <Th>Student</Th>
                   <Th>Squad</Th>
-                  <Th>Batch</Th>
+                  {/* Batch is intentionally not a column: every student in the cohort
+                      belongs to the same batch, so it repeated one value down all 250
+                      rows and carried no information. Still available as a filter and
+                      on the student profile, for when a second batch exists. */}
                   <Th>LeetCode</Th>
                   <Th>Streak</Th>
                   <Th className="text-right">Total solved</Th>
@@ -215,7 +218,6 @@ export default function StudentsPage() {
                       </p>
                     </Td>
                     <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
-                    <Td className="text-[var(--color-fg-muted)]">{student.batchName ?? '—'}</Td>
                     <Td>
                       <a
                         href={`https://leetcode.com/u/${student.leetcodeUsername}/`}

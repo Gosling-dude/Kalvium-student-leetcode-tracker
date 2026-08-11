@@ -20,6 +20,16 @@ import { ProgramTimeService } from '../../common/services/program-time.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
 import { toSyncStatus } from '../providers/provider.errors';
 
+/**
+ * How long a cached provider profile stays fresh.
+ *
+ * The sync runs every 3 hours, so 12h means roughly two profile reads per student per
+ * day instead of eight — enough to keep "Total Solved" current within a few hours,
+ * without quadrupling calls to an API that has no published rate limit and no support
+ * channel to appeal a block to.
+ */
+const PROFILE_TTL_MS = 12 * 60 * 60 * 1000;
+
 export interface StudentSyncResult {
   studentId: string;
   username: string;
@@ -73,6 +83,15 @@ export class StudentSyncService {
 
       const written = await this.persistSubmissions(student.id, page.submissions);
 
+      // Refresh the provider's lifetime stats when they are missing or stale. This is
+      // what keeps "Total Solved" honest — see `refreshProfile`. Throttled rather than
+      // run every cycle: the sync fires 8× a day and these totals barely move, so an
+      // unconditional call would double provider traffic for no gain. A student with no
+      // profile yet is always due, so existing rows self-heal on the next sync.
+      if (this.isProfileStale(student.syncState?.providerProfileFetchedAt ?? null)) {
+        await this.refreshProfile(student.id, username);
+      }
+
       // Advance the cursor from the newest submission actually seen, not from "now" —
       // using a wall-clock cursor would skip anything submitted during the sync itself.
       const newest = page.submissions.reduce<Date | null>(
@@ -107,6 +126,18 @@ export class StudentSyncService {
       const status = toSyncStatus(error);
       const message = (error as Error).message;
 
+      // The two calls fail independently: LeetCode hides a private account's *submission
+      // list* while still serving its aggregate profile stats. Without this, such a
+      // student's "Total Solved" stays 0 forever even though their real count is public.
+      // Skipped when the account does not exist, where the profile call cannot succeed
+      // either and would just burn a request.
+      if (
+        status !== 'USER_NOT_FOUND' &&
+        this.isProfileStale(student.syncState?.providerProfileFetchedAt ?? null)
+      ) {
+        await this.refreshProfile(student.id, username);
+      }
+
       await this.updateSyncState(student.id, {
         status,
         lastError: message,
@@ -131,6 +162,12 @@ export class StudentSyncService {
         durationMs: Date.now() - startedAt,
       };
     }
+  }
+
+  /** Never fetched, or older than the TTL. */
+  private isProfileStale(fetchedAt: Date | null): boolean {
+    if (!fetchedAt) return true;
+    return Date.now() - fetchedAt.getTime() > PROFILE_TTL_MS;
   }
 
   /**
@@ -187,52 +224,69 @@ export class StudentSyncService {
     return result.count;
   }
 
-  /** Refresh a student's cached provider profile statistics. */
-  async refreshProfile(studentId: string): Promise<void> {
-    const student = await this.prisma.student.findUnique({
-      where: { id: studentId },
-      select: { id: true, leetcodeUsername: true },
-    });
-    if (!student) return;
+  /**
+   * Refresh a student's cached provider profile statistics.
+   *
+   * These are *not* decoration. `providerTotalSolved` is LeetCode's own count of
+   * distinct problems the student has ever solved (`submitStats.acSubmissionNum` where
+   * difficulty = "All"), and it is the only source for that number: the submission
+   * mirror is capped by the provider's 20-row window, so it cannot see anything solved
+   * before the student was first synced. `Student.totalSolved` reconciles the two, and
+   * without this call it silently degrades to the mirror's undercount.
+   *
+   * Failure is still non-fatal — a profile we could not read must not fail the
+   * submission sync, which is the part that cannot be re-fetched later.
+   */
+  async refreshProfile(studentId: string, username?: string): Promise<boolean> {
+    let leetcodeUsername = username;
+
+    if (!leetcodeUsername) {
+      const student = await this.prisma.student.findUnique({
+        where: { id: studentId },
+        select: { leetcodeUsername: true },
+      });
+      if (!student) return false;
+      leetcodeUsername = student.leetcodeUsername;
+    }
 
     try {
-      const profile = await this.provider.fetchUserProfile(student.leetcodeUsername);
+      const profile = await this.provider.fetchUserProfile(leetcodeUsername);
+      const fetchedAt = new Date();
+
+      const stats = {
+        providerTotalSolved: profile.totalSolved,
+        providerEasySolved: profile.easySolved,
+        providerMediumSolved: profile.mediumSolved,
+        providerHardSolved: profile.hardSolved,
+        providerRanking: profile.ranking,
+        providerProfileFetchedAt: fetchedAt,
+      };
 
       await this.prisma.$transaction([
         this.prisma.student.update({
-          where: { id: student.id },
+          where: { id: studentId },
           data: {
             leetcodeDisplayName: profile.displayName,
             avatarUrl: profile.avatarUrl,
+            // The difficulty split shown on the profile page. Previously never
+            // populated, which is why it read 0/0/0 for everyone.
             easySolved: profile.easySolved,
             mediumSolved: profile.mediumSolved,
             hardSolved: profile.hardSolved,
           },
         }),
         this.prisma.studentSyncState.upsert({
-          where: { studentId: student.id },
-          create: {
-            studentId: student.id,
-            providerTotalSolved: profile.totalSolved,
-            providerEasySolved: profile.easySolved,
-            providerMediumSolved: profile.mediumSolved,
-            providerHardSolved: profile.hardSolved,
-            providerRanking: profile.ranking,
-          },
-          update: {
-            providerTotalSolved: profile.totalSolved,
-            providerEasySolved: profile.easySolved,
-            providerMediumSolved: profile.mediumSolved,
-            providerHardSolved: profile.hardSolved,
-            providerRanking: profile.ranking,
-          },
+          where: { studentId },
+          create: { studentId, ...stats },
+          update: stats,
         }),
       ]);
+      return true;
     } catch (error) {
-      // Profile statistics are decoration; failing to refresh them must not fail a sync.
       this.logger.debug(
-        `Could not refresh profile for "${student.leetcodeUsername}": ${(error as Error).message}`,
+        `Could not refresh profile for "${leetcodeUsername}": ${(error as Error).message}`,
       );
+      return false;
     }
   }
 

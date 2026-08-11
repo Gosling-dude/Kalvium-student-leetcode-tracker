@@ -482,11 +482,21 @@ model StudentSyncState {
   consecutiveFailures      Int        @default(0)
   totalSyncs               Int        @default(0)
   /// Cached from the provider's aggregate stats — the student's all-time totals.
+  ///
+  /// This is the *authoritative* lifetime solved count. The submission mirror can only
+  /// ever be a floor: LeetCode exposes the 20 most recent submissions, so anything a
+  /// student solved before we first synced them is unobservable. `Student.totalSolved`
+  /// reconciles the two (see `StudentMetricsService.lifetimeSolvedByStudent`), which is
+  /// only correct as long as these columns are actually kept up to date.
   providerTotalSolved      Int?
   providerEasySolved       Int?
   providerMediumSolved     Int?
   providerHardSolved       Int?
   providerRanking          Int?
+  /// When the profile stats above were last fetched. Drives the refresh cadence in
+  /// `StudentSyncService` — profile totals move slowly, so they are re-read far less
+  /// often than submissions rather than on every sync cycle.
+  providerProfileFetchedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
