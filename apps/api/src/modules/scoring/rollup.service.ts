@@ -717,8 +717,22 @@ export class RollupService {
       update: data,
     });
 
-
-    if (input.problemStatuses.length === 0) return;
+    // Drop any per-problem detail left over from a *different* problem set this day was
+    // previously evaluated against — `assignedCount`/`solvedCount` above are already
+    // correct for the current set, but without this a "missing questions" list could go
+    // on showing a problem the student is no longer measured against. This is reachable
+    // two ways: an admin edits an assignment's problem list (`PATCH /assignments/:id`),
+    // or `assignmentId` itself legitimately changes — which normally can't happen once
+    // frozen, but does under `force` (see above), which is exactly how this was found:
+    // a day frozen to the wrong assignment before a data fix, force-recomputed onto the
+    // right one, still showing the old assignment's problems as "missing" until this ran.
+    const currentProblemIds = input.problemStatuses.map((p) => p.problemId);
+    await this.prisma.dailyProblemStatus.deleteMany({
+      where: {
+        dailyStatusId: status.id,
+        ...(currentProblemIds.length > 0 ? { problemId: { notIn: currentProblemIds } } : {}),
+      },
+    });
 
     for (const problem of input.problemStatuses) {
       await this.prisma.dailyProblemStatus.upsert({
