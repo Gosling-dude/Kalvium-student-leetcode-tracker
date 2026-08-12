@@ -9,6 +9,7 @@ import {
   CACHE_TTL,
   extractProblemSlug,
   selectAssignmentForBatch,
+  type AssignmentAudienceChangeEntry,
   type AssignmentProblem,
   type AssignmentSummary,
   type DayKey,
@@ -22,7 +23,14 @@ import { paginate } from '../../common/dto/pagination.dto';
 import { BatchesService } from '../batches/batches.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
 import { ProviderProblemNotFoundError } from '../providers/provider.errors';
-import type { CreateAssignmentDto, UpdateAssignmentDto } from './dto/assignment.dto';
+import type {
+  ChangeAssignmentTargetDto,
+  CreateAssignmentDto,
+  UpdateAssignmentDto,
+} from './dto/assignment.dto';
+
+/** The `target` value meaning "every batch" — an alias for `batchId = null`. */
+const BOTH_TARGET = 'BOTH';
 
 @Injectable()
 export class AssignmentsService {
@@ -76,6 +84,8 @@ export class AssignmentsService {
           data: {
             dayKey: dto.dayKey,
             batchId,
+            // Frozen at creation — see the schema note on `originalBatchId`.
+            originalBatchId: batchId,
             title: dto.title ?? null,
             topic: dto.topic ?? null,
             notes: dto.notes ?? null,
@@ -164,6 +174,119 @@ export class AssignmentsService {
 
     await this.invalidate(existing.dayKey);
     return this.toSummary(assignment);
+  }
+
+  /**
+   * "Change Assignment Target" (§9): reconfigure which batch(es) an existing assignment
+   * currently applies to — typically a pre-batch legacy row (`batchId = NULL`) being
+   * scoped to Foundation, Intermediate or explicitly kept as "Both".
+   *
+   * What this does *not* do is touch a single `DailyStatus` row. Every day already
+   * computed against this assignment stays computed against it: `RollupService` freezes
+   * `DailyStatus.assignmentId` the first time a day is scored and never swaps it for a
+   * different assignment on a later recompute, so retargeting cannot silently rewrite a
+   * result that already exists. `originalBatchId` is never touched either, so the UI can
+   * always show what this assignment *was* alongside what it is now.
+   */
+  async changeTarget(
+    id: string,
+    dto: ChangeAssignmentTargetDto,
+    user: { id: string; name: string },
+  ): Promise<AssignmentSummary> {
+    const existing = await this.prisma.assignment.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException(`Assignment ${id} was not found`);
+
+    const target = await this.resolveTarget(dto.target);
+
+    if (target === existing.batchId) {
+      const label = await this.describeBatch(target);
+      throw new BadRequestException(`This assignment already targets ${label}.`);
+    }
+
+    // A partial/composite unique index (`dayKey`, `batchId`) already enforces this at the
+    // database level, but resolving it here gives a mentor-readable error instead of a
+    // raw constraint violation.
+    const clash = await this.prisma.assignment.findFirst({
+      where: { dayKey: existing.dayKey, batchId: target, id: { not: id } },
+      include: { batch: { select: { name: true } } },
+    });
+    if (clash) {
+      throw new BadRequestException(
+        `${existing.dayKey} already has a separate assignment for ${clash.batch?.name ?? 'all batches'}. ` +
+          'Update or delete that one first.',
+      );
+    }
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.assignment.update({ where: { id }, data: { batchId: target } });
+      await tx.assignmentAudienceChange.create({
+        data: {
+          assignmentId: id,
+          fromBatchId: existing.batchId,
+          toBatchId: target,
+          reason: dto.reason?.trim() || null,
+          changedById: user.id,
+          changedByName: user.name,
+        },
+      });
+      // Re-read with the full include *after* both writes land, so the audience-change
+      // row just created is the one `toSummary` sees as "latest" (`audienceChangedAt`).
+      return tx.assignment.findUniqueOrThrow({ where: { id }, include: this.include() });
+    });
+
+    await this.invalidate(existing.dayKey);
+
+    this.logger.log(
+      `Retargeted assignment ${id} (${existing.dayKey}) from ${existing.batchId ?? 'all batches'} to ${target ?? 'all batches'}`,
+    );
+
+    return this.toSummary(updated);
+  }
+
+  /** `null`/absent means "every batch" (`'both'`/`'all'`); anything else must name a batch. */
+  private async resolveTarget(target: string): Promise<string | null> {
+    const trimmed = target.trim().toUpperCase();
+    if (trimmed === BOTH_TARGET || trimmed === 'ALL') return null;
+    const resolved = await this.batches.resolveSelector(target);
+    if (resolved === null) {
+      throw new BadRequestException(`"${target}" does not name a batch. Use "BOTH" for all batches.`);
+    }
+    return resolved;
+  }
+
+  private async describeBatch(batchId: string | null): Promise<string> {
+    if (batchId === null) return 'all batches';
+    const batch = await this.prisma.batch.findUnique({ where: { id: batchId }, select: { name: true } });
+    return batch?.name ?? 'that batch';
+  }
+
+  /** Every retarget event for an assignment, newest first — the audit trail behind §9. */
+  async audienceHistory(id: string): Promise<AssignmentAudienceChangeEntry[]> {
+    const rows = await this.prisma.assignmentAudienceChange.findMany({
+      where: { assignmentId: id },
+      include: {
+        fromBatch: { select: { name: true, code: true } },
+        toBatch: { select: { name: true, code: true } },
+      },
+      orderBy: { changedAt: 'desc' },
+    });
+
+    return rows.map(
+      (row): AssignmentAudienceChangeEntry => ({
+        id: row.id,
+        assignmentId: row.assignmentId,
+        fromBatchId: row.fromBatchId,
+        fromBatchName: row.fromBatch?.name ?? null,
+        fromBatchCode: row.fromBatch?.code ?? null,
+        toBatchId: row.toBatchId,
+        toBatchName: row.toBatch?.name ?? null,
+        toBatchCode: row.toBatch?.code ?? null,
+        reason: row.reason,
+        changedById: row.changedById,
+        changedByName: row.changedByName,
+        changedAt: row.changedAt.toISOString(),
+      }),
+    );
   }
 
   async remove(id: string): Promise<void> {
@@ -351,6 +474,10 @@ export class AssignmentsService {
       problems: { include: { problem: true }, orderBy: { position: 'asc' as const } },
       createdBy: { select: { name: true } },
       batch: { select: { name: true, code: true } },
+      originalBatch: { select: { name: true, code: true } },
+      // Only the latest change is needed to answer "has this been retargeted, and when";
+      // the full trail is fetched separately via `audienceHistory` when a mentor asks.
+      audienceChanges: { orderBy: { changedAt: 'desc' as const }, take: 1 },
     };
   }
 
@@ -367,6 +494,9 @@ export class AssignmentsService {
     dayKey: string;
     batchId: string | null;
     batch?: { name: string; code: string } | null;
+    originalBatchId: string | null;
+    originalBatch?: { name: string; code: string } | null;
+    audienceChanges?: { changedAt: Date }[];
     title: string | null;
     topic: string | null;
     notes: string | null;
@@ -396,6 +526,10 @@ export class AssignmentsService {
       batchId: assignment.batchId,
       batchName: assignment.batch?.name ?? null,
       batchCode: assignment.batch?.code ?? null,
+      originalBatchId: assignment.originalBatchId,
+      originalBatchName: assignment.originalBatch?.name ?? null,
+      originalBatchCode: assignment.originalBatch?.code ?? null,
+      audienceChangedAt: assignment.audienceChanges?.[0]?.changedAt.toISOString() ?? null,
       title: assignment.title,
       topic: assignment.topic,
       notes: assignment.notes,

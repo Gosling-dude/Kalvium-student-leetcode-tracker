@@ -19,6 +19,7 @@ import { BatchesService } from '../batches/batches.service';
 import {
   AssignmentDayQueryDto,
   AssignmentQueryDto,
+  ChangeAssignmentTargetDto,
   CreateAssignmentDto,
   PreviewProblemDto,
   UpdateAssignmentDto,
@@ -99,5 +100,28 @@ export class AssignmentsController {
   @ApiOperation({ summary: 'Delete an assignment' })
   async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
     await this.assignments.remove(id);
+  }
+
+  /**
+   * "Change Assignment Target" (§9) — admin-only, since it changes who a past or present
+   * day's problem set officially belongs to. Never mutates a `DailyStatus`; see the
+   * service method's comment for why that is safe.
+   */
+  @Patch(':id/target')
+  @Roles('ADMIN')
+  @Audit('ASSIGNMENT_TARGET_CHANGED', 'Assignment')
+  @ApiOperation({ summary: 'Retarget an assignment to Foundation, Intermediate or Both' })
+  changeTarget(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeAssignmentTargetDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.assignments.changeTarget(id, dto, { id: user.id, name: user.name });
+  }
+
+  @Get(':id/target-history')
+  @ApiOperation({ summary: "An assignment's audience retargets over time, newest first" })
+  targetHistory(@Param('id', ParseUUIDPipe) id: string) {
+    return this.assignments.audienceHistory(id);
   }
 }

@@ -11,6 +11,7 @@
 
 import type {
   AnalyticsOverview,
+  AssignmentAudienceChangeEntry,
   AssignmentSummary,
   AuthUser,
   BatchHistoryEntry,
@@ -272,6 +273,16 @@ export const api = {
       '/assignments/preview',
       { method: 'POST', body: { url } },
     ),
+
+  /** "Change Assignment Target" (§9) — admin only. `target` is a batch id/code or "BOTH". */
+  changeAssignmentTarget: (id: string, target: string, reason?: string) =>
+    apiFetch<AssignmentSummary>(`/assignments/${id}/target`, {
+      method: 'PATCH',
+      body: { target, reason },
+    }),
+
+  assignmentTargetHistory: (id: string) =>
+    apiFetch<AssignmentAudienceChangeEntry[]>(`/assignments/${id}/target-history`),
 
   leaderboard: (params: Record<string, string | number | undefined>) =>
     apiFetch<LeaderboardRow[]>(`/leaderboard${qs(params)}`),

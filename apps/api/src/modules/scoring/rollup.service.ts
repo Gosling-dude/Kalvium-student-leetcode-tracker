@@ -105,6 +105,19 @@ export class RollupService {
       dayKey,
     );
 
+    // Which assignment each student was already evaluated against for this exact day, if
+    // this day has been computed before. Once a `DailyStatus` names an assignment, a later
+    // recompute keeps using that same row — even if an admin has since retargeted its
+    // batch (§9) — rather than re-resolving via `selectAssignmentForBatch` and picking a
+    // different (or no) assignment out from under an already-scored day.
+    const existingToday = await this.prisma.dailyStatus.findMany({
+      where: { dayKey },
+      select: { studentId: true, assignmentId: true },
+    });
+    const frozenAssignmentByStudent = new Map(
+      existingToday.filter((row) => row.assignmentId).map((row) => [row.studentId, row.assignmentId!]),
+    );
+
     // Evaluate once per distinct problem set rather than once per student: the students
     // in a batch all face the same problems, and the submission scan is the expensive part.
     const resultsByAssignment = new Map<string, Map<string, StudentDayResult>>();
@@ -148,8 +161,14 @@ export class RollupService {
       const batchIdOnDay = historicalBatch.get(student.id) ?? null;
 
       // Only this student's batch's set is a candidate, plus the pre-batch row that
-      // applied to everyone. Another batch's problems are never considered.
-      const assignment = selectAssignmentForBatch(assignments, batchIdOnDay);
+      // applied to everyone. Another batch's problems are never considered — unless this
+      // day was already scored against a specific assignment, in which case that frozen
+      // choice wins outright (see `frozenAssignmentByStudent` above).
+      const frozenAssignmentId = frozenAssignmentByStudent.get(student.id);
+      const assignment = frozenAssignmentId
+        ? (assignments.find((a) => a.id === frozenAssignmentId) ??
+            selectAssignmentForBatch(assignments, batchIdOnDay))
+        : selectAssignmentForBatch(assignments, batchIdOnDay);
 
       // A day with no assignment for this student's batch still gets a row, with
       // assignedCount 0. Those days are neutral for streaks and must not be confused
@@ -628,7 +647,7 @@ export class RollupService {
   }): Promise<void> {
     const existing = await this.prisma.dailyStatus.findUnique({
       where: { studentId_dayKey: { studentId: input.studentId, dayKey: input.dayKey } },
-      select: { id: true, isOverridden: true, batchId: true },
+      select: { id: true, isOverridden: true, batchId: true, assignmentId: true },
     });
 
     // A mentor's manual override is authoritative. Recomputing must never silently
@@ -644,8 +663,14 @@ export class RollupService {
     // recompute would otherwise quietly rewrite a closed day.
     const batchId = existing?.batchId ?? input.batchId;
 
+    // Likewise the assignment a day was scored against is written once and then frozen
+    // (§9). The caller already resolves the frozen assignment before computing counts —
+    // this is the same belt-and-braces guarantee, so a direct call into this method can
+    // never overwrite it either.
+    const assignmentId = existing?.assignmentId ?? input.assignmentId;
+
     const data = {
-      assignmentId: input.assignmentId,
+      assignmentId,
       batchId,
       assignedCount: input.assignedCount,
       solvedCount: input.solvedCount,

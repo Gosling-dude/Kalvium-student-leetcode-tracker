@@ -2,12 +2,14 @@
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus } from 'lucide-react';
+import { Plus, Settings2 } from 'lucide-react';
 import { toast } from 'sonner';
+import type { AssignmentSummary } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { todayKey } from '@/lib/utils';
 import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ChangeAssignmentTargetDialog } from '@/components/change-assignment-target-dialog';
 import {
   Badge,
   Button,
@@ -39,6 +41,10 @@ export default function AssignmentsPage() {
   const [creating, setCreating] = useState(false);
 
   const { selected: batchFilter, batches } = useBatchFilter();
+
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me });
+  const isAdmin = me.data?.role === 'ADMIN';
+  const [retargeting, setRetargeting] = useState<AssignmentSummary | null>(null);
 
   /**
    * Which batches receive this problem set. Empty means every batch.
@@ -296,6 +302,7 @@ export default function AssignmentsPage() {
                 <Th>Topic</Th>
                 <Th>Problems</Th>
                 <Th className="text-right">Count</Th>
+                {isAdmin ? <Th className="text-right">Actions</Th> : null}
               </tr>
             </thead>
             <tbody>
@@ -313,6 +320,16 @@ export default function AssignmentsPage() {
                     ) : (
                       <Badge tone="neutral">All students</Badge>
                     )}
+                    {/* Distinguishes a retargeted row from one that has always been what it
+                        says (§9) — never silently presented as if it always applied here. */}
+                    {assignment.audienceChangedAt ? (
+                      <span
+                        className="ml-1.5 text-xs text-[var(--color-fg-subtle)]"
+                        title={`Originally ${assignment.originalBatchId ? (assignment.originalBatchName ?? 'a batch') : 'All students'}`}
+                      >
+                        (retargeted)
+                      </span>
+                    ) : null}
                   </Td>
                   <Td className="text-[var(--color-fg-muted)]">{assignment.topic ?? '—'}</Td>
                   <Td>
@@ -332,12 +349,31 @@ export default function AssignmentsPage() {
                     </div>
                   </Td>
                   <Td className="text-right tabular-nums">{assignment.problems.length}</Td>
+                  {isAdmin ? (
+                    <Td className="text-right">
+                      <Button
+                        variant="ghost"
+                        className="text-xs"
+                        onClick={() => setRetargeting(assignment)}
+                      >
+                        <Settings2 className="size-3.5" aria-hidden />
+                        Change target
+                      </Button>
+                    </Td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
           </TableShell>
         )}
       </Card>
+
+      <ChangeAssignmentTargetDialog
+        assignment={retargeting}
+        batches={batches}
+        open={!!retargeting}
+        onClose={() => setRetargeting(null)}
+      />
     </div>
   );
 }

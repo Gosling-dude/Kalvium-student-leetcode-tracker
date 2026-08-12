@@ -152,6 +152,23 @@ export class AssignmentDayQueryDto {
   batch?: string;
 }
 
+/** `PATCH /assignments/:id/target` — "Change Assignment Target" (§9). */
+export class ChangeAssignmentTargetDto {
+  @ApiProperty({
+    example: 'FOUNDATION',
+    description: 'Batch id, code (A/B), alias (foundation/intermediate), or "BOTH" for every batch.',
+  })
+  @IsString()
+  @MaxLength(64)
+  target!: string;
+
+  @ApiPropertyOptional({ description: 'Why the audience is changing — recorded in the audit trail.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
 export class PreviewProblemDto {
   @ApiProperty({ example: 'https://leetcode.com/problems/two-sum/' })
   @IsString()

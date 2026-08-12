@@ -242,12 +242,22 @@ export interface AssignmentSummary {
   id: string;
   dayKey: DayKey;
   /**
-   * The batch this problem set belongs to. `null` means it predates batches and applied
-   * to every student — a historical fact, never retro-assigned to a batch.
+   * The batch this problem set *currently* targets. `null` means "all batches" — either
+   * because it predates batches, or because an admin retargeted it to "Both" (§9).
    */
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /**
+   * The audience this assignment was first created with, frozen forever. Differs from
+   * `batchId` only after a "Change Assignment Target" retarget — comparing the two is how
+   * the UI shows "originally All, now Foundation" instead of silently rewriting history.
+   */
+  originalBatchId: string | null;
+  originalBatchName: string | null;
+  originalBatchCode: string | null;
+  /** Non-null once this assignment's target has ever been changed from its original. */
+  audienceChangedAt: string | null;
   title: string | null;
   topic: string | null;
   notes: string | null;
@@ -255,6 +265,22 @@ export interface AssignmentSummary {
   problems: AssignmentProblem[];
   createdAt: string;
   createdByName: string | null;
+}
+
+/** One "Change Assignment Target" event (§9) — mirrors `BatchHistoryEntry`'s shape. */
+export interface AssignmentAudienceChangeEntry {
+  id: string;
+  assignmentId: string;
+  fromBatchId: string | null;
+  fromBatchName: string | null;
+  fromBatchCode: string | null;
+  toBatchId: string | null;
+  toBatchName: string | null;
+  toBatchCode: string | null;
+  reason: string | null;
+  changedById: string | null;
+  changedByName: string | null;
+  changedAt: string;
 }
 
 /** A row in one of the mentor dashboard's five "solved N" tables. */

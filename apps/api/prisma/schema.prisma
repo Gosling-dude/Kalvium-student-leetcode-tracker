@@ -214,17 +214,18 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  mentoredSquads        Squad[]               @relation("SquadMentor")
-  assignments           Assignment[]          @relation("AssignmentAuthor")
-  notes                 MentorNote[]
-  auditLogs             AuditLog[]
-  refreshTokens         RefreshToken[]
-  apiKeys               ApiKey[]
-  syncJobs              SyncJob[]
-  blockersRecorded      Blocker[]             @relation("BlockerRecordedBy")
-  emailReportsGenerated EmailReport[]         @relation("EmailReportGeneratedBy")
-  emailReportsApproved  EmailReport[]         @relation("EmailReportApprovedBy")
-  batchChanges          StudentBatchHistory[] @relation("BatchChangedBy")
+  mentoredSquads            Squad[]                    @relation("SquadMentor")
+  assignments               Assignment[]               @relation("AssignmentAuthor")
+  notes                     MentorNote[]
+  auditLogs                 AuditLog[]
+  refreshTokens             RefreshToken[]
+  apiKeys                   ApiKey[]
+  syncJobs                  SyncJob[]
+  blockersRecorded          Blocker[]                  @relation("BlockerRecordedBy")
+  emailReportsGenerated     EmailReport[]              @relation("EmailReportGeneratedBy")
+  emailReportsApproved      EmailReport[]              @relation("EmailReportApprovedBy")
+  batchChanges              StudentBatchHistory[]      @relation("BatchChangedBy")
+  assignmentAudienceChanges AssignmentAudienceChange[] @relation("AssignmentAudienceChangedBy")
 
   @@index([role])
   @@index([isActive])
@@ -305,14 +306,17 @@ model Batch {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  students           Student[]
-  squads             Squad[]
-  assignments        Assignment[]
-  dailyStatuses      DailyStatus[]
-  leaderboardEntries LeaderboardEntry[]
-  emailReports       EmailReport[]
-  movementsFrom      StudentBatchHistory[] @relation("BatchMovedFrom")
-  movementsTo        StudentBatchHistory[] @relation("BatchMovedTo")
+  students                      Student[]
+  squads                        Squad[]
+  assignments                   Assignment[]
+  assignmentsOriginal           Assignment[]               @relation("AssignmentOriginalBatch")
+  dailyStatuses                 DailyStatus[]
+  leaderboardEntries            LeaderboardEntry[]
+  emailReports                  EmailReport[]
+  movementsFrom                 StudentBatchHistory[]      @relation("BatchMovedFrom")
+  movementsTo                   StudentBatchHistory[]      @relation("BatchMovedTo")
+  assignmentAudienceChangesFrom AssignmentAudienceChange[] @relation("AssignmentAudienceFrom")
+  assignmentAudienceChangesTo   AssignmentAudienceChange[] @relation("AssignmentAudienceTo")
 
   @@index([isActive])
   @@index([status])
@@ -530,6 +534,16 @@ model Assignment {
 
   batchId String? @db.Uuid
 
+  /// The audience this assignment was created with, frozen forever once set (first write
+  /// wins — see the migration). `batchId` is the *current* administrative target and may
+  /// be changed later via "Change Assignment Target" (§9); `originalBatchId` is what the
+  /// UI shows as "originally assigned to" so a retarget is visible rather than silently
+  /// rewriting what actually happened. Historical evaluation does not depend on either
+  /// column directly — `DailyStatus.assignmentId` is frozen to this row's id the first
+  /// time a day is computed, so retargeting never changes what a past day was scored
+  /// against (see `RollupService.persistDailyStatus`).
+  originalBatchId String? @db.Uuid
+
   title       String?
   topic       String?
   notes       String?
@@ -542,15 +556,48 @@ model Assignment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  createdBy     User?               @relation("AssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
-  batch         Batch?              @relation(fields: [batchId], references: [id], onDelete: Restrict)
-  problems      AssignmentProblem[]
-  dailyStatuses DailyStatus[]
+  createdBy       User?                      @relation("AssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  batch           Batch?                     @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  originalBatch   Batch?                     @relation("AssignmentOriginalBatch", fields: [originalBatchId], references: [id], onDelete: SetNull)
+  problems        AssignmentProblem[]
+  dailyStatuses   DailyStatus[]
+  audienceChanges AssignmentAudienceChange[]
 
   @@unique([dayKey, batchId])
   @@index([dayKey])
   @@index([batchId, dayKey])
   @@map("assignments")
+}
+
+/// Append-only record of an admin retargeting an assignment's audience (§9) — "this was
+/// assigned to All, now target it to Foundation only". Mirrors `StudentBatchHistory`'s
+/// shape and purpose: the fact that a change happened, when, by whom and why must survive
+/// even though only one `Assignment.batchId` value can be current at a time.
+///
+/// This table is what makes the retarget *safe*: it never touches `DailyStatus` rows, and
+/// changing `Assignment.batchId` cannot retroactively alter a day that has already been
+/// scored, because `RollupService` freezes `DailyStatus.assignmentId` the first time a day
+/// is computed and never swaps it for a different assignment on a later recompute.
+model AssignmentAudienceChange {
+  id           String  @id @default(uuid()) @db.Uuid
+  assignmentId String  @db.Uuid
+  fromBatchId  String? @db.Uuid
+  toBatchId    String? @db.Uuid
+  reason       String?
+
+  changedById   String? @db.Uuid
+  /// Denormalised so the history still reads correctly after a mentor account is deleted.
+  changedByName String?
+
+  changedAt DateTime @default(now())
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  fromBatch  Batch?     @relation("AssignmentAudienceFrom", fields: [fromBatchId], references: [id], onDelete: SetNull)
+  toBatch    Batch?     @relation("AssignmentAudienceTo", fields: [toBatchId], references: [id], onDelete: SetNull)
+  changedBy  User?      @relation("AssignmentAudienceChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  @@index([assignmentId, changedAt])
+  @@map("assignment_audience_changes")
 }
 
 model AssignmentProblem {
