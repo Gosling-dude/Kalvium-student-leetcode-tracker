@@ -13,6 +13,7 @@ import {
   isRedundantMove,
   normaliseBatchCode,
   resolveBatchOnDay,
+  resolveFrozenField,
   selectAssignmentForBatch,
   type BatchPlacement,
 } from './batch';
@@ -172,5 +173,34 @@ describe('batch codes', () => {
   it('never returns an empty code', () => {
     expect(deriveBatchCode('!!!')).toBe('BATCH');
     expect(deriveBatchCode('')).toBe('BATCH');
+  });
+});
+
+describe('resolveFrozenField', () => {
+  it('keeps the existing value once a day is closed (the default, unforced path)', () => {
+    expect(resolveFrozenField('legacy-assignment', 'sliding-window-assignment')).toBe(
+      'legacy-assignment',
+    );
+  });
+
+  it('adopts the incoming value the first time a day is computed', () => {
+    expect(resolveFrozenField(null, 'sliding-window-assignment')).toBe(
+      'sliding-window-assignment',
+    );
+    expect(resolveFrozenField(undefined, 'sliding-window-assignment')).toBe(
+      'sliding-window-assignment',
+    );
+  });
+
+  it('force bypasses the freeze even when a value already exists', () => {
+    expect(resolveFrozenField('legacy-assignment', 'sliding-window-assignment', true)).toBe(
+      'sliding-window-assignment',
+    );
+  });
+
+  it('force is a no-op when there was nothing frozen yet', () => {
+    expect(resolveFrozenField(null, 'sliding-window-assignment', true)).toBe(
+      'sliding-window-assignment',
+    );
   });
 });

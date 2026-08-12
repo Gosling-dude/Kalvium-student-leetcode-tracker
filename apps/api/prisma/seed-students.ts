@@ -320,15 +320,45 @@ function parseRoster(path: string): {
   return { rows, problems, mentionedEmails };
 }
 
-/** Program-local day key, matching `ProgramTimeService.today()`. */
-function todayDayKey(): string {
+/** Program-local day key for an arbitrary instant, matching `ProgramTimeService.dayKeyOf`. */
+export function dayKeyOf(date: Date): string {
   const timezone = process.env.PROGRAM_TIMEZONE ?? 'Asia/Kolkata';
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(new Date());
+  }).format(date);
+}
+
+/** Program-local day key "now", matching `ProgramTimeService.today()`. */
+function todayDayKey(): string {
+  return dayKeyOf(new Date());
+}
+
+/**
+ * When a roster sync moves an existing student to a different batch, which day the move
+ * should take effect from.
+ *
+ * "First placement" is decided by `hasPriorPlacements`, not by whether `Student.batchId`
+ * was already non-null — a student can carry a `batchId` that was never actually recorded
+ * as a placement (the classic case: an old import stamped everyone onto a placeholder
+ * batch like "Batch 2026" before `StudentBatchHistory` existed). Checking history directly
+ * is what makes that distinguishable from a genuine administrative move:
+ *
+ *  - No prior placement on record → back-dated to enrolment. The roster is stating what
+ *    has been true all along, not making a change now.
+ *  - At least one prior placement → effective today. An admin moving someone now is a
+ *    decision about now, and back-dating it would re-file already-closed days.
+ *
+ * Pure so the decision itself is unit-testable without a database.
+ */
+export function resolvePlacementEffectiveDate(input: {
+  hasPriorPlacements: boolean;
+  todayDayKey: string;
+  enrolmentDayKey: string;
+}): string {
+  return input.hasPriorPlacements ? input.todayDayKey : input.enrolmentDayKey;
 }
 
 interface Summary {
@@ -528,18 +558,39 @@ async function main(): Promise<void> {
         await prisma.student.update({ where: { id: existing.id }, data: changes });
 
         if (batchChanged) {
-          // Every batch change is recorded, whoever made it. Effective from today, so
-          // days already closed keep the batch they were actually completed under (§7).
-          const isFirstPlacement = existing.batchId === null;
+          // "First placement" is *not* `existing.batchId === null` — a student can carry a
+          // non-null `batchId` that nonetheless was never actually recorded as a placement
+          // (the classic case: an old import stamped everyone onto a placeholder batch
+          // like "Batch 2026" without ever writing a `StudentBatchHistory` row, because that
+          // table didn't exist yet). Checking history directly, not the batchId, is what
+          // makes that distinguishable from a genuine administrative move.
+          //
+          // A genuine move (the student already has at least one recorded placement)
+          // is effective from today, so days already closed keep the batch they were
+          // actually completed under (§7) — an admin moving someone now is a decision
+          // about now. A first-ever recorded placement is back-dated to enrolment instead:
+          // the roster is stating what has been true all along, not making a change now.
+          // Neither can rewrite a closed day, because a `DailyStatus` that already carries
+          // a batch is never re-stamped by an ordinary recompute.
+          const priorPlacements = await prisma.studentBatchHistory.count({
+            where: { studentId: existing.id },
+          });
+          const isFirstPlacement = priorPlacements === 0;
+          const effectiveFromDayKey = resolvePlacementEffectiveDate({
+            hasPriorPlacements: !isFirstPlacement,
+            todayDayKey: today,
+            enrolmentDayKey: dayKeyOf(existing.createdAt),
+          });
+
           await prisma.studentBatchHistory.create({
             data: {
               studentId: existing.id,
               fromBatchId: existing.batchId,
               toBatchId: batch.id,
-              effectiveFromDayKey: today,
+              effectiveFromDayKey,
               source: 'ROSTER_SYNC',
               reason: isFirstPlacement
-                ? 'Initial placement from roster'
+                ? 'Initial placement from roster (back-dated to enrolment — no prior placement on record)'
                 : 'Batch changed by roster sync',
             },
           });

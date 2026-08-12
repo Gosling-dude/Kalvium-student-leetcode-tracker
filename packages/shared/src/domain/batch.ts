@@ -126,3 +126,28 @@ export function selectAssignmentForBatch<T extends { batchId: string | null }>(
 export function isRedundantMove(currentBatchId: string | null, targetBatchId: string): boolean {
   return currentBatchId === targetBatchId;
 }
+
+/**
+ * The write-once freeze that protects a `DailyStatus` row's `batchId` and `assignmentId`
+ * once a day has been computed (§7, §9): an ordinary recompute keeps whatever value is
+ * already on the row rather than the freshly-resolved one, so a later batch move or
+ * assignment retarget can never silently rewrite an already-scored day.
+ *
+ * `force` is the deliberate escape hatch for the one case that freeze must *not* protect:
+ * a day whose frozen value was wrong from the start because of an upstream data bug (for
+ * example a roster sync that recorded a placement as effective from the wrong day). That
+ * is a data correction, not an after-the-fact edit, so a forced recompute is allowed to
+ * replace the frozen value outright.
+ *
+ * Pure and shared by every caller that freezes a field this way, so the two fields
+ * (`batchId`, `assignmentId`) and any future one can never drift into applying the rule
+ * differently.
+ */
+export function resolveFrozenField<T>(
+  existingValue: T | null | undefined,
+  incomingValue: T,
+  force = false,
+): T {
+  if (force) return incomingValue;
+  return existingValue ?? incomingValue;
+}

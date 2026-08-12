@@ -17,7 +17,16 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { IsHexColor, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsHexColor,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 import type { ScoringConfig } from '@dsa/shared';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
@@ -50,6 +59,12 @@ class CreateScoringConfigDto {
 class RecomputeDto {
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) from?: string;
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/) to?: string;
+  /**
+   * Bypasses the `batchId`/`assignmentId` freeze on `DailyStatus` — see
+   * `RollupService.recomputeDay`. Only for correcting a day whose frozen values were
+   * wrong from the start (a fixed upstream data bug), never for routine recomputation.
+   */
+  @IsOptional() @IsBoolean() force?: boolean;
 }
 
 @ApiTags('Admin')
@@ -221,15 +236,20 @@ export class AdminController {
     // Detached deliberately. Awaiting it would exceed any sane request timeout and the
     // client would see a dead connection while the work continued regardless.
     void this.rollup
-      .recomputeRange(from, to)
+      .recomputeRange(from, to, { force: dto.force ?? false })
       .then((result) =>
-        this.audit.log('INFO', 'AdminController', `Recompute finished for ${from}…${to}`, result),
+        this.audit.log(
+          'INFO',
+          'AdminController',
+          `Recompute finished for ${from}…${to}${dto.force ? ' (forced)' : ''}`,
+          result,
+        ),
       )
       .catch((error: Error) =>
         this.audit.log('ERROR', 'AdminController', `Recompute failed: ${error.message}`),
       );
 
-    return { accepted: true, from, to, note: 'Running in the background.' };
+    return { accepted: true, from, to, force: dto.force ?? false, note: 'Running in the background.' };
   }
 
   @Post('leaderboard/reset')

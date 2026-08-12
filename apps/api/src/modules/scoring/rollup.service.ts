@@ -23,6 +23,7 @@ import {
   rankEntries,
   selectAssignmentForBatch,
   rankSquads,
+  resolveFrozenField,
   type AssignedProblemRef,
   type CompletionSubmission,
   type DayKey,
@@ -76,8 +77,21 @@ export class RollupService {
   /**
    * Rebuild `DailyStatus` (and per-problem detail) for one program day, then refresh
    * the streaks, scores and leaderboards that depend on it.
+   *
+   * `force` bypasses the `batchId`/`assignmentId` freeze in `persistDailyStatus` — see
+   * that method's comment. It exists for one purpose: correcting a day that was computed
+   * *before* an upstream data-quality bug (e.g. a roster sync that back-dated a student's
+   * placement to the wrong day) was fixed. An ordinary recompute deliberately cannot fix
+   * such a day, because the whole point of the freeze is that admin actions taken *after*
+   * a day closes — retargeting an assignment, moving a student — must never rewrite it.
+   * A one-time data correction is a different thing: the frozen value was never correct to
+   * begin with. `force` is therefore opt-in, admin-only (`POST /admin/recompute`), and
+   * still refuses to touch a mentor's manual override (`isOverridden`) either way.
    */
-  async recomputeDay(dayKey: DayKey): Promise<{ students: number; assigned: number }> {
+  async recomputeDay(
+    dayKey: DayKey,
+    options: { force?: boolean } = {},
+  ): Promise<{ students: number; assigned: number }> {
     const config = await this.scoringConfig.getActive();
 
     // Every batch's set for the day, plus any pre-batch (batch-less) row. Which one
@@ -110,13 +124,20 @@ export class RollupService {
     // recompute keeps using that same row — even if an admin has since retargeted its
     // batch (§9) — rather than re-resolving via `selectAssignmentForBatch` and picking a
     // different (or no) assignment out from under an already-scored day.
-    const existingToday = await this.prisma.dailyStatus.findMany({
-      where: { dayKey },
-      select: { studentId: true, assignmentId: true },
-    });
-    const frozenAssignmentByStudent = new Map(
-      existingToday.filter((row) => row.assignmentId).map((row) => [row.studentId, row.assignmentId!]),
-    );
+    //
+    // Skipped entirely under `force`: the whole point of a forced recompute is to let a
+    // day whose frozen assignment/batch was wrong from the start (not retargeted after the
+    // fact) be re-resolved from scratch. See `recomputeDay`'s doc comment.
+    const frozenAssignmentByStudent = new Map<string, string>();
+    if (!options.force) {
+      const existingToday = await this.prisma.dailyStatus.findMany({
+        where: { dayKey },
+        select: { studentId: true, assignmentId: true },
+      });
+      for (const row of existingToday) {
+        if (row.assignmentId) frozenAssignmentByStudent.set(row.studentId, row.assignmentId);
+      }
+    }
 
     // Evaluate once per distinct problem set rather than once per student: the students
     // in a batch all face the same problems, and the submission scan is the expensive part.
@@ -229,6 +250,7 @@ export class RollupService {
         streakAtDay: streaks.current,
         syncStatus: (student.syncState?.status ?? 'NEVER_SYNCED') as SyncStatus,
         problemStatuses: result?.problemStatuses ?? this.emptyStatuses(assignedProblems),
+        force: options.force ?? false,
       });
     }
 
@@ -512,10 +534,14 @@ export class RollupService {
   }
 
   /** Full recompute over a range — the admin panel's "recalculate scores". */
-  async recomputeRange(from: DayKey, to: DayKey): Promise<{ days: number }> {
+  async recomputeRange(
+    from: DayKey,
+    to: DayKey,
+    options: { force?: boolean } = {},
+  ): Promise<{ days: number }> {
     const days = this.time.range(from, to);
     for (const dayKey of days) {
-      await this.recomputeDay(dayKey);
+      await this.recomputeDay(dayKey, options);
     }
     await this.recomputeStudentAggregates();
     for (const dayKey of days) {
@@ -644,6 +670,8 @@ export class RollupService {
     streakAtDay: number;
     syncStatus: SyncStatus;
     problemStatuses: StudentDayResult['problemStatuses'];
+    /** See `recomputeDay`'s doc comment. Defaults to false — the safe, normal path. */
+    force?: boolean;
   }): Promise<void> {
     const existing = await this.prisma.dailyStatus.findUnique({
       where: { studentId_dayKey: { studentId: input.studentId, dayKey: input.dayKey } },
@@ -651,23 +679,20 @@ export class RollupService {
     });
 
     // A mentor's manual override is authoritative. Recomputing must never silently
-    // undo a deliberate correction.
+    // undo a deliberate correction — `force` does not override an override.
     if (existing?.isOverridden) return;
 
-    // The historical batch is written once and then frozen (§7).
-    //
-    // Recomputing 10 Aug after a student moved on 15 Aug must not re-file 10 Aug under
-    // the new batch. `batchOnDayForStudents` already returns the correct historical
-    // answer, so this is belt-and-braces — but it is the guarantee that holds even if a
-    // placement row is later corrected or back-dated, which is exactly the case where a
-    // recompute would otherwise quietly rewrite a closed day.
-    const batchId = existing?.batchId ?? input.batchId;
+    // The historical batch is written once and then frozen (§7), *unless* the caller has
+    // explicitly asked to force-recompute this range because the frozen value was itself
+    // wrong (e.g. a roster sync back-dated a placement to the wrong day and has since been
+    // corrected). Recomputing 10 Aug after a student moved on 15 Aug must still not re-file
+    // 10 Aug under the new batch — `batchOnDayForStudents` already returns the correct
+    // historical answer for that case, which is exactly why the freeze is the default.
+    const batchId = resolveFrozenField(existing?.batchId, input.batchId, input.force);
 
     // Likewise the assignment a day was scored against is written once and then frozen
-    // (§9). The caller already resolves the frozen assignment before computing counts —
-    // this is the same belt-and-braces guarantee, so a direct call into this method can
-    // never overwrite it either.
-    const assignmentId = existing?.assignmentId ?? input.assignmentId;
+    // (§9), with the same `force` escape hatch and for the same reason.
+    const assignmentId = resolveFrozenField(existing?.assignmentId, input.assignmentId, input.force);
 
     const data = {
       assignmentId,
