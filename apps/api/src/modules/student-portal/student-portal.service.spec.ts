@@ -176,3 +176,99 @@ describe('StudentPortalService.assignmentHistory — scoped to the caller\'s own
     );
   });
 });
+
+/**
+ * §submission-attempt-tracking: a student may see their own solved / attempted-not-solved
+ * / not-attempted breakdown, and never anyone else's.
+ */
+describe("StudentPortalService.assignmentDetail — this student's own attempt breakdown", () => {
+  const ASSIGNMENT = {
+    id: 'a1',
+    dayKey: '2026-08-10',
+    batchId: 'batch-b',
+    batchName: 'Intermediate Level',
+    batchCode: 'B',
+    title: 'Sliding Window',
+    topic: null,
+    difficulty: null,
+    problems: [
+      { problemId: 'p1', position: 1, title: 'Problem 1', titleSlug: 'p1', url: 'https://x/1', difficulty: 'EASY' },
+      { problemId: 'p2', position: 2, title: 'Problem 2', titleSlug: 'p2', url: 'https://x/2', difficulty: 'EASY' },
+      { problemId: 'p3', position: 3, title: 'Problem 3', titleSlug: 'p3', url: 'https://x/3', difficulty: 'EASY' },
+      { problemId: 'p4', position: 4, title: 'Problem 4', titleSlug: 'p4', url: 'https://x/4', difficulty: 'EASY' },
+    ],
+  };
+
+  it('reads the accepted / attempted-not-accepted / not-attempted status straight from DailyProblemStatus, per problem', async () => {
+    const { service, assignments, prisma } = makeService();
+    assignments.findById.mockResolvedValue(ASSIGNMENT);
+    prisma.dailyStatus.findUnique.mockResolvedValue({
+      solvedCount: 1,
+      assignedCount: 4,
+      isPerfect: false,
+      completedAt: null,
+      problemStatuses: [
+        { problemId: 'p1', status: 'ACCEPTED', solvedAt: new Date('2026-08-10T10:00:00Z') },
+        { problemId: 'p2', status: 'ATTEMPTED_NOT_ACCEPTED', solvedAt: null },
+        // p3 and p4 have no row at all — never submitted.
+      ],
+    });
+
+    const result = await service.assignmentDetail(STUDENT_USER, 'a1');
+
+    expect(result.myOutcome?.problems).toEqual([
+      expect.objectContaining({ problemId: 'p1', status: 'ACCEPTED' }),
+      expect.objectContaining({ problemId: 'p2', status: 'ATTEMPTED_NOT_ACCEPTED' }),
+      expect.objectContaining({ problemId: 'p3', status: 'NOT_ATTEMPTED' }),
+      expect.objectContaining({ problemId: 'p4', status: 'NOT_ATTEMPTED' }),
+    ]);
+  });
+
+  it("always queries the caller's own studentId, never one implied by the assignment or any other input", async () => {
+    const { service, assignments, prisma } = makeService();
+    assignments.findById.mockResolvedValue(ASSIGNMENT);
+
+    await service.assignmentDetail(STUDENT_USER, 'a1');
+
+    expect(prisma.dailyStatus.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { studentId_dayKey: { studentId: 'student-1', dayKey: '2026-08-10' } },
+      }),
+    );
+  });
+
+  it('a different student session sees only their own outcome for the same assignment id', async () => {
+    const { service, assignments, prisma } = makeService();
+    assignments.findById.mockResolvedValue(ASSIGNMENT);
+    prisma.dailyStatus.findUnique.mockResolvedValue({
+      solvedCount: 4,
+      assignedCount: 4,
+      isPerfect: true,
+      completedAt: null,
+      problemStatuses: [
+        { problemId: 'p1', status: 'ACCEPTED', solvedAt: new Date() },
+        { problemId: 'p2', status: 'ACCEPTED', solvedAt: new Date() },
+        { problemId: 'p3', status: 'ACCEPTED', solvedAt: new Date() },
+        { problemId: 'p4', status: 'ACCEPTED', solvedAt: new Date() },
+      ],
+    });
+
+    const OTHER_STUDENT: RequestUser = {
+      id: 'user-99',
+      email: 'other@kalvium.community',
+      name: 'Other Student',
+      role: 'STUDENT',
+      studentId: 'student-99',
+    };
+
+    await service.assignmentDetail(OTHER_STUDENT, 'a1');
+
+    // The query was scoped to student-99, not student-1 — the two sessions can never
+    // read each other's attempt data through the same assignment id.
+    expect(prisma.dailyStatus.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { studentId_dayKey: { studentId: 'student-99', dayKey: '2026-08-10' } },
+      }),
+    );
+  });
+});

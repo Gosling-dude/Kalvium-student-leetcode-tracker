@@ -140,7 +140,15 @@ function batchBreakdownTable(report: DailyEmailReport): string {
   const rows = report.batchSections
     .map((batchSection) => {
       const buckets = batchSection.buckets
-        .map((bucket) => `${bucket.label}: <strong>${bucket.count}</strong>`)
+        .map((bucket) => {
+          const attemptParts: string[] = [];
+          if (bucket.studentsAttemptedCount > 0) attemptParts.push(`${bucket.studentsAttemptedCount} attempted`);
+          if (bucket.studentsNotAttemptedCount > 0) {
+            attemptParts.push(`${bucket.studentsNotAttemptedCount} not attempted`);
+          }
+          const breakdown = attemptParts.length > 0 ? ` (${attemptParts.join(', ')})` : '';
+          return `${bucket.label}: <strong>${bucket.count}</strong>${breakdown}`;
+        })
         .join(' &middot; ');
       return `
         <tr>
@@ -157,6 +165,20 @@ function batchBreakdownTable(report: DailyEmailReport): string {
   return `<table role="presentation" width="100%" style="border-collapse:collapse;">${rows}</table>`;
 }
 
+/**
+ * "2 attempted, 1 not attempted" for the problems a student did not solve — never just
+ * a bare count, so a mentor reading the table does not have to guess which half of an
+ * incomplete row is a real attempt versus untouched work (§ submission-attempt tracking).
+ */
+function attemptSummary(row: DailyEmailReportStudentRow): string {
+  if (row.assignedCount === 0) return '—';
+  if (row.solvedCount >= row.assignedCount) return `All ${row.assignedCount} solved`;
+  const parts: string[] = [];
+  if (row.attemptedNotSolvedCount > 0) parts.push(`${row.attemptedNotSolvedCount} attempted`);
+  if (row.notAttemptedCount > 0) parts.push(`${row.notAttemptedCount} not attempted`);
+  return parts.join(', ') || '—';
+}
+
 function studentTable(report: DailyEmailReport): string {
   if (report.students.length === 0) {
     return `<p style="margin:0; font-size:14px; color:${COLORS.muted};">No students tracked for this day.</p>`;
@@ -168,7 +190,7 @@ function studentTable(report: DailyEmailReport): string {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; font-size:13px;">
       <thead>
         <tr>
-          ${['Student', 'Squad', 'Assigned', 'Solved', 'Completion', 'Status']
+          ${['Student', 'Squad', 'Assigned', 'Solved', 'Remaining', 'Completion', 'Status']
             .map(
               (h) =>
                 `<th align="left" style="padding:8px 6px; border-bottom:2px solid ${COLORS.border}; color:${COLORS.muted}; font-size:11px; text-transform:uppercase; letter-spacing:0.04em;">${h}</th>`,
@@ -187,6 +209,7 @@ function studentTable(report: DailyEmailReport): string {
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border}; color:${COLORS.muted};">${escapeHtml(row.squadName ?? '—')}</td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">${row.assignedCount}</td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">${row.solvedCount}</td>
+          <td style="padding:6px; border-bottom:1px solid ${COLORS.border}; color:${COLORS.muted};">${escapeHtml(attemptSummary(row))}</td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">${row.completionPercent}%</td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">
             <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fff; background:${statusColor(row)};">

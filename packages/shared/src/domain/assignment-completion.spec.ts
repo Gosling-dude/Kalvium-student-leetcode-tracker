@@ -18,6 +18,8 @@ import {
   calculateAssignmentCompletion,
   countDistinctSolvedProblems,
   isWithinAssignmentWindow,
+  summarizeBucketAttempts,
+  summarizeProblemStatuses,
   type AssignedProblemRef,
   type CompletionSubmission,
 } from './assignment-completion';
@@ -296,6 +298,110 @@ describe('full completion', () => {
     const result = calculateAssignmentCompletion('2026-08-10', [], []);
     expect(result.assignedCount).toBe(0);
     expect(result.isComplete).toBe(false);
+  });
+});
+
+describe('summarizeProblemStatuses — solved / attempted-not-solved / not-attempted', () => {
+  it('SOLVED: an accepted submission classifies the problem as solved', () => {
+    const result = calculateAssignmentCompletion('2026-08-10', ONE, [
+      submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-10'),
+    ]);
+    expect(summarizeProblemStatuses(result.problems)).toEqual({
+      solvedCount: 1,
+      attemptedNotSolvedCount: 0,
+      notAttemptedCount: 0,
+    });
+  });
+
+  it('ATTEMPTED_NOT_SOLVED: one failed submission and nothing else', () => {
+    const result = calculateAssignmentCompletion('2026-08-10', ONE, [
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-10'),
+    ]);
+    expect(summarizeProblemStatuses(result.problems)).toEqual({
+      solvedCount: 0,
+      attemptedNotSolvedCount: 1,
+      notAttemptedCount: 0,
+    });
+  });
+
+  it('ATTEMPTED_NOT_SOLVED: several failed submissions for the same problem still count as one attempted-not-solved problem', () => {
+    const result = calculateAssignmentCompletion('2026-08-10', ONE, [
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-10', '09:00'),
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-10', '10:00'),
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-10', '11:00'),
+    ]);
+    expect(summarizeProblemStatuses(result.problems)).toEqual({
+      solvedCount: 0,
+      attemptedNotSolvedCount: 1,
+      notAttemptedCount: 0,
+    });
+    expect(result.problems[0]!.attempts).toBe(3);
+  });
+
+  it('SOLVED: failed submissions followed by an accepted one resolve to solved, not attempted', () => {
+    const result = calculateAssignmentCompletion('2026-08-10', ONE, [
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-09'),
+      submission('two-sum-ii-input-array-is-sorted', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-09', '15:00'),
+      submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-10'),
+    ]);
+    expect(summarizeProblemStatuses(result.problems)).toEqual({
+      solvedCount: 1,
+      attemptedNotSolvedCount: 0,
+      notAttemptedCount: 0,
+    });
+  });
+
+  it('NOT_ATTEMPTED: no submission at all is never inferred as an attempt', () => {
+    const result = calculateAssignmentCompletion('2026-08-10', ONE, []);
+    expect(summarizeProblemStatuses(result.problems)).toEqual({
+      solvedCount: 0,
+      attemptedNotSolvedCount: 0,
+      notAttemptedCount: 1,
+    });
+  });
+
+  it('mixed 4-question assignment: partitions solved/attempted/not-attempted, summing to assignedCount', () => {
+    // 167 solved, 283 solved, 11 wrong answer, 26 never touched.
+    const submissions = [
+      submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-08', '14:20'),
+      submission('move-zeroes', 'ACCEPTED', '2026-08-10', '10:05'),
+      submission('container-with-most-water', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-09', '17:40'),
+    ];
+    const result = calculateAssignmentCompletion('2026-08-10', ASSIGNED, submissions);
+    const counts = summarizeProblemStatuses(result.problems);
+    expect(counts).toEqual({ solvedCount: 2, attemptedNotSolvedCount: 1, notAttemptedCount: 1 });
+    expect(counts.solvedCount + counts.attemptedNotSolvedCount + counts.notAttemptedCount).toBe(
+      result.assignedCount,
+    );
+  });
+
+  it('historical assignment: a late-published day still classifies correctly from submissions inside the lookback window', () => {
+    // Assignment published for 10 Aug but the student worked on 8-9 Aug, before it went
+    // live — the lookback window (§ the lookback window) is what makes this "attempted"
+    // and "solved" readable instead of everything showing as not-attempted.
+    const result = calculateAssignmentCompletion('2026-08-10', ASSIGNED, [
+      submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-08'),
+      submission('move-zeroes', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-09'),
+      submission('move-zeroes', 'ATTEMPTED_NOT_ACCEPTED', '2026-08-09', '16:00'),
+    ]);
+    const counts = summarizeProblemStatuses(result.problems);
+    expect(counts).toEqual({ solvedCount: 1, attemptedNotSolvedCount: 1, notAttemptedCount: 2 });
+  });
+});
+
+describe('summarizeBucketAttempts — did students attempt and fail, or never try', () => {
+  it('splits students who touched a remaining problem from those who never submitted anything', () => {
+    const counts = summarizeBucketAttempts([
+      { attemptedNotSolvedCount: 1, notAttemptedCount: 0 }, // tried and failed
+      { attemptedNotSolvedCount: 0, notAttemptedCount: 1 }, // never touched it
+      { attemptedNotSolvedCount: 2, notAttemptedCount: 1 }, // tried some, ignored the rest — counts as "attempted"
+    ]);
+    expect(counts).toEqual({ studentsAttemptedCount: 2, studentsNotAttemptedCount: 1 });
+  });
+
+  it('excludes a student with nothing remaining from both sides', () => {
+    const counts = summarizeBucketAttempts([{ attemptedNotSolvedCount: 0, notAttemptedCount: 0 }]);
+    expect(counts).toEqual({ studentsAttemptedCount: 0, studentsNotAttemptedCount: 0 });
   });
 });
 

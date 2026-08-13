@@ -40,7 +40,7 @@ export default function AssignmentsPage() {
   const [urls, setUrls] = useState<string[]>(Array(DEFAULT_PROBLEM_SLOTS).fill(''));
   const [creating, setCreating] = useState(false);
 
-  const { selected: batchFilter, batches } = useBatchFilter();
+  const { selected: batchFilter, batches, isLoading: batchesLoading } = useBatchFilter();
 
   const me = useQuery({ queryKey: ['me'], queryFn: api.me });
   const isAdmin = me.data?.role === 'ADMIN';
@@ -53,6 +53,17 @@ export default function AssignmentsPage() {
    * batch — which is exactly how the batches are meant to diverge (§20).
    */
   const [targetBatchIds, setTargetBatchIds] = useState<string[]>([]);
+
+  /**
+   * Whether the mentor has *actually* touched the batch selector.
+   *
+   * "All batches" is a real, supported choice, but it must never be the thing a mentor
+   * gets by default just because they never looked at the selector — that is exactly how
+   * a Foundation-only assignment quietly becomes "every batch" (§20). The create button
+   * stays disabled until a deliberate choice is made, one way or the other.
+   */
+  const [batchChoiceMade, setBatchChoiceMade] = useState(false);
+  const batchSelectionRequired = !batchesLoading && batches.length > 0;
 
   const history = useQuery({
     queryKey: ['assignments', batchFilter],
@@ -86,6 +97,7 @@ export default function AssignmentsPage() {
       setUrls(Array(DEFAULT_PROBLEM_SLOTS).fill(''));
       setTopic('');
       setTargetBatchIds([]);
+      setBatchChoiceMade(false);
       setCreating(false);
       void queryClient.invalidateQueries({ queryKey: ['assignments'] });
       void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
@@ -108,7 +120,21 @@ export default function AssignmentsPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <BatchFilter />
-          <Button variant="primary" onClick={() => setCreating((open) => !open)}>
+          <Button
+            variant="primary"
+            onClick={() =>
+              setCreating((open) => {
+                // Reopening (or opening fresh) always starts with no batch choice made,
+                // so a stale "All batches" selection from a previous session can never
+                // carry forward silently.
+                if (!open) {
+                  setTargetBatchIds([]);
+                  setBatchChoiceMade(false);
+                }
+                return !open;
+              })
+            }
+          >
             <Plus className="size-3.5" aria-hidden />
             New assignment
           </Button>
@@ -150,20 +176,31 @@ export default function AssignmentsPage() {
             </div>
 
             {/*
-              Batch targeting. "All batches" creates one assignment per batch rather than
-              a single shared row, so either batch's questions can later be edited without
-              touching the other's.
+              Target Batch. Required, and never pre-selected: a mentor must actively pick
+              Foundation, Intermediate, or explicitly "All batches" before they can create
+              anything, so an assignment can never end up targeting every batch just
+              because nobody looked at the selector (§20).
+              "All batches" creates one assignment per batch rather than a single shared
+              row, so either batch's questions can later be edited without touching the
+              other's.
             */}
-            {batches.length > 0 ? (
+            {batchesLoading ? (
+              <p className="text-xs text-[var(--color-fg-subtle)]">Loading batches…</p>
+            ) : batches.length > 0 ? (
               <div>
-                <span className="mb-1.5 block text-xs font-medium">Batch</span>
+                <span className="mb-1.5 block text-xs font-medium">
+                  Target Batch <span className="text-[var(--color-danger)]">*</span>
+                </span>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    aria-pressed={targetBatchIds.length === 0}
-                    onClick={() => setTargetBatchIds([])}
+                    aria-pressed={batchChoiceMade && targetBatchIds.length === 0}
+                    onClick={() => {
+                      setTargetBatchIds([]);
+                      setBatchChoiceMade(true);
+                    }}
                     className={
-                      targetBatchIds.length === 0
+                      batchChoiceMade && targetBatchIds.length === 0
                         ? 'rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]'
                         : 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'
                     }
@@ -171,7 +208,7 @@ export default function AssignmentsPage() {
                     All batches
                   </button>
                   {batches.map((batch) => {
-                    const isSelected = targetBatchIds.includes(batch.id);
+                    const isSelected = batchChoiceMade && targetBatchIds.includes(batch.id);
                     const isTaken = takenBatchIds.has(batch.id);
                     return (
                       <button
@@ -181,16 +218,17 @@ export default function AssignmentsPage() {
                         disabled={isTaken}
                         title={
                           isTaken
-                            ? `${batch.name} already has an assignment on ${dayKey}`
+                            ? `${dayKey} already has an assignment for ${batch.name}.`
                             : undefined
                         }
-                        onClick={() =>
+                        onClick={() => {
                           setTargetBatchIds((current) =>
                             current.includes(batch.id)
                               ? current.filter((id) => id !== batch.id)
                               : [...current, batch.id],
-                          )
-                        }
+                          );
+                          setBatchChoiceMade(true);
+                        }}
                         className={
                           isSelected
                             ? 'rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]'
@@ -203,13 +241,17 @@ export default function AssignmentsPage() {
                     );
                   })}
                 </div>
-                {takenBatchIds.size > 0 ? (
-                  <p className="mt-1.5 text-xs text-[var(--color-warning)]">
-                    {dayKey} already has an assignment for{' '}
-                    {(existingForDay.data ?? [])
-                      .map((a) => a.batchName ?? 'all students')
-                      .join(', ')}
-                    . Pick another batch or edit the existing one.
+                {/* One line per taken batch — Foundation's message never mentions
+                    Intermediate and vice versa, and neither blocks picking the other. */}
+                {(existingForDay.data ?? []).map((a) => (
+                  <p key={a.id} className="mt-1.5 text-xs text-[var(--color-warning)]">
+                    {dayKey} already has an assignment for {a.batchName ?? 'all students'}. Edit
+                    the existing assignment instead.
+                  </p>
+                ))}
+                {!batchChoiceMade ? (
+                  <p className="mt-1.5 text-xs text-[var(--color-fg-subtle)]">
+                    Pick a target batch before adding problems.
                   </p>
                 ) : null}
               </div>
@@ -234,19 +276,27 @@ export default function AssignmentsPage() {
               </div>
             ))}
 
-            {/* A plain statement of what is about to be saved, before it is saved (§20). */}
+            {/*
+              A plain statement of what is about to be saved, before it is saved (§20).
+              Never guesses a batch count: until the mentor has made an explicit choice,
+              this says so rather than defaulting to "every batch".
+            */}
             {filledCount > 0 ? (
               <div className="rounded-lg bg-[var(--color-surface-sunken)] p-3 text-sm">
                 <p className="font-medium">Preview</p>
                 <p className="mt-1 text-[var(--color-fg-muted)]">
-                  {filledCount} problem{filledCount === 1 ? '' : 's'} on {dayKey} for{' '}
-                  {targetBatchIds.length === 0
-                    ? `every batch (${batches.length || 1} assignment${batches.length === 1 ? '' : 's'})`
-                    : batches
-                        .filter((batch) => targetBatchIds.includes(batch.id))
-                        .map((batch) => batch.name)
-                        .join(', ')}
-                  .
+                  {batchSelectionRequired && !batchChoiceMade
+                    ? 'Pick a target batch above to see what will be created.'
+                    : `${filledCount} problem${filledCount === 1 ? '' : 's'} on ${dayKey} for ${
+                        targetBatchIds.length === 0
+                          ? `every batch (${batches.length} assignment${batches.length === 1 ? '' : 's'}: ${batches
+                              .map((batch) => batch.name)
+                              .join(', ')})`
+                          : batches
+                              .filter((batch) => targetBatchIds.includes(batch.id))
+                              .map((batch) => batch.name)
+                              .join(', ')
+                      }.`}
                 </p>
               </div>
             ) : null}
@@ -258,6 +308,7 @@ export default function AssignmentsPage() {
                 loading={create.isPending}
                 disabled={
                   filledCount === 0 ||
+                  (batchSelectionRequired && !batchChoiceMade) ||
                   targetBatchIds.some((id) => takenBatchIds.has(id)) ||
                   (targetBatchIds.length === 0 && takenBatchIds.size > 0)
                 }

@@ -201,6 +201,14 @@ export interface DashboardBatchBreakdown {
   assignedCount: number;
   solvedBuckets: number[];
   completionPercent: number;
+  /**
+   * Of the students in this batch who did *not* complete the assignment, how many have
+   * at least one real (non-accepted) submission versus none at all — e.g. "17 students —
+   * 5 attempted, 12 not attempted" (§ submission-attempt tracking). Students who
+   * completed everything are excluded from both counts.
+   */
+  attemptedNotSolvedStudents: number;
+  notAttemptedStudents: number;
 }
 
 export interface DashboardStats {
@@ -217,6 +225,9 @@ export interface DashboardStats {
   /** Index = number solved, so `solvedBuckets[4]` is the count who cleared everything. */
   solvedBuckets: number[];
   completionPercent: number;
+  /** Same split as `DashboardBatchBreakdown`, across every batch in scope. */
+  attemptedNotSolvedStudents: number;
+  notAttemptedStudents: number;
   averageProblemsSolved: number;
   streakChampion: { studentId: string; name: string; streak: number } | null;
   topPerformer: { studentId: string; name: string; score: number } | null;
@@ -287,6 +298,22 @@ export interface AssignmentAudienceChangeEntry {
   changedAt: string;
 }
 
+/**
+ * One assigned problem plus this student's outcome on it, for the mentor-facing views.
+ * `status` is read straight from `DailyProblemStatus` — never re-derived from whether an
+ * accepted submission exists, so `ATTEMPTED_NOT_ACCEPTED` and `NOT_ATTEMPTED` stay the
+ * distinct facts they are (§ submission-attempt tracking).
+ */
+export interface MentorProblemOutcome {
+  problemId: string;
+  position: number;
+  title: string;
+  status: ProblemStatus;
+  /** Submissions observed for this problem in the assignment window, accepted or not. */
+  attempts: number;
+  solvedAt: string | null;
+}
+
 /** A row in one of the mentor dashboard's five "solved N" tables. */
 export interface MentorBucketRow {
   studentId: string;
@@ -302,12 +329,22 @@ export interface MentorBucketRow {
   solvedCount: number;
   /** Problems assigned to *this student's* batch that day. */
   assignedCount: number;
+  /**
+   * Of the problems this student did not solve, how many have at least one real
+   * submission (`ATTEMPTED_NOT_ACCEPTED`) versus none at all (`NOT_ATTEMPTED`).
+   * `solvedCount + attemptedNotSolvedCount + notAttemptedCount === assignedCount` always.
+   */
+  attemptedNotSolvedCount: number;
+  notAttemptedCount: number;
   completionTime: string | null;
   currentStreak: number;
   score: number;
   rank: number | null;
-  /** Titles of the assigned problems still outstanding. */
+  /** Titles of the assigned problems still outstanding — both attempted and not. */
   missingProblems: string[];
+  /** The full per-problem breakdown backing `missingProblems`, `attemptedNotSolvedCount`
+   *  and `notAttemptedCount` — one entry per assigned problem, in position order. */
+  problems: MentorProblemOutcome[];
   syncStatus: SyncStatus;
   /** Mentor-facing explanation of a zero — never just "unknown" when we know better. */
   reason: string | null;
@@ -317,6 +354,14 @@ export interface MentorBucket {
   solvedCount: number;
   label: string;
   students: MentorBucketRow[];
+  /**
+   * Of `students`, how many touched at least one of their remaining problems versus
+   * none at all. Answers "did these students attempt and fail, or never try" without
+   * opening every row (§ submission-attempt tracking). A student with nothing remaining
+   * (the "completed all" bucket) counts toward neither.
+   */
+  studentsAttemptedCount: number;
+  studentsNotAttemptedCount: number;
 }
 
 /**
@@ -612,10 +657,15 @@ export interface DailyEmailReportStudentRow {
   /** Problems assigned to *this student's* batch that day. */
   assignedCount: number;
   solvedCount: number;
+  /** Same partition as `MentorBucketRow` — see there for the invariant. */
+  attemptedNotSolvedCount: number;
+  notAttemptedCount: number;
   completionPercent: number;
   statusLabel: StatusLabel;
   actionTier: ActionTier;
   missingProblems: string[];
+  /** The full per-problem breakdown — see `MentorProblemOutcome`. */
+  problems: MentorProblemOutcome[];
   syncStatus: SyncStatus;
   /** Why a zero is a zero — data problem vs. genuine non-attempt (reused from the mentor dashboard). */
   reason: string | null;
@@ -629,6 +679,9 @@ export interface DailyEmailReportBucket {
   label: string;
   count: number;
   students: DailyEmailReportStudentRow[];
+  /** See `MentorBucket` — same "attempted vs never touched" split for this bucket. */
+  studentsAttemptedCount: number;
+  studentsNotAttemptedCount: number;
 }
 
 export interface DailyEmailReportActionGroup {

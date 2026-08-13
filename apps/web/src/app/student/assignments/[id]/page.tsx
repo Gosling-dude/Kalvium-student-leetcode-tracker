@@ -2,7 +2,7 @@
 
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, CheckCircle2, Circle, ExternalLink } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CheckCircle2, Circle, ExternalLink } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { Badge, Button, Card, CardHeader, DifficultyBadge, ErrorState, Skeleton } from '@/components/ui';
@@ -69,11 +69,17 @@ export default function StudentAssignmentDetailPage() {
             <ul className="divide-y divide-[var(--color-border)]">
               {data.problems.map((problem) => {
                 const outcome = data.myOutcome?.problems.find((p) => p.problemId === problem.problemId);
-                const solved = outcome?.status === 'ACCEPTED';
+                // Only draw a conclusion about "attempted" vs "not attempted" once this
+                // day has actually been synced — before that, `outcome` is undefined and
+                // the honest state is "unknown yet", not "not attempted" (§ submission-
+                // attempt tracking: never infer an attempt state we have not observed).
+                const status = data.myOutcome ? (outcome?.status ?? 'NOT_ATTEMPTED') : null;
                 return (
                   <li key={problem.id} className="flex items-center gap-3 px-5 py-3.5">
-                    {solved ? (
+                    {status === 'ACCEPTED' ? (
                       <CheckCircle2 className="size-4 shrink-0 text-[var(--color-success)]" aria-hidden />
+                    ) : status === 'ATTEMPTED_NOT_ACCEPTED' ? (
+                      <AlertCircle className="size-4 shrink-0 text-[var(--color-warning)]" aria-hidden />
                     ) : (
                       <Circle className="size-4 shrink-0 text-[var(--color-fg-subtle)]" aria-hidden />
                     )}
@@ -81,11 +87,13 @@ export default function StudentAssignmentDetailPage() {
                       <span className="block text-sm font-medium">
                         {problem.position}. {problem.title}
                       </span>
-                      {problem.topicTags.length > 0 ? (
-                        <span className="mt-0.5 block truncate text-xs text-[var(--color-fg-subtle)]">
-                          {problem.topicTags.join(', ')}
-                        </span>
-                      ) : null}
+                      <span className="mt-0.5 block truncate text-xs text-[var(--color-fg-subtle)]">
+                        {status === 'ATTEMPTED_NOT_ACCEPTED'
+                          ? 'Attempted — not solved yet'
+                          : status === 'NOT_ATTEMPTED'
+                            ? 'Not attempted'
+                            : problem.topicTags.join(', ') || null}
+                      </span>
                     </span>
                     <DifficultyBadge difficulty={problem.difficulty} />
                     <a

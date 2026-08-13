@@ -21,6 +21,7 @@ import {
   formatDayKeyLong,
   formatDayKeyShort,
   overallCompletionPercent,
+  summarizeBucketAttempts,
   type ActionTier,
   type BlockerRecord,
   type BlockerSummaryKey,
@@ -161,10 +162,13 @@ export class DailyReportService {
         leetcodeUsername: row.leetcodeUsername,
         assignedCount,
         solvedCount: row.solvedCount,
+        attemptedNotSolvedCount: row.attemptedNotSolvedCount,
+        notAttemptedCount: row.notAttemptedCount,
         completionPercent: completionPercentage(row.solvedCount, assignedCount),
         statusLabel: ACTION_TIER_META[tier].statusLabel,
         actionTier: tier,
         missingProblems: row.missingProblems,
+        problems: row.problems,
         syncStatus: row.syncStatus,
         reason: row.reason,
         blocker,
@@ -223,9 +227,13 @@ export class DailyReportService {
         batchCode: batch?.code ?? singleSection?.batchCode ?? null,
         problemsAssigned: singleSection?.assignedCount ?? maxAssigned,
         studentsTracked: students.length,
+        // "Solved 0" alone answers nothing about whether those students tried and
+        // failed or never opened the problems — the breakdown is appended right onto
+        // the label so it survives into every surface that only reads `bucketCounts`
+        // (§ submission-attempt tracking, "17 students — 5 attempted, 12 not attempted").
         bucketCounts: buckets.map((b) => ({
           solvedCount: b.solvedCount,
-          label: b.label,
+          label: this.withAttemptBreakdown(b.label, b),
           count: b.count,
         })),
         overallCompletionPercent: overallCompletionPercent(totalSolved, totalAssigned),
@@ -291,8 +299,29 @@ export class DailyReportService {
       const bucketStudents = students
         .filter((s) => s.solvedCount === shape.solvedCount)
         .sort((a, b) => a.name.localeCompare(b.name));
-      return { ...shape, count: bucketStudents.length, students: bucketStudents };
+      const { studentsAttemptedCount, studentsNotAttemptedCount } =
+        summarizeBucketAttempts(bucketStudents);
+      return {
+        ...shape,
+        count: bucketStudents.length,
+        students: bucketStudents,
+        studentsAttemptedCount,
+        studentsNotAttemptedCount,
+      };
     });
+  }
+
+  /** `"Solved 0"` + `(5 attempted, 12 not attempted)` when the bucket has anyone in it. */
+  private withAttemptBreakdown(
+    label: string,
+    bucket: { studentsAttemptedCount: number; studentsNotAttemptedCount: number },
+  ): string {
+    const parts: string[] = [];
+    if (bucket.studentsAttemptedCount > 0) parts.push(`${bucket.studentsAttemptedCount} attempted`);
+    if (bucket.studentsNotAttemptedCount > 0) {
+      parts.push(`${bucket.studentsNotAttemptedCount} not attempted`);
+    }
+    return parts.length > 0 ? `${label} (${parts.join(', ')})` : label;
   }
 
   private buildActionGroups(students: DailyEmailReportStudentRow[]): DailyEmailReportActionGroup[] {

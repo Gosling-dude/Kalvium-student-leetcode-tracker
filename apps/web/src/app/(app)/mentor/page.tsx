@@ -1,14 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, CheckCircle2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   SYNC_STATUS_LABELS,
   isTrustworthySync,
   type MentorBatchSection,
   type MentorBucket,
+  type MentorBucketRow,
 } from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
@@ -139,9 +140,46 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
   );
 }
 
+/** "🟡 Attempted, Not Solved" / "🔴 Not Attempted" / "✅ Solved" — the mentor-facing labels. */
+function problemStatusLabel(status: MentorBucketRow['problems'][number]['status']): string {
+  switch (status) {
+    case 'ACCEPTED':
+      return '✅ Solved';
+    case 'ATTEMPTED_NOT_ACCEPTED':
+      return '🟡 Attempted, Not Solved';
+    default:
+      return '🔴 Not Attempted';
+  }
+}
+
 function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assignedCount: number }) {
   const isComplete = bucket.solvedCount === assignedCount;
   const isZero = bucket.solvedCount === 0;
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (studentId: string): void => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(studentId)) next.delete(studentId);
+      else next.add(studentId);
+      return next;
+    });
+  };
+
+  // Did these students attempt and fail, or never open the problems at all? Only
+  // meaningful outside the "completed everything" bucket, where the question does not
+  // apply — nobody there has anything left to have attempted or not.
+  const attemptBreakdown =
+    !isComplete && bucket.students.length > 0
+      ? [
+          bucket.studentsAttemptedCount > 0 ? `${bucket.studentsAttemptedCount} attempted` : null,
+          bucket.studentsNotAttemptedCount > 0
+            ? `${bucket.studentsNotAttemptedCount} not attempted`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(', ')
+      : null;
 
   return (
     <Card>
@@ -155,6 +193,11 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
             <Badge tone={isComplete ? 'success' : isZero ? 'danger' : 'warning'}>
               {bucket.students.length}
             </Badge>
+            {attemptBreakdown ? (
+              <span className="text-xs font-normal text-[var(--color-fg-muted)]">
+                — {attemptBreakdown}
+              </span>
+            ) : null}
           </span>
         }
         description={
@@ -162,7 +205,7 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
             ? 'Every zero shows why — a data problem is not the same as a student who did not work.'
             : isComplete
               ? 'Ordered by completion time — earliest first.'
-              : 'Outstanding questions are listed per student.'
+              : 'Click a student to see the per-problem breakdown — attempted and failed reads very differently from never opened.'
         }
       />
 
@@ -179,79 +222,121 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
               <Th>Streak</Th>
               <Th className="text-right">Score</Th>
               {isComplete ? <Th className="text-right">Rank</Th> : null}
-              {!isComplete ? <Th>{isZero ? 'Reason' : 'Missing questions'}</Th> : null}
+              {!isComplete ? <Th>{isZero ? 'Reason' : 'Solved / Attempted / Not attempted'}</Th> : null}
             </tr>
           </thead>
           <tbody>
             {bucket.students.map((student) => {
               const untrusted = !isTrustworthySync(student.syncStatus);
+              const isExpanded = expanded.has(student.studentId);
               return (
-                <tr
-                  key={student.studentId}
-                  className="transition hover:bg-[var(--color-surface-sunken)]"
-                >
-                  <Td>
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{student.name}</p>
-                      <p className="truncate text-xs text-[var(--color-fg-subtle)]">
-                        {student.email}
-                      </p>
-                    </div>
-                  </Td>
-                  <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
-                  <Td>
-                    {student.leetcodeUsername ? (
-                      <a
-                        href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="font-mono text-xs hover:text-[var(--color-brand)]"
+                <Fragment key={student.studentId}>
+                  <tr className="transition hover:bg-[var(--color-surface-sunken)]">
+                    <Td>
+                      <button
+                        type="button"
+                        onClick={() => toggle(student.studentId)}
+                        className="flex min-w-0 items-start gap-1.5 text-left"
+                        aria-expanded={isExpanded}
+                        aria-label={`${isExpanded ? 'Hide' : 'Show'} per-problem breakdown for ${student.name}`}
                       >
-                        {student.leetcodeUsername}
-                      </a>
-                    ) : (
-                      <span className="text-xs text-[var(--color-fg-subtle)]">No handle linked</span>
-                    )}
-                    {untrusted ? (
-                      <Badge tone="danger" className="ml-2">
-                        {SYNC_STATUS_LABELS[student.syncStatus]}
-                      </Badge>
-                    ) : null}
-                  </Td>
-                  {isComplete ? (
-                    <Td className="tabular-nums">{student.completionTime ?? '—'}</Td>
-                  ) : null}
-                  <Td>
-                    <StreakFlame streak={student.currentStreak} />
-                  </Td>
-                  <Td className="text-right tabular-nums font-medium">{student.score}</Td>
-                  {isComplete ? (
-                    <Td className="text-right tabular-nums">{student.rank ?? '—'}</Td>
-                  ) : null}
-                  {!isComplete ? (
-                    <Td className="max-w-xs">
-                      {isZero ? (
-                        <span
-                          className={
-                            untrusted
-                              ? 'text-[var(--color-warning)]'
-                              : 'text-[var(--color-fg-muted)]'
-                          }
-                        >
-                          {student.reason ?? 'Reason unknown'}
+                        {isExpanded ? (
+                          <ChevronDown className="mt-0.5 size-3.5 shrink-0 text-[var(--color-fg-subtle)]" aria-hidden />
+                        ) : (
+                          <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-[var(--color-fg-subtle)]" aria-hidden />
+                        )}
+                        <span className="min-w-0">
+                          <p className="truncate font-medium">{student.name}</p>
+                          <p className="truncate text-xs text-[var(--color-fg-subtle)]">
+                            {student.email}
+                          </p>
                         </span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {student.missingProblems.map((title) => (
-                            <Badge key={title} tone="neutral">
-                              {title}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
+                      </button>
                     </Td>
+                    <Td className="text-[var(--color-fg-muted)]">{student.squadName ?? '—'}</Td>
+                    <Td>
+                      {student.leetcodeUsername ? (
+                        <a
+                          href={`https://leetcode.com/u/${student.leetcodeUsername}/`}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="font-mono text-xs hover:text-[var(--color-brand)]"
+                        >
+                          {student.leetcodeUsername}
+                        </a>
+                      ) : (
+                        <span className="text-xs text-[var(--color-fg-subtle)]">No handle linked</span>
+                      )}
+                      {untrusted ? (
+                        <Badge tone="danger" className="ml-2">
+                          {SYNC_STATUS_LABELS[student.syncStatus]}
+                        </Badge>
+                      ) : null}
+                    </Td>
+                    {isComplete ? (
+                      <Td className="tabular-nums">{student.completionTime ?? '—'}</Td>
+                    ) : null}
+                    <Td>
+                      <StreakFlame streak={student.currentStreak} />
+                    </Td>
+                    <Td className="text-right tabular-nums font-medium">{student.score}</Td>
+                    {isComplete ? (
+                      <Td className="text-right tabular-nums">{student.rank ?? '—'}</Td>
+                    ) : null}
+                    {!isComplete ? (
+                      <Td className="max-w-xs">
+                        {isZero ? (
+                          <span
+                            className={
+                              untrusted
+                                ? 'text-[var(--color-warning)]'
+                                : 'text-[var(--color-fg-muted)]'
+                            }
+                          >
+                            {student.reason ?? 'Reason unknown'}
+                          </span>
+                        ) : null}
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="text-xs font-medium tabular-nums text-[var(--color-fg-muted)]">
+                            {student.solvedCount}/{student.assignedCount}
+                          </span>
+                          {student.attemptedNotSolvedCount > 0 ? (
+                            <Badge tone="warning">{student.attemptedNotSolvedCount} attempted</Badge>
+                          ) : null}
+                          {student.notAttemptedCount > 0 ? (
+                            <Badge tone="danger">{student.notAttemptedCount} not attempted</Badge>
+                          ) : null}
+                        </div>
+                      </Td>
+                    ) : null}
+                  </tr>
+                  {isExpanded ? (
+                    <tr className="bg-[var(--color-surface-sunken)]">
+                      <td colSpan={isComplete ? 7 : 6} className="px-4 py-3">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-xs uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                              <th className="pb-1.5 text-left font-medium">Problem</th>
+                              <th className="pb-1.5 text-left font-medium">Status</th>
+                              <th className="pb-1.5 text-right font-medium">Attempts</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {student.problems.map((problem) => (
+                              <tr key={problem.problemId} className="border-t border-[var(--color-border)]">
+                                <td className="py-1.5 pr-3">{problem.title}</td>
+                                <td className="py-1.5 pr-3">{problemStatusLabel(problem.status)}</td>
+                                <td className="py-1.5 text-right tabular-nums text-[var(--color-fg-muted)]">
+                                  {problem.attempts}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
                   ) : null}
-                </tr>
+                </Fragment>
               );
             })}
           </tbody>

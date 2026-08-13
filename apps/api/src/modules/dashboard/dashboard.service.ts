@@ -4,6 +4,8 @@ import {
   SYNC_STATUS_LABELS,
   completionPercentage,
   isTrustworthySync,
+  summarizeBucketAttempts,
+  summarizeProblemStatuses,
   type AssignmentSummary,
   type DashboardBatchBreakdown,
   type DashboardStats,
@@ -12,6 +14,8 @@ import {
   type MentorBucket,
   type MentorBucketRow,
   type MentorDashboard,
+  type MentorProblemOutcome,
+  type ProblemStatus,
   type SyncStatus,
 } from '@dsa/shared';
 
@@ -34,7 +38,6 @@ export interface DashboardFilter {
  * `student.batchId`, which is why a student who moved yesterday still appears under
  * their old batch in yesterday's numbers (§7).
  */
-type StatusRow = Awaited<ReturnType<DashboardService['loadStatuses']>>[number];
 type DetailedStatusRow = Awaited<ReturnType<DashboardService['loadStatusesWithProblems']>>[number];
 
 @Injectable()
@@ -57,7 +60,9 @@ export class DashboardService {
         this.prisma.student.count({
           where: { status: 'ACTIVE', ...(batchId ? { batchId } : {}) },
         }),
-        this.loadStatuses(day, { batchId }),
+        // With-problems, not the lighter `loadStatuses`: the attempted/not-attempted
+        // split below needs each student's per-problem outcomes, not just the totals.
+        this.loadStatusesWithProblems(day, { batchId }),
         this.prisma.syncJob.findFirst({
           where: { status: { in: ['COMPLETED', 'COMPLETED_WITH_ERRORS'] } },
           orderBy: { finishedAt: 'desc' },
@@ -82,6 +87,14 @@ export class DashboardService {
 
       const totalSolved = active.reduce((n, s) => n + s.solvedCount, 0);
       const totalAssigned = active.reduce((n, s) => n + s.assignedCount, 0);
+
+      // Of the students who did not clear the whole assignment, how many actually tried
+      // the rest versus never submitted anything for it — never inferred from the solved
+      // count alone, always read back from each problem's own recorded status.
+      const { studentsAttemptedCount: attemptedNotSolvedStudents, studentsNotAttemptedCount: notAttemptedStudents } =
+        summarizeBucketAttempts(
+          active.map((status) => summarizeProblemStatuses(status.problemStatuses)),
+        );
 
       // Count every reason a zero might not be a real zero, so the dashboard can warn
       // rather than quietly overstate how many students did nothing.
@@ -116,6 +129,8 @@ export class DashboardService {
             : null,
         solvedBuckets: buckets,
         completionPercent: completionPercentage(totalSolved, totalAssigned),
+        attemptedNotSolvedStudents,
+        notAttemptedStudents,
         averageProblemsSolved:
           active.length > 0 ? Math.round((totalSolved / active.length) * 100) / 100 : 0,
         streakChampion:
@@ -214,25 +229,15 @@ export class DashboardService {
   // -------------------------------------------------------------------------
 
   /**
-   * The day's `DailyStatus` rows for current students, optionally narrowed to a batch.
+   * The day's `DailyStatus` rows for current students, optionally narrowed to a batch,
+   * plus the per-problem detail the "which questions are missing" column *and* the
+   * attempted/not-attempted split both need.
    *
    * Batch filtering is applied to `DailyStatus.batchId` — the historical batch — not to
    * the student's current one. Asking for "Foundation on 10 Aug" therefore returns who
    * was in Foundation on 10 Aug, which is the only reading that stays stable when people
    * move (§7). Archived students are excluded: they are not part of the current
    * programme, though their rows remain in the table (§24).
-   */
-  private async loadStatuses(dayKey: DayKey, filter: DashboardFilter) {
-    return this.prisma.dailyStatus.findMany({
-      where: this.statusWhere(dayKey, filter),
-      include: this.statusInclude(),
-    });
-  }
-
-  /**
-   * As `loadStatuses`, plus the per-problem detail the "which questions are missing"
-   * column needs. Kept as a separate query rather than a conditional `include` so both
-   * shapes stay precisely typed instead of collapsing into a union that needs casting.
    */
   private async loadStatusesWithProblems(dayKey: DayKey, filter: DashboardFilter) {
     return this.prisma.dailyStatus.findMany({
@@ -269,11 +274,11 @@ export class DashboardService {
   }
 
   private buildBatchBreakdown(
-    statuses: StatusRow[],
+    statuses: DetailedStatusRow[],
     assignments: AssignmentSummary[],
     filterBatchId: string | null,
   ): DashboardBatchBreakdown[] {
-    const byBatch = new Map<string | null, StatusRow[]>();
+    const byBatch = new Map<string | null, DetailedStatusRow[]>();
     for (const status of statuses) {
       const list = byBatch.get(status.batchId) ?? [];
       list.push(status);
@@ -298,6 +303,10 @@ export class DashboardService {
           buckets[index] = (buckets[index] ?? 0) + 1;
         }
 
+        const attemptCounts = summarizeBucketAttempts(
+          rows.map((row) => summarizeProblemStatuses(row.problemStatuses)),
+        );
+
         return {
           batchId,
           batchName: assignment?.batchName ?? rows[0]?.batch?.name ?? null,
@@ -309,6 +318,8 @@ export class DashboardService {
             rows.reduce((n, r) => n + r.solvedCount, 0),
             rows.reduce((n, r) => n + r.assignedCount, 0),
           ),
+          attemptedNotSolvedStudents: attemptCounts.studentsAttemptedCount,
+          notAttemptedStudents: attemptCounts.studentsNotAttemptedCount,
         } satisfies DashboardBatchBreakdown;
       })
       .sort((a, b) => (a.batchCode ?? 'zz').localeCompare(b.batchCode ?? 'zz'));
@@ -343,10 +354,26 @@ export class DashboardService {
   ): MentorBucketRow {
     const syncStatus = (status.student.syncState?.status ?? 'NEVER_SYNCED') as SyncStatus;
 
-    const missing = status.problemStatuses
-      .filter((p) => p.status !== 'ACCEPTED')
+    const problems: MentorProblemOutcome[] = status.problemStatuses
+      .slice()
       .sort((a, b) => a.position - b.position)
-      .map((p) => p.problem.title);
+      .map((p) => ({
+        problemId: p.problemId,
+        position: p.position,
+        title: p.problem.title,
+        status: p.status as ProblemStatus,
+        attempts: p.attempts,
+        solvedAt: p.solvedAt ? p.solvedAt.toISOString() : null,
+      }));
+
+    // Read straight from the stored per-problem status, never inferred from the
+    // absence of an accepted submission — see `summarizeProblemStatuses` (§ submission-
+    // attempt tracking). `solvedCount` above already agrees with this by construction.
+    const { attemptedNotSolvedCount, notAttemptedCount } = summarizeProblemStatuses(
+      status.problemStatuses,
+    );
+
+    const missing = problems.filter((p) => p.status !== 'ACCEPTED').map((p) => p.title);
 
     return {
       studentId: status.studentId,
@@ -362,11 +389,14 @@ export class DashboardService {
       leetcodeUsername: status.student.leetcodeUsername,
       solvedCount: status.solvedCount,
       assignedCount: status.assignedCount,
+      attemptedNotSolvedCount,
+      notAttemptedCount,
       completionTime: this.time.localTime(status.completedAt),
       currentStreak: status.student.currentStreak,
       score: status.score,
       rank: rankByStudent.get(status.studentId) ?? null,
       missingProblems: missing,
+      problems,
       syncStatus,
       reason: this.explain(status.solvedCount, syncStatus, status.problemStatuses),
     };
@@ -390,8 +420,14 @@ export class DashboardService {
           return b.currentStreak - a.currentStreak || a.name.localeCompare(b.name);
         });
 
+      const { studentsAttemptedCount, studentsNotAttemptedCount } = summarizeBucketAttempts(
+        students,
+      );
+
       buckets.push({
         solvedCount: solved,
+        studentsAttemptedCount,
+        studentsNotAttemptedCount,
         label:
           solved === assignedCount && assignedCount > 0
             ? `Completed all ${assignedCount}`

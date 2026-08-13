@@ -219,6 +219,64 @@ export function calculateAssignmentCompletion(
 }
 
 /**
+ * Solved / attempted-not-solved / not-attempted counts for one student's assigned
+ * problems on a day — the one place that turns a list of per-problem outcomes into the
+ * three numbers a mentor actually asks for (§ submission-attempt tracking).
+ *
+ * `attemptedNotSolvedCount` is never inferred from the *absence* of an accepted
+ * submission — it is a straight count of problems whose stored status is
+ * `ATTEMPTED_NOT_ACCEPTED`, which `calculateAssignmentCompletion` only ever sets when a
+ * real (non-accepted) submission was observed for that problem. A problem with no
+ * submission at all keeps its default `NOT_ATTEMPTED` and is counted there instead.
+ * `X + Z + W` therefore always equals the number of problems passed in.
+ */
+export interface ProblemStatusCounts {
+  solvedCount: number;
+  attemptedNotSolvedCount: number;
+  notAttemptedCount: number;
+}
+
+export function summarizeProblemStatuses(
+  problems: { status: CompletionStatus }[],
+): ProblemStatusCounts {
+  let solvedCount = 0;
+  let attemptedNotSolvedCount = 0;
+  let notAttemptedCount = 0;
+
+  for (const problem of problems) {
+    if (problem.status === 'ACCEPTED') solvedCount += 1;
+    else if (problem.status === 'ATTEMPTED_NOT_ACCEPTED') attemptedNotSolvedCount += 1;
+    // `NOT_ATTEMPTED` and the (never actually persisted by this module) `UNKNOWN` verdict
+    // both mean "no evidence of an attempt" and are counted together.
+    else notAttemptedCount += 1;
+  }
+
+  return { solvedCount, attemptedNotSolvedCount, notAttemptedCount };
+}
+
+/**
+ * Within one "solved N" bucket, how many students actually touched their remaining
+ * problems versus never submitted anything for them.
+ *
+ * A student who has fully completed the assignment (`attemptedNotSolvedCount` and
+ * `notAttemptedCount` both zero, because nothing remains) counts toward neither side —
+ * the question "did they attempt what's left" does not apply to them.
+ */
+export function summarizeBucketAttempts(
+  rows: Pick<ProblemStatusCounts, 'attemptedNotSolvedCount' | 'notAttemptedCount'>[],
+): { studentsAttemptedCount: number; studentsNotAttemptedCount: number } {
+  let studentsAttemptedCount = 0;
+  let studentsNotAttemptedCount = 0;
+
+  for (const row of rows) {
+    if (row.attemptedNotSolvedCount > 0) studentsAttemptedCount += 1;
+    else if (row.notAttemptedCount > 0) studentsNotAttemptedCount += 1;
+  }
+
+  return { studentsAttemptedCount, studentsNotAttemptedCount };
+}
+
+/**
  * Lifetime distinct problems solved, from the local submission mirror.
  *
  * Counts *problems*, not submissions: ten accepted attempts at one problem is one solve.

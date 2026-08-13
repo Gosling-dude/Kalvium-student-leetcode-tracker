@@ -189,7 +189,11 @@ export default function DashboardPage() {
         <Card className="lg:col-span-2">
           <CardHeader
             title="Today's completion breakdown"
-            description="How many students cleared how much of the assignment"
+            description={
+              data.attemptedNotSolvedStudents > 0 || data.notAttemptedStudents > 0
+                ? `Of those who haven't finished: ${data.attemptedNotSolvedStudents} attempted, ${data.notAttemptedStudents} not attempted`
+                : "How many students cleared how much of the assignment"
+            }
             action={
               <Link
                 href="/mentor"
