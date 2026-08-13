@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 
 import { api } from '@/lib/api';
 import { BatchManagement } from '@/components/batch-management';
+import { StudentAccountsPanel } from '@/components/student-accounts-panel';
 import { timeAgo } from '@/lib/utils';
 import {
   Badge,
@@ -72,6 +73,8 @@ export default function AdminPage() {
       </header>
 
       <BatchManagement />
+
+      <StudentAccountsPanel />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile

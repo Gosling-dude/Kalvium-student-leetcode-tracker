@@ -106,6 +106,32 @@ export class LeaderboardService {
     });
   }
 
+  /**
+   * One student's rank for a period, without pulling the rest of the board — the
+   * dashboard's "Current Rank" tile needs exactly this, not all 31 students' rows.
+   * Both queries are point lookups on the entry table's indexed keys. `null` means no
+   * snapshot has been computed for this period yet, which is different from "unranked".
+   */
+  async myRank(
+    studentId: string,
+    period: Period,
+    dayKey?: DayKey,
+  ): Promise<{ rank: number; total: number } | null> {
+    const day = dayKey ?? this.time.today();
+    const periodKey = this.periodKey(period, day);
+
+    const entry = await this.prisma.leaderboardEntry.findUnique({
+      where: { period_periodKey_studentId: { period, periodKey, studentId } },
+      select: { rank: true },
+    });
+    if (!entry) return null;
+
+    const total = await this.prisma.leaderboardEntry.count({
+      where: { period, periodKey, student: { status: 'ACTIVE' } },
+    });
+    return { rank: entry.rank, total };
+  }
+
   async getSquadLeaderboard(period: Period, dayKey?: DayKey): Promise<SquadLeaderboardRow[]> {
     const day = dayKey ?? this.time.today();
     const periodKey = this.periodKey(period, day);

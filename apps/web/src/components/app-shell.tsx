@@ -79,6 +79,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     enabled: checkedAuth,
   });
 
+  // A student who lands here (a stale bookmark, a shared link) belongs in the student
+  // portal, never the admin/mentor console — the backend already refuses every call this
+  // shell would make, but redirecting immediately is a better experience than a page full
+  // of 403s (§20).
+  useEffect(() => {
+    if (user?.role === 'STUDENT') router.replace('/student');
+  }, [user, router]);
+
   const { data: latestSync } = useQuery({
     queryKey: ['sync', 'latest'],
     queryFn: api.latestSync,
@@ -98,7 +106,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     onError: (error: Error) => toast.error('Could not start sync', { description: error.message }),
   });
 
-  if (!checkedAuth) {
+  if (!checkedAuth || user?.role === 'STUDENT') {
     return (
       <div className="grid min-h-screen place-items-center">
         <div className="skeleton size-10 rounded-full" />

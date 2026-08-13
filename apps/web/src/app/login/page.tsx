@@ -16,7 +16,9 @@ export default function LoginPage() {
     mutationFn: () => api.login(email, password),
     onSuccess: (data) => {
       tokenStore.set(data.accessToken, data.refreshToken);
-      router.replace('/');
+      // One login page for every role — where it lands depends on who signed in.
+      // Students never see the admin/mentor console, and vice versa (§20).
+      router.replace(data.user.role === 'STUDENT' ? '/student' : '/');
     },
   });
 
@@ -34,14 +36,14 @@ export default function LoginPage() {
           </div>
           <div>
             <h1 className="text-base font-semibold">DSA Tracker</h1>
-            <p className="text-xs text-[var(--color-fg-subtle)]">Kalvium mentor console</p>
+            <p className="text-xs text-[var(--color-fg-subtle)]">Sign in with your Kalvium email</p>
           </div>
         </div>
 
         <form onSubmit={onSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="mb-1.5 block text-xs font-medium">
-              Email
+              Kalvium email
             </label>
             <input
               id="email"
@@ -51,7 +53,7 @@ export default function LoginPage() {
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
-              placeholder="admin@kalvium.com"
+              placeholder="you@kalvium.community"
             />
           </div>
 
@@ -81,6 +83,12 @@ export default function LoginPage() {
           <Button type="submit" variant="primary" className="w-full" loading={login.isPending}>
             Sign in
           </Button>
+
+          {/* No self-service reset exists — a mentor/admin resets a password from the
+              admin console, which is the only place a new password is ever generated. */}
+          <p className="text-center text-xs text-[var(--color-fg-subtle)]">
+            Forgot your password? Contact your mentor or the program team to reset it.
+          </p>
         </form>
       </Card>
     </div>

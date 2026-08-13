@@ -36,17 +36,35 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, email: true, name: true, role: true, isActive: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        isActive: true,
+        studentId: true,
+        student: { select: { status: true } },
+      },
     });
 
     if (!user) throw new UnauthorizedException('Account no longer exists');
     if (!user.isActive) throw new UnauthorizedException('Account has been deactivated');
+
+    // A student's access ends the moment they are archived, not whenever their current
+    // access token happens to expire — the same re-read-on-every-request reasoning as
+    // `isActive` above, applied to the fact that actually governs a student's standing.
+    if (user.role === 'STUDENT' && user.student?.status !== 'ACTIVE') {
+      throw new UnauthorizedException(
+        'Your student account is currently inactive. Please contact your mentor/program team.',
+      );
+    }
 
     return {
       id: user.id,
       email: user.email,
       name: user.name,
       role: user.role as UserRole,
+      studentId: user.studentId,
     };
   }
 }

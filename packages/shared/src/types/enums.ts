@@ -10,7 +10,15 @@
 export const DIFFICULTIES = ['EASY', 'MEDIUM', 'HARD'] as const;
 export type Difficulty = (typeof DIFFICULTIES)[number];
 
-export const USER_ROLES = ['ADMIN', 'MENTOR', 'VIEWER'] as const;
+/**
+ * `STUDENT` is deliberately last and never implied by the others: `RolesGuard` grants
+ * `ADMIN` every route automatically, but a route with no `@Roles(...)` at all is open to
+ * every *other* existing role by default (that default predates this role and stays
+ * unchanged for them). `STUDENT` is the one role for which that default flips to closed —
+ * see `RolesGuard` — so a new admin/mentor endpoint that forgets a decorator fails safe
+ * for students without anyone having to remember to exclude them.
+ */
+export const USER_ROLES = ['ADMIN', 'MENTOR', 'VIEWER', 'STUDENT'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 /**

@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 
-import { CurrentUser, Public, type RequestUser } from '../../common/decorators';
+import { CurrentUser, Public, Roles, type RequestUser } from '../../common/decorators';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto, LoginDto, RefreshTokenDto } from './dto/auth.dto';
 
@@ -47,7 +47,13 @@ export class AuthController {
     await this.auth.logout(dto.refreshToken);
   }
 
+  // These three are the entire "account" surface every role shares — including STUDENT,
+  // explicitly, since `RolesGuard` denies students by default on anything undecorated.
+  // Each derives identity from the authenticated session only, never a param, so there
+  // is nothing here for a student to reach beyond their own account.
+
   @Get('me')
+  @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'The currently authenticated user' })
   me(@CurrentUser() user: RequestUser) {
@@ -55,6 +61,7 @@ export class AuthController {
   }
 
   @Post('change-password')
+  @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Change your password and end all other sessions' })
@@ -66,6 +73,7 @@ export class AuthController {
   }
 
   @Post('logout-all')
+  @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Revoke every session for the current user' })

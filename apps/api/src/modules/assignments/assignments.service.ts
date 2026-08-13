@@ -334,6 +334,15 @@ export class AssignmentsService {
     return this.findByDay(this.time.today(), batchId);
   }
 
+  /** A single assignment by id, with the same shape `findByDay`/`findAll` return. */
+  async findById(id: string): Promise<AssignmentSummary | null> {
+    const assignment = await this.prisma.assignment.findUnique({
+      where: { id },
+      include: this.include(),
+    });
+    return assignment ? this.toSummary(assignment) : null;
+  }
+
   /** Every batch's set for today, in program-local time. */
   async findAllToday(): Promise<AssignmentSummary[]> {
     return this.findAllByDay(this.time.today());

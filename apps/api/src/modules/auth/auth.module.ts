@@ -5,6 +5,7 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
+import { StudentAccountsService } from './student-accounts.service';
 
 @Module({
   imports: [
@@ -12,9 +13,10 @@ import { JwtStrategy } from './jwt.strategy';
     // Secrets are passed explicitly at sign/verify time so the access and refresh
     // secrets can never be accidentally interchanged by a module-level default.
     JwtModule.register({}),
+    // `AuditService` needs no import here — `AuditModule` is `@Global()`.
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  providers: [AuthService, JwtStrategy, StudentAccountsService],
+  exports: [AuthService, StudentAccountsService],
 })
 export class AuthModule {}

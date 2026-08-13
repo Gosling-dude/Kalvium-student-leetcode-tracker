@@ -28,6 +28,10 @@ import type {
   MentorDashboard,
   Paginated,
   QueueHealth,
+  StudentAssignmentHistoryRow,
+  StudentAssignmentView,
+  StudentDashboard,
+  StudentPortalProfile,
   StudentProfile,
   StudentSummary,
   SyncJobSummary,
@@ -199,6 +203,9 @@ export const api = {
 
   logout: (refreshToken: string) =>
     apiFetch<void>('/auth/logout', { method: 'POST', body: { refreshToken } }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    apiFetch<void>('/auth/change-password', { method: 'POST', body: { currentPassword, newPassword } }),
 
   dashboard: (dayKey?: string, batch?: string) =>
     apiFetch<DashboardStats>(`/dashboard${qs({ dayKey, batch })}`),
@@ -381,4 +388,55 @@ export const api = {
 
   updateBlocker: (id: string, body: Record<string, unknown>) =>
     apiFetch<BlockerRecord>(`/reports/blockers/${id}`, { method: 'PATCH', body }),
+
+  // --- Student portal ----------------------------------------------------------
+  //
+  // Every call below is scoped to the logged-in student by the backend session — none
+  // of them take a student id, batch id or email as a parameter (§18, §19).
+
+  studentMe: () => apiFetch<StudentSummary>('/student/me'),
+
+  studentDashboard: () => apiFetch<StudentDashboard>('/student/dashboard'),
+
+  studentPortalProfile: () => apiFetch<StudentPortalProfile>('/student/profile'),
+
+  studentAssignments: (page = 1, pageSize = 20) =>
+    apiFetch<Paginated<StudentAssignmentHistoryRow>>(
+      `/student/assignments${qs({ page, pageSize })}`,
+    ),
+
+  studentAssignment: (id: string) =>
+    apiFetch<StudentAssignmentView>(`/student/assignments/${id}`),
+
+  studentLeaderboard: (period: 'DAILY' | 'WEEKLY' | 'MONTHLY', scope: 'mine' | 'all') =>
+    apiFetch<{ rows: LeaderboardRow[]; myStudentId: string }>(
+      `/student/leaderboard${qs({ period, scope })}`,
+    ),
+
+  // --- Admin: student portal accounts -------------------------------------------
+
+  studentAccounts: () =>
+    apiFetch<
+      {
+        studentId: string;
+        name: string;
+        email: string;
+        batchCode: string | null;
+        hasAccount: boolean;
+        isActive: boolean | null;
+        lastLoginAt: string | null;
+      }[]
+    >('/admin/students/accounts'),
+
+  provisionStudentAccounts: () =>
+    apiFetch<{
+      provisioned: { studentId: string; name: string; email: string; tempPassword: string }[];
+      skipped: { studentId: string; name: string; email: string; reason: string }[];
+    }>('/admin/students/accounts/provision', { method: 'POST' }),
+
+  resetStudentPassword: (studentId: string) =>
+    apiFetch<{ studentId: string; name: string; email: string; tempPassword: string }>(
+      `/admin/students/${studentId}/reset-password`,
+      { method: 'POST' },
+    ),
 };

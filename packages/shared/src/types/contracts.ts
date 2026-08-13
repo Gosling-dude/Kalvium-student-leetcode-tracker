@@ -41,6 +41,10 @@ export interface AuthUser {
   name: string;
   role: UserRole;
   avatarUrl: string | null;
+  /** Non-null only for `role: 'STUDENT'` — the linked `Student` row's id. */
+  studentId: string | null;
+  /** True when this account has never had its provisioned password changed. */
+  mustChangePassword: boolean;
 }
 
 export interface AuthTokens {
@@ -741,3 +745,97 @@ export interface EmailReportRecord {
   supersedesId: string | null;
   createdAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Student portal
+//
+// Every shape below is a *view* over the same tables the admin/mentor screens read —
+// there is no parallel student data model. The one rule specific to this surface: never
+// include `MentorNote`/`notes` (private mentor observations) or anything from the batch
+// audience-retarget trail (`originalBatch*`, `audienceChangedAt`) — a student sees the
+// assignment that currently applies to them, not the admin history of how it got there.
+// ---------------------------------------------------------------------------
+
+/** `StudentProfile` minus the one field a student must never see: mentor notes. */
+export type StudentPortalProfile = Omit<StudentProfile, 'notes'>;
+
+/** One assigned problem's outcome for the logged-in student, from `DailyProblemStatus`. */
+export interface StudentProblemOutcome {
+  problemId: string;
+  position: number;
+  title: string;
+  titleSlug: string;
+  url: string;
+  difficulty: Difficulty;
+  status: ProblemStatus;
+  solvedAt: string | null;
+}
+
+/**
+ * An assignment as a student may see it: the batch-level content (from
+ * `AssignmentSummary`, with the retarget-history fields dropped) plus — only when the
+ * assignment is for a day that has been rolled up — this student's own per-problem
+ * result. `myOutcome` is `null` for a day that has not been computed yet (e.g. today,
+ * before the next sync/rollup), which is different from "solved nothing".
+ */
+export interface StudentAssignmentView {
+  id: string;
+  dayKey: DayKey;
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  title: string | null;
+  topic: string | null;
+  difficulty: Difficulty | null;
+  problems: AssignmentProblem[];
+  myOutcome: {
+    solvedCount: number;
+    assignedCount: number;
+    completionPercent: number;
+    isPerfect: boolean;
+    completedAt: string | null;
+    problems: StudentProblemOutcome[];
+  } | null;
+}
+
+/** One row of `/student/assignments` — the history table, not the full detail view. */
+export interface StudentAssignmentHistoryRow {
+  id: string;
+  dayKey: DayKey;
+  title: string | null;
+  topic: string | null;
+  difficulty: Difficulty | null;
+  assignedCount: number;
+  solvedCount: number;
+  isPerfect: boolean;
+  score: number;
+  completedAt: string | null;
+}
+
+/** Everything `/student/dashboard` needs in one round trip. */
+export interface StudentDashboard {
+  name: string;
+  batchName: string | null;
+  batchCode: string | null;
+  cohort: number | null;
+  maxBeltLevel: number | null;
+  currentStreak: number;
+  longestStreak: number;
+  totalSolved: number;
+  totalScore: number;
+  todayAssignment: StudentAssignmentView | null;
+  weeklySolved: number;
+  monthlySolved: number;
+  weeklyCompletionPercent: number;
+  monthlyCompletionPercent: number;
+  /** Null when no leaderboard snapshot has been computed yet for this period. */
+  currentRank: { period: LeaderboardPeriod; rank: number; total: number } | null;
+  recentDays: {
+    dayKey: DayKey;
+    solvedCount: number;
+    assignedCount: number;
+    isPerfect: boolean;
+  }[];
+}
+
+export type LeaderboardPeriod = 'DAILY' | 'WEEKLY' | 'MONTHLY';

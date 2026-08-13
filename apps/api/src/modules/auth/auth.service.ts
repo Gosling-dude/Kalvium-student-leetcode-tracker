@@ -61,6 +61,7 @@ export class AuthService {
   async login(email: string, password: string, ctx: SessionContext = {}): Promise<LoginResponse> {
     const user = await this.prisma.user.findUnique({
       where: { email: email.toLowerCase().trim() },
+      include: { student: { select: { status: true } } },
     });
 
     // Same rejection for "no such user" and "wrong password", and a hash comparison
@@ -80,6 +81,27 @@ export class AuthService {
     }
 
     if (!user.isActive) throw new ForbiddenException('This account has been deactivated');
+
+    // A student whose roster status has moved off ACTIVE (archived, dropped, paused)
+    // must not reach the active portal, even though their login credentials still work —
+    // the credential and the roster standing are different facts (§25). Distinct from
+    // "wrong password" both in status code and message, on purpose: this is not a
+    // credential-guessing signal, it is a real account telling the truth about itself.
+    if (user.role === 'STUDENT' && user.student?.status !== 'ACTIVE') {
+      await this.audit.record({
+        actorId: user.id,
+        actorName: user.name,
+        action: 'LOGIN_BLOCKED_ARCHIVED_STUDENT',
+        entityType: 'User',
+        entityId: user.id,
+        summary: `Blocked login for archived/inactive student ${user.email}`,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      throw new ForbiddenException(
+        'Your student account is currently inactive. Please contact your mentor/program team.',
+      );
+    }
 
     await this.prisma.user.update({
       where: { id: user.id },
@@ -188,7 +210,7 @@ export class AuthService {
 
     await this.prisma.user.update({
       where: { id: userId },
-      data: { passwordHash: await this.hashPassword(newPassword) },
+      data: { passwordHash: await this.hashPassword(newPassword), passwordChangedAt: new Date() },
     });
 
     // A password change should end every other session — that is the point of changing it.
@@ -281,6 +303,8 @@ export class AuthService {
     name: string;
     role: string;
     avatarUrl: string | null;
+    studentId?: string | null;
+    passwordChangedAt?: Date | null;
   }): AuthUser {
     return {
       id: user.id,
@@ -288,6 +312,8 @@ export class AuthService {
       name: user.name,
       role: user.role as UserRole,
       avatarUrl: user.avatarUrl,
+      studentId: user.studentId ?? null,
+      mustChangePassword: !user.passwordChangedAt,
     };
   }
 }

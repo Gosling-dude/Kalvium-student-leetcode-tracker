@@ -34,10 +34,16 @@ datasource db {
 // Enums — values mirror the string unions in @dsa/shared exactly.
 // ---------------------------------------------------------------------------
 
+/// `STUDENT` is a login identity, not a new data model — it is deliberately the only
+/// role tied to a `Student` row (`User.studentId`). Authorization defaults flip for it:
+/// every other role is implicitly allowed on a route with no `@Roles(...)`, but
+/// `RolesGuard` denies `STUDENT` by default there instead, so a route that forgets to
+/// exclude students fails closed rather than open.
 enum UserRole {
   ADMIN
   MENTOR
   VIEWER
+  STUDENT
 }
 
 enum Difficulty {
@@ -202,18 +208,30 @@ enum EmailReportStatus {
 // ---------------------------------------------------------------------------
 
 model User {
-  id           String    @id @default(uuid()) @db.Uuid
-  email        String    @unique
-  passwordHash String
-  name         String
-  role         UserRole  @default(MENTOR)
-  avatarUrl    String?
-  isActive     Boolean   @default(true)
-  lastLoginAt  DateTime?
+  id                String    @id @default(uuid()) @db.Uuid
+  email             String    @unique
+  passwordHash      String
+  name              String
+  role              UserRole  @default(MENTOR)
+  avatarUrl         String?
+  isActive          Boolean   @default(true)
+  lastLoginAt       DateTime?
+  /// When the password was last changed — distinct from `updatedAt`, which also moves on
+  /// unrelated edits (name, role). Drives "force a password change" for a student's first
+  /// login, without needing a separate boolean that could drift out of sync.
+  passwordChangedAt DateTime?
+
+  /// Set only for `role = STUDENT`: which `Student` row this login belongs to. Nullable
+  /// and unique — nullable because every non-student `User` has no student to point at;
+  /// unique because a student has at most one login, never two accounts sharing history.
+  /// This is the *entire* link between the login system and the academic data; nothing
+  /// about batch, cohort, belt, streak or submissions is ever duplicated onto `User` (§2).
+  studentId String? @unique @db.Uuid
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  student                   Student?                   @relation(fields: [studentId], references: [id], onDelete: SetNull)
   mentoredSquads            Squad[]                    @relation("SquadMentor")
   assignments               Assignment[]               @relation("AssignmentAuthor")
   notes                     MentorNote[]
@@ -421,6 +439,10 @@ model Student {
   notifications NotificationLog[]
   blockers      Blocker[]
   batchHistory  StudentBatchHistory[]
+  /// The student's own login, if one has been provisioned (§ student portal). Optional —
+  /// a student can exist on the roster for a long time before anyone provisions their
+  /// portal access, exactly like `leetcodeUsername`.
+  user          User?
 
   @@index([squadId])
   @@index([batchId])

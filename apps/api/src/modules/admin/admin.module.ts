@@ -39,6 +39,8 @@ import { BatchesService } from '../batches/batches.service';
 import { RollupService } from '../scoring/rollup.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
 import { AuditService } from '../audit/audit.service';
+import { AuthModule } from '../auth/auth.module';
+import { StudentAccountsService } from '../auth/student-accounts.service';
 
 class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
@@ -80,7 +82,45 @@ export class AdminController {
     private readonly scoringConfig: ScoringConfigService,
     private readonly audit: AuditService,
     private readonly batches: BatchesService,
+    private readonly studentAccounts: StudentAccountsService,
   ) {}
+
+  // --- Student portal accounts -----------------------------------------------
+  //
+  // Provisioning is deliberately admin-only and out of band: a temporary password is
+  // returned exactly once, in this response, to be handed to the student directly. It is
+  // never emailed, never logged, never stored anywhere but the (hashed) `passwordHash`.
+
+  @Get('students/accounts')
+  @ApiOperation({ summary: 'Which active students have a portal login, and whether it has been used' })
+  listStudentAccounts() {
+    return this.studentAccounts.listAccounts();
+  }
+
+  @Post('students/accounts/provision')
+  @Audit('STUDENT_ACCOUNTS_PROVISIONED', 'User')
+  @ApiOperation({
+    summary: 'Create a portal login for every active student who does not already have one',
+    description:
+      'Returns each new account\'s one-time temporary password. Copy them out now — they ' +
+      'are never shown again and never stored anywhere but as a bcrypt hash.',
+  })
+  provisionStudentAccounts(@CurrentUser() user: RequestUser) {
+    return this.studentAccounts.provisionMissingAccounts(user.id);
+  }
+
+  @Post('students/:studentId/reset-password')
+  @Audit('STUDENT_PASSWORD_RESET', 'User')
+  @ApiOperation({
+    summary: "Reset one student's portal password (also provisions the account if it doesn't exist yet)",
+    description: 'The supported "forgot password" path: the student contacts their mentor/program team.',
+  })
+  resetStudentPassword(
+    @Param('studentId', ParseUUIDPipe) studentId: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.studentAccounts.resetPassword(studentId, user.id);
+  }
 
   // --- Batches -------------------------------------------------------------
 
@@ -294,7 +334,7 @@ export class AdminController {
 }
 
 @Module({
-  imports: [ScoringModule, BatchesModule],
+  imports: [ScoringModule, BatchesModule, AuthModule],
   controllers: [AdminController],
 })
 export class AdminModule {}
