@@ -230,7 +230,8 @@ export class AuthService {
     return bcrypt.hash(password, this.config.auth.bcryptRounds);
   }
 
-  /** Purge expired and revoked tokens. Called by the nightly rollup. */
+  /** Purge expired and revoked tokens. Called by the nightly rollup. Also sweeps
+   *  expired/used admin password-reset tokens — same cadence, no separate cron entry. */
   async pruneExpiredTokens(): Promise<number> {
     const result = await this.prisma.refreshToken.deleteMany({
       where: {
@@ -240,6 +241,16 @@ export class AuthService {
         ],
       },
     });
+
+    await this.prisma.adminPasswordResetToken.deleteMany({
+      where: {
+        OR: [
+          { expiresAt: { lt: new Date() } },
+          { usedAt: { lt: new Date(Date.now() - 7 * 86_400_000) } },
+        ],
+      },
+    });
+
     return result.count;
   }
 

@@ -237,6 +237,7 @@ model User {
   notes                     MentorNote[]
   auditLogs                 AuditLog[]
   refreshTokens             RefreshToken[]
+  adminPasswordResetTokens  AdminPasswordResetToken[]
   apiKeys                   ApiKey[]
   syncJobs                  SyncJob[]
   blockersRecorded          Blocker[]                  @relation("BlockerRecordedBy")
@@ -267,6 +268,25 @@ model RefreshToken {
   @@index([userId])
   @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+/// Single-use, short-lived tokens for the admin email-recovery path (`AdminRecoveryService`).
+/// Hashed at rest and shaped like `RefreshToken`, for the same reason: a real revoke/expire
+/// is a DB operation, not a client-side gesture, and the plaintext token is never stored.
+model AdminPasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("admin_password_reset_tokens")
 }
 
 model ApiKey {

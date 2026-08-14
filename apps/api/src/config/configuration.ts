@@ -54,6 +54,14 @@ export interface AppConfig {
    */
   cron: { secret: string | null };
 
+  /**
+   * Shared secret for the admin deployment-secret password-recovery endpoint
+   * (`/admin-recovery/deployment-secret`). Same fail-closed model as `cron.secret`:
+   * `null` means the endpoint rejects every request. This is the recovery path that
+   * doesn't depend on `email` being configured.
+   */
+  adminRecovery: { secret: string | null };
+
   provider: {
     endpoint: string;
     requestsPerSecond: number;
@@ -227,6 +235,8 @@ export function loadConfiguration(): AppConfig {
     },
 
     cron: { secret: process.env.CRON_SECRET || null },
+
+    adminRecovery: { secret: process.env.ADMIN_RECOVERY_SECRET || null },
 
     provider: {
       endpoint: process.env.LEETCODE_GRAPHQL_ENDPOINT ?? 'https://leetcode.com/graphql',
