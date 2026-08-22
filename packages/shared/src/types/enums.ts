@@ -105,6 +105,32 @@ export function isCurrentStudent(status: StudentStatus): boolean {
 export const BATCH_STATUSES = ['ACTIVE', 'ARCHIVED'] as const;
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
 
+/**
+ * Lifecycle of a campus. Mirrors `BatchStatus`: archiving removes a campus from pickers,
+ * "all campuses" aggregates and new assignment targets, while it keeps owning every
+ * student, batch and result it ever had. A campus is never deleted.
+ */
+export const CAMPUS_STATUSES = ['ACTIVE', 'ARCHIVED'] as const;
+export type CampusStatus = (typeof CAMPUS_STATUSES)[number];
+
+/**
+ * The value a campus filter carries when the user has not narrowed to one.
+ *
+ * A single shared constant rather than each surface inventing `'all'` / `''` / `undefined`
+ * for itself, because the API distinguishes "every campus" from "campus not specified" and
+ * a filter that blurred the two would show one campus's students under another's heading.
+ */
+export const ALL_CAMPUSES = 'all' as const;
+
+/**
+ * Batch code reserved for students who have been enrolled but not yet placed.
+ *
+ * Placement comes from the initial diagnostic assessment. Until that result exists, a
+ * student sits here rather than being guessed into Foundation or Intermediate (§7) — the
+ * roster supplies identity, squad and a LeetCode handle, and nothing about belt level.
+ */
+export const PENDING_PLACEMENT_BATCH_CODE = 'PENDING';
+
 export const BATCH_CHANGE_SOURCES = ['MANUAL', 'ROSTER_SYNC', 'IMPORT', 'MIGRATION'] as const;
 export type BatchChangeSource = (typeof BATCH_CHANGE_SOURCES)[number];
 

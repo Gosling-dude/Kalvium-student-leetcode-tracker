@@ -7,7 +7,7 @@ import { Download, FileSpreadsheet, Mail, Send } from 'lucide-react';
 import { defaultEmailSubject, type DailyEmailReportStudentRow, type EmailReportRecord } from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
-import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { todayKey } from '@/lib/utils';
 import { Button, Card, CardHeader, EmptyState, ErrorState, TableSkeleton } from '@/components/ui';
 import {
@@ -24,9 +24,18 @@ import {
 
 export default function EmailReportsPage() {
   const [dayKey, setDayKey] = useState(todayKey());
-  const { selected: batch, batches } = useBatchFilter();
+  const { campus, batch, campuses, batches } = useScopeFilter();
 
-  /** The batch id matching the active filter, for scoping the generated email. */
+  /**
+   * The ids matching the active filter, for scoping the generated email.
+   *
+   * The email is generated for exactly the audience on screen, so a report headed
+   * "SRM University — Foundation" contains SRM Foundation's numbers and nobody else's
+   * (§33, "Do not mix campus statistics accidentally").
+   */
+  const campusId = campus
+    ? (campuses.find((item) => item.code === campus)?.id ?? undefined)
+    : undefined;
   const batchId = batch ? (batches.find((item) => item.code === batch)?.id ?? undefined) : undefined;
   const [tab, setTab] = useState<number | 'ALL'>('ALL');
   const [blockerStudent, setBlockerStudent] = useState<DailyEmailReportStudentRow | null>(null);
@@ -44,13 +53,14 @@ export default function EmailReportsPage() {
   const queryClient = useQueryClient();
 
   const { data: report, isLoading, error, refetch } = useQuery({
-    queryKey: ['email-report', dayKey, batch],
-    queryFn: () => api.dailyEmailReport(dayKey, undefined, batch ?? undefined),
+    queryKey: ['email-report', dayKey, campus, batch],
+    queryFn: () =>
+      api.dailyEmailReport(dayKey, undefined, campus ?? undefined, batch ?? undefined),
   });
 
   const { data: sentStatus } = useQuery({
-    queryKey: ['email-status', dayKey, batch],
-    queryFn: () => api.emailStatus(dayKey, batch ?? undefined),
+    queryKey: ['email-status', dayKey, campus, batch],
+    queryFn: () => api.emailStatus(dayKey, campus ?? undefined, batch ?? undefined),
     enabled: Boolean(report?.hasAssignment),
   });
 
@@ -62,13 +72,14 @@ export default function EmailReportsPage() {
       if (!fromEmail) {
         throw new Error('Set a sender email before generating the email.');
       }
-      // Scoped to the active batch filter, so "Foundation" on screen generates the
-      // Foundation report — subject line included (§13).
+      // Scoped to the active campus + batch filter, so "SRM — Foundation" on screen
+      // generates the SRM Foundation report — subject line included (§13, §33).
       return api.generateEmail(dayKey, {
         fromEmail,
         toRecipients,
         ccRecipients,
         subject: subject || undefined,
+        campusId,
         batchId,
       });
     },
@@ -114,7 +125,7 @@ export default function EmailReportsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <BatchFilter />
+          <ScopeFilter />
           <label htmlFor="reportDate" className="sr-only">
             Report date
           </label>

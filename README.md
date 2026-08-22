@@ -336,3 +336,14 @@ yesterday, and an older date; record a blocker; preview, approve and send an ema
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data model and
 [`docs/STATUS.md`](docs/STATUS.md) for a feature-by-feature completion breakdown.
+
+Two features have their own documents because their design decisions are load-bearing and
+easy to undo by accident:
+
+* [`docs/CAMPUSES.md`](docs/CAMPUSES.md) — `Campus → Batch → Student`, audience resolution,
+  the three leaderboard scopes, and how to onboard a campus roster safely.
+* [`docs/BASELINE_TESTS.md`](docs/BASELINE_TESTS.md) — weekly independent-capability
+  assessments, kept structurally apart from daily assignments, and the evidence-only
+  review signals.
+* [`docs/HISTORICAL_SYNC.md`](docs/HISTORICAL_SYNC.md) — the two-day lookback, what a sync
+  recomputes, and how to backfill an assignment entered after its own date.

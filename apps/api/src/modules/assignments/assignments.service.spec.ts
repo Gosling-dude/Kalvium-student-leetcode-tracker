@@ -1,20 +1,18 @@
 /**
- * `AssignmentsService` — batch targeting (§20).
+ * `AssignmentsService` — campus + batch targeting (§9, §10, §11).
  *
- * The properties worth protecting:
+ * The properties worth protecting, in order of how badly getting them wrong would hurt:
  *
- *  - Uniqueness is `(dayKey, batchId)`, never `dayKey` alone: Foundation and Intermediate
- *    each get their own assignment for the same date, and creating one never touches or
- *    blocks on the other.
- *  - Selecting a specific batch ("Foundation only") only ever checks *that* batch for a
- *    clash — an existing Intermediate assignment must never block a Foundation create.
- *  - Omitting a target ("All batches") is the one path that is genuinely all-or-nothing:
- *    it targets every active batch at once, so if any of them already has a row that day,
- *    nothing is written, by design (never a partial multi-batch create).
- *  - A legacy pre-batch assignment (`batchId = NULL`) keeps applying to every batch that
- *    has no assignment of its own, unchanged.
- *  - "Change Assignment Target" moves an assignment's audience and records why, without
- *    silently colliding with another assignment already on that date.
+ *  - **No cross-campus leak.** An SRM student is never evaluated against Vels' problems,
+ *    and vice versa. This is the one that would quietly corrupt every report if it broke.
+ *  - Uniqueness is `(dayKey, campusId, batchId)`. One date carries four independent sets
+ *    — Vels/Foundation, Vels/Intermediate, SRM/Foundation, SRM/Intermediate — and
+ *    creating any of them never touches or blocks on the others.
+ *  - Selecting a specific audience only checks *that* audience for a clash.
+ *  - Omitting both halves means one "everyone" row, not a fan-out into one row per batch.
+ *  - Resolution widens: batch → campus → everyone, most specific first.
+ *  - "Change Assignment Target" moves an audience and records why, without silently
+ *    colliding with another assignment already on that date.
  */
 
 import { BadRequestException, NotFoundException } from '@nestjs/common';
@@ -22,8 +20,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssignmentsService } from './assignments.service';
 
-const FOUNDATION_ID = 'batch-a';
-const INTERMEDIATE_ID = 'batch-b';
+const VELS = 'campus-vels';
+const SRM = 'campus-srm';
+
+const VELS_FOUNDATION = 'batch-vels-a';
+const VELS_INTERMEDIATE = 'batch-vels-b';
+const SRM_FOUNDATION = 'batch-srm-a';
+const SRM_INTERMEDIATE = 'batch-srm-b';
+const SRM_PENDING = 'batch-srm-pending';
 
 const PROBLEM_URLS = [
   'https://leetcode.com/problems/maximum-number-of-vowels-in-a-substring-of-given-length/',
@@ -58,9 +62,13 @@ function problemRow(slug: string) {
 interface FakeAssignment {
   id: string;
   dayKey: string;
+  campusId: string | null;
   batchId: string | null;
+  originalCampusId: string | null;
   originalBatchId: string | null;
+  campus: { name: string; code: string } | null;
   batch: { name: string; code: string } | null;
+  originalCampus: { name: string; code: string } | null;
   originalBatch: { name: string; code: string } | null;
   audienceChanges: { changedAt: Date }[];
   title: string | null;
@@ -72,14 +80,56 @@ interface FakeAssignment {
   problems: { id: string; position: number; problem: ReturnType<typeof problemRow> }[];
 }
 
-const BATCH_DIRECTORY: Record<string, { name: string; code: string }> = {
-  [FOUNDATION_ID]: { name: 'Foundation Level', code: 'A' },
-  [INTERMEDIATE_ID]: { name: 'Intermediate Level', code: 'B' },
+const CAMPUS_DIRECTORY: Record<string, { name: string; code: string }> = {
+  [VELS]: { name: 'Vels Institute', code: 'VELS' },
+  [SRM]: { name: 'SRM University', code: 'SRM' },
 };
 
-function makeService(options: { existing?: FakeAssignment[]; activeBatchIds?: string[] } = {}) {
+const BATCH_DIRECTORY: Record<
+  string,
+  { name: string; code: string; campusId: string; status: string }
+> = {
+  [VELS_FOUNDATION]: { name: 'Foundation Level', code: 'A', campusId: VELS, status: 'ACTIVE' },
+  [VELS_INTERMEDIATE]: { name: 'Intermediate Level', code: 'B', campusId: VELS, status: 'ACTIVE' },
+  [SRM_FOUNDATION]: { name: 'Foundation Level', code: 'A', campusId: SRM, status: 'ACTIVE' },
+  [SRM_INTERMEDIATE]: { name: 'Intermediate Level', code: 'B', campusId: SRM, status: 'ACTIVE' },
+  [SRM_PENDING]: { name: 'Placement Pending', code: 'PENDING', campusId: SRM, status: 'ACTIVE' },
+};
+
+/** Shorthand for a stored row, so the scenarios below stay readable. */
+function assignmentRow(
+  id: string,
+  dayKey: string,
+  campusId: string | null,
+  batchId: string | null,
+): FakeAssignment {
+  return {
+    id,
+    dayKey,
+    campusId,
+    batchId,
+    originalCampusId: campusId,
+    originalBatchId: batchId,
+    campus: campusId ? CAMPUS_DIRECTORY[campusId]! : null,
+    batch: batchId ? BATCH_DIRECTORY[batchId]! : null,
+    originalCampus: campusId ? CAMPUS_DIRECTORY[campusId]! : null,
+    originalBatch: batchId ? BATCH_DIRECTORY[batchId]! : null,
+    audienceChanges: [],
+    title: null,
+    topic: null,
+    notes: null,
+    difficulty: null,
+    createdAt: new Date(),
+    createdBy: null,
+    problems: [],
+  };
+}
+
+function makeService(
+  options: { existing?: FakeAssignment[]; archivedBatchIds?: string[] } = {},
+) {
   const rows: FakeAssignment[] = [...(options.existing ?? [])];
-  const activeBatchIds = options.activeBatchIds ?? [FOUNDATION_ID, INTERMEDIATE_ID];
+  const archived = new Set(options.archivedBatchIds ?? []);
   const problemsBySlug = new Map(SLUGS.map((slug) => [slug, problemRow(slug)]));
   let nextId = rows.length + 1;
 
@@ -89,27 +139,46 @@ function makeService(options: { existing?: FakeAssignment[]; activeBatchIds?: st
   // snapshot a caller captured earlier in the same request (as `changeTarget` does).
   const clone = (row: FakeAssignment): FakeAssignment => ({ ...row });
 
+  /** Matches the `OR: [{ campusId, batchId }, …]` shape the service builds. */
+  const matchesOr = (
+    row: FakeAssignment,
+    or: { campusId?: string | null; batchId?: string | null }[] | undefined,
+  ): boolean => {
+    if (!or) return true;
+    return or.some((clause) => {
+      if ('campusId' in clause && clause.campusId !== undefined && row.campusId !== clause.campusId)
+        return false;
+      if ('batchId' in clause && clause.batchId !== undefined && row.batchId !== clause.batchId)
+        return false;
+      return true;
+    });
+  };
+
   const prisma = {
     assignment: {
-      findMany: vi.fn(async ({ where }: { where: { dayKey?: string; batchId?: unknown } }) => {
-        return rows
+      findMany: vi.fn(async ({ where }: { where: Record<string, unknown> }) =>
+        rows
           .filter((row) => {
             if (where.dayKey !== undefined && row.dayKey !== where.dayKey) return false;
-            const batchWhere = where.batchId as { in?: (string | null)[] } | undefined;
-            if (batchWhere?.in !== undefined) return batchWhere.in.includes(row.batchId);
-            return true;
+            return matchesOr(row, where.OR as never);
           })
-          .map(clone);
-      }),
+          .map(clone),
+      ),
       findFirst: vi.fn(
         async ({
           where,
         }: {
-          where: { dayKey: string; batchId: string | null; id?: { not: string } };
+          where: {
+            dayKey: string;
+            campusId: string | null;
+            batchId: string | null;
+            id?: { not: string };
+          };
         }) => {
           const found = rows.find(
             (row) =>
               row.dayKey === where.dayKey &&
+              row.campusId === where.campusId &&
               row.batchId === where.batchId &&
               (!where.id || row.id !== where.id.not),
           );
@@ -125,13 +194,16 @@ function makeService(options: { existing?: FakeAssignment[]; activeBatchIds?: st
         if (!row) throw new Error('not found');
         return clone(row);
       }),
+      count: vi.fn(async () => rows.length),
       create: vi.fn(
         async ({
           data,
         }: {
           data: {
             dayKey: string;
+            campusId: string | null;
             batchId: string | null;
+            originalCampusId: string | null;
             originalBatchId: string | null;
             title: string | null;
             topic: string | null;
@@ -140,55 +212,73 @@ function makeService(options: { existing?: FakeAssignment[]; activeBatchIds?: st
             problems: { create: { problemId: string; position: number }[] };
           };
         }) => {
-          const row: FakeAssignment = {
-            id: `assignment-${nextId++}`,
-            dayKey: data.dayKey,
-            batchId: data.batchId,
-            originalBatchId: data.originalBatchId,
-            batch: data.batchId ? BATCH_DIRECTORY[data.batchId]! : null,
-            originalBatch: data.originalBatchId ? BATCH_DIRECTORY[data.originalBatchId]! : null,
-            audienceChanges: [],
-            title: data.title,
-            topic: data.topic,
-            notes: data.notes,
-            difficulty: data.difficulty,
-            createdAt: new Date(),
-            createdBy: null,
-            problems: data.problems.create.map((p) => ({
-              id: `link-${p.position}`,
-              position: p.position,
-              problem: [...problemsBySlug.values()].find((pr) => pr.id === p.problemId)!,
-            })),
-          };
+          const row = assignmentRow(
+            `assignment-${nextId++}`,
+            data.dayKey,
+            data.campusId,
+            data.batchId,
+          );
+          row.title = data.title;
+          row.topic = data.topic;
+          row.notes = data.notes;
+          row.difficulty = data.difficulty;
+          row.problems = data.problems.create.map((p) => ({
+            id: `link-${p.position}`,
+            position: p.position,
+            problem: [...problemsBySlug.values()].find((pr) => pr.id === p.problemId)!,
+          }));
           rows.push(row);
           return row;
         },
       ),
-      update: vi.fn(async ({ where, data }: { where: { id: string }; data: { batchId: string | null } }) => {
-        const row = rows.find((r) => r.id === where.id)!;
-        row.batchId = data.batchId;
-        row.batch = data.batchId ? BATCH_DIRECTORY[data.batchId]! : null;
-        return row;
-      }),
+      update: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string };
+          data: { campusId: string | null; batchId: string | null };
+        }) => {
+          const row = rows.find((r) => r.id === where.id)!;
+          row.campusId = data.campusId;
+          row.batchId = data.batchId;
+          row.campus = data.campusId ? CAMPUS_DIRECTORY[data.campusId]! : null;
+          row.batch = data.batchId ? BATCH_DIRECTORY[data.batchId]! : null;
+          return row;
+        },
+      ),
     },
     problem: {
-      findUnique: vi.fn(async ({ where }: { where: { titleSlug: string } }) =>
-        problemsBySlug.get(where.titleSlug) ?? null,
+      findUnique: vi.fn(
+        async ({ where }: { where: { titleSlug: string } }) =>
+          problemsBySlug.get(where.titleSlug) ?? null,
       ),
     },
     batch: {
-      findMany: vi.fn(async () => activeBatchIds.map((id) => ({ id }))),
-      count: vi.fn(async ({ where }: { where: { id: string } }) =>
-        activeBatchIds.includes(where.id) || Object.keys(BATCH_DIRECTORY).includes(where.id) ? 1 : 0,
+      findUnique: vi.fn(async ({ where }: { where: { id?: string } }) =>
+        where.id && BATCH_DIRECTORY[where.id]
+          ? { id: where.id, ...BATCH_DIRECTORY[where.id] }
+          : null,
       ),
-      findUnique: vi.fn(async ({ where }: { where: { id?: string; code?: string } }) => {
-        if (where.id) return BATCH_DIRECTORY[where.id] ? { id: where.id, ...BATCH_DIRECTORY[where.id] } : null;
-        const entry = Object.entries(BATCH_DIRECTORY).find(([, v]) => v.code === where.code);
-        return entry ? { id: entry[0], ...entry[1] } : null;
-      }),
+    },
+    campus: {
+      findUnique: vi.fn(async ({ where }: { where: { id?: string } }) =>
+        where.id && CAMPUS_DIRECTORY[where.id]
+          ? { id: where.id, ...CAMPUS_DIRECTORY[where.id] }
+          : null,
+      ),
+    },
+    // Backs `audienceCounter`: 12 active students spread over four groups.
+    student: {
+      groupBy: vi.fn(async () => [
+        { campusId: VELS, batchId: VELS_FOUNDATION, _count: { _all: 15 } },
+        { campusId: VELS, batchId: VELS_INTERMEDIATE, _count: { _all: 16 } },
+        { campusId: SRM, batchId: SRM_PENDING, _count: { _all: 92 } },
+      ]),
     },
     assignmentAudienceChange: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+      findMany: vi.fn(async () => []),
     },
     $transaction: vi.fn(async (arg: unknown) => {
       if (Array.isArray(arg)) return Promise.all(arg);
@@ -204,362 +294,393 @@ function makeService(options: { existing?: FakeAssignment[]; activeBatchIds?: st
     isValid: (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d),
     today: () => '2026-08-13',
   };
-  const batches = {
+
+  /** A stand-in for `CampusesService` with the same resolution contract. */
+  const campuses = {
     resolveSelector: vi.fn(async (value?: string | null) => {
       if (value === undefined || value === null) return null;
       const v = value.trim().toUpperCase();
       if (v === '' || v === 'ALL') return null;
-      if (v === 'A' || v === 'FOUNDATION') return FOUNDATION_ID;
-      if (v === 'B' || v === 'INTERMEDIATE') return INTERMEDIATE_ID;
-      return null;
+      const entry = Object.entries(CAMPUS_DIRECTORY).find(
+        ([id, campus]) => campus.code === v || id === value,
+      );
+      if (!entry) throw new BadRequestException(`"${value}" is not a known campus.`);
+      return entry[0];
     }),
+    findBatch: vi.fn(async (campusId: string | null, selector: string) => {
+      if (BATCH_DIRECTORY[selector]) {
+        const batch = BATCH_DIRECTORY[selector]!;
+        return { id: selector, ...batch, status: archived.has(selector) ? 'ARCHIVED' : batch.status };
+      }
+      const code = selector.trim().toUpperCase().replace('FOUNDATION', 'A').replace('INTERMEDIATE', 'B');
+      const matches = Object.entries(BATCH_DIRECTORY).filter(
+        ([id, batch]) => batch.code === code && (campusId === null || batch.campusId === campusId),
+      );
+      if (matches.length === 0) {
+        throw new BadRequestException(`"${selector}" is not a known batch.`);
+      }
+      if (matches.length > 1) {
+        throw new BadRequestException(`"${selector}" names a batch at several campuses.`);
+      }
+      const [id, batch] = matches[0]!;
+      return { id, ...batch, status: archived.has(id) ? 'ARCHIVED' : batch.status };
+    }),
+    resolveScope: vi.fn(async () => ({
+      campusId: null,
+      batchId: null,
+      campusName: null,
+      campusCode: null,
+      batchName: null,
+      batchCode: null,
+    })),
   };
+
   const provider = { fetchProblemMetadata: vi.fn() };
 
   const service = new AssignmentsService(
     prisma as never,
     cache as never,
     time as never,
-    batches as never,
+    campuses as never,
     provider as never,
   );
-  return { service, prisma, rows };
+  return { service, prisma, rows, campuses };
 }
 
-describe('AssignmentsService.create — Foundation and Intermediate stay independent', () => {
-  it('creates a Foundation-only assignment even though Intermediate already has one that day', async () => {
-    const { service, prisma, rows } = makeService({
-      existing: [
-        {
-          id: 'existing-b',
-          dayKey: '2026-08-13',
-          batchId: INTERMEDIATE_ID,
-          originalBatchId: INTERMEDIATE_ID,
-          batch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          originalBatch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
-      ],
-    });
-
-    const created = await service.create(
-      { dayKey: '2026-08-13', topic: 'Sliding Window', batches: ['A'], problemUrls: PROBLEM_URLS },
-      'user-1',
-    );
-
-    expect(created).toHaveLength(1);
-    expect(created[0]!.batchId).toBe(FOUNDATION_ID);
-    expect(created[0]!.batchName).toBe('Foundation Level');
-    // The exact 4 problems from the scenario, in order — Intermediate is never given
-    // these; only whichever students `selectAssignmentForBatch` resolves to Foundation
-    // that day are ever evaluated against them (see `batch.spec.ts`).
-    expect(created[0]!.problems.map((p) => p.titleSlug)).toEqual(SLUGS);
-    expect(prisma.assignment.create).toHaveBeenCalledTimes(1);
-    // Intermediate's existing row is untouched.
-    expect(rows.find((r) => r.id === 'existing-b')!.batchId).toBe(INTERMEDIATE_ID);
-  });
-
-  it('refuses a second Foundation assignment the same day, naming only Foundation — never Intermediate', async () => {
-    const { service } = makeService({
-      existing: [
-        {
-          id: 'existing-a',
-          dayKey: '2026-08-13',
-          batchId: FOUNDATION_ID,
-          originalBatchId: FOUNDATION_ID,
-          batch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          originalBatch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
-      ],
-    });
-
-    const attempt = service.create(
-      { dayKey: '2026-08-13', batches: ['A'], problemUrls: PROBLEM_URLS },
-      'user-1',
-    );
-
-    await expect(attempt).rejects.toBeInstanceOf(BadRequestException);
-    await expect(attempt).rejects.toThrow(/Foundation Level/);
-    await expect(attempt).rejects.not.toThrow(/Intermediate/);
-  });
-
-  it('allows Foundation and Intermediate to each get their own assignment on the same date', async () => {
+describe('AssignmentsService.create — four independent scopes on one date', () => {
+  it('gives Vels/Foundation, Vels/Intermediate, SRM/Foundation and SRM/Intermediate their own rows', async () => {
+    // The central §9 scenario, built one create at a time exactly as an admin would.
     const { service, rows } = makeService();
 
-    await service.create({ dayKey: '2026-08-13', batches: ['A'], problemUrls: PROBLEM_URLS }, 'user-1');
-    await service.create({ dayKey: '2026-08-13', batches: ['B'], problemUrls: PROBLEM_URLS }, 'user-1');
+    await service.create(
+      { dayKey: '2026-08-13', campus: 'VELS', batches: ['A'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    await service.create(
+      { dayKey: '2026-08-13', campus: 'VELS', batches: ['B'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    await service.create(
+      { dayKey: '2026-08-13', campus: 'SRM', batches: ['A'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    await service.create(
+      { dayKey: '2026-08-13', campus: 'SRM', batches: ['B'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
 
-    const day = rows.filter((r) => r.dayKey === '2026-08-13');
-    expect(day.map((r) => r.batchId).sort()).toEqual([FOUNDATION_ID, INTERMEDIATE_ID].sort());
+    expect(rows).toHaveLength(4);
+    expect(rows.map((row) => `${row.campusId}/${row.batchId}`).sort()).toEqual(
+      [
+        `${SRM}/${SRM_FOUNDATION}`,
+        `${SRM}/${SRM_INTERMEDIATE}`,
+        `${VELS}/${VELS_FOUNDATION}`,
+        `${VELS}/${VELS_INTERMEDIATE}`,
+      ].sort(),
+    );
   });
 
-  it('rejects an unknown batch selector rather than silently widening to "all"', async () => {
+  it('creates SRM/Foundation even though Vels/Foundation already has one that day', async () => {
+    // Same date, same batch *code*, different campus. Blocking here would be the
+    // cross-campus collision §9 explicitly forbids.
+    const { service, rows } = makeService({
+      existing: [assignmentRow('existing-vels-a', '2026-08-13', VELS, VELS_FOUNDATION)],
+    });
+
+    const created = await service.create(
+      { dayKey: '2026-08-13', campus: 'SRM', batches: ['foundation'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+
+    expect(created).toHaveLength(1);
+    expect(created[0]?.campusCode).toBe('SRM');
+    expect(rows).toHaveLength(2);
+  });
+
+  it('refuses a second SRM/Foundation assignment the same day, naming only that audience', async () => {
+    const { service } = makeService({
+      existing: [
+        assignmentRow('existing-srm-a', '2026-08-13', SRM, SRM_FOUNDATION),
+        assignmentRow('existing-vels-a', '2026-08-13', VELS, VELS_FOUNDATION),
+      ],
+    });
+
+    await expect(
+      service.create(
+        { dayKey: '2026-08-13', campus: 'SRM', batches: ['A'], problemUrls: PROBLEM_URLS },
+        'user-1',
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    // The error must name the audience that actually clashed, not the other campus's.
+    await service
+      .create(
+        { dayKey: '2026-08-13', campus: 'SRM', batches: ['A'], problemUrls: PROBLEM_URLS },
+        'user-1',
+      )
+      .catch((error: Error) => {
+        expect(error.message).toContain('SRM University');
+        expect(error.message).not.toContain('Vels');
+      });
+  });
+
+  it('rejects a batch that belongs to another campus rather than silently retargeting it', async () => {
+    const { service } = makeService();
+
+    await expect(
+      service.create(
+        {
+          dayKey: '2026-08-13',
+          campus: 'SRM',
+          batches: [VELS_FOUNDATION],
+          problemUrls: PROBLEM_URLS,
+        },
+        'user-1',
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('rejects an unknown campus rather than silently widening to every campus', async () => {
     const { service } = makeService();
     await expect(
-      service.create({ dayKey: '2026-08-13', batches: ['Z'], problemUrls: PROBLEM_URLS }, 'user-1'),
-    ).rejects.toBeInstanceOf(BadRequestException);
+      service.create(
+        { dayKey: '2026-08-13', campus: 'NOWHERE', batches: ['A'], problemUrls: PROBLEM_URLS },
+        'user-1',
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('refuses to assign to an archived batch', async () => {
+    const { service } = makeService({ archivedBatchIds: [SRM_PENDING] });
+    await expect(
+      service.create(
+        { dayKey: '2026-08-13', campus: 'SRM', batches: ['PENDING'], problemUrls: PROBLEM_URLS },
+        'user-1',
+      ),
+    ).rejects.toThrow(/archived/i);
   });
 });
 
-describe('AssignmentsService.create — omitted target means every active batch, all-or-nothing', () => {
-  it('creates one assignment per active batch when no target is given', async () => {
-    const { service, prisma } = makeService();
-    const created = await service.create(
-      { dayKey: '2026-08-13', problemUrls: PROBLEM_URLS },
-      'user-1',
-    );
-    expect(created).toHaveLength(2);
-    expect(created.map((a) => a.batchId).sort()).toEqual([FOUNDATION_ID, INTERMEDIATE_ID].sort());
-    expect(prisma.assignment.create).toHaveBeenCalledTimes(2);
-  });
+describe('AssignmentsService.create — widening targets', () => {
+  it('creates one whole-campus row when a campus is named with no batches', async () => {
+    const { service, rows } = makeService();
 
-  it('excludes an archived batch from "all active batches"', async () => {
-    const { service } = makeService({ activeBatchIds: [FOUNDATION_ID] });
     const created = await service.create(
-      { dayKey: '2026-08-13', problemUrls: PROBLEM_URLS },
+      { dayKey: '2026-08-13', campus: 'SRM', problemUrls: PROBLEM_URLS },
       'user-1',
     );
+
     expect(created).toHaveLength(1);
-    expect(created[0]!.batchId).toBe(FOUNDATION_ID);
+    expect(rows[0]?.campusId).toBe(SRM);
+    expect(rows[0]?.batchId).toBeNull();
   });
 
-  it('writes nothing for either batch when Intermediate alone already has a row that day', async () => {
-    const { service, prisma } = makeService({
-      existing: [
-        {
-          id: 'existing-b',
-          dayKey: '2026-08-13',
-          batchId: INTERMEDIATE_ID,
-          originalBatchId: INTERMEDIATE_ID,
-          batch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          originalBatch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
-      ],
+  it('creates exactly one "everyone" row when neither half is named', async () => {
+    // Deliberately *not* a fan-out into one row per batch. With two campuses that would
+    // manufacture five assignments from a form the admin filled in once (§10).
+    const { service, rows } = makeService();
+
+    const created = await service.create(
+      { dayKey: '2026-08-13', problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+
+    expect(created).toHaveLength(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.campusId).toBeNull();
+    expect(rows[0]?.batchId).toBeNull();
+  });
+
+  it('reports how many active students an audience reaches', async () => {
+    const { service } = makeService();
+    const created = await service.create(
+      { dayKey: '2026-08-13', campus: 'SRM', problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    // Every SRM student, regardless of batch — 92 in the fixture.
+    expect(created[0]?.studentCount).toBe(92);
+  });
+
+  it('labels the audience the way the preview renders it', async () => {
+    const { service } = makeService();
+    const created = await service.create(
+      { dayKey: '2026-08-13', campus: 'SRM', batches: ['A'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    expect(created[0]?.audienceLabel).toBe('SRM University — Foundation Level');
+  });
+
+  it('says "all campuses" explicitly rather than leaving the label half blank', async () => {
+    const { service } = makeService();
+    const created = await service.create(
+      { dayKey: '2026-08-13', problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    expect(created[0]?.audienceLabel).toBe('All campuses — All batches');
+  });
+
+  it('writes an all-or-nothing multi-batch create, or nothing at all', async () => {
+    const { service, rows } = makeService({
+      existing: [assignmentRow('existing-srm-b', '2026-08-13', SRM, SRM_INTERMEDIATE)],
     });
 
     await expect(
-      service.create({ dayKey: '2026-08-13', problemUrls: PROBLEM_URLS }, 'user-1'),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    // Nothing partial was written for Foundation either — genuinely all-or-nothing.
-    expect(prisma.assignment.create).not.toHaveBeenCalled();
+      service.create(
+        { dayKey: '2026-08-13', campus: 'SRM', batches: ['A', 'B'], problemUrls: PROBLEM_URLS },
+        'user-1',
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    // Foundation must not have been created "on the way" to discovering the clash.
+    expect(rows).toHaveLength(1);
   });
 });
 
-describe('AssignmentsService — legacy "All students" assignments keep working', () => {
-  it('a pre-batch (batchId=null) assignment still resolves for a batch with none of its own', async () => {
+describe('AssignmentsService.findByDay — resolution never crosses a campus', () => {
+  const day = '2026-08-13';
+
+  it('gives each audience its own set on a four-way day', async () => {
     const { service } = makeService({
       existing: [
-        {
-          id: 'legacy',
-          dayKey: '2026-07-01',
-          batchId: null,
-          originalBatchId: null,
-          batch: null,
-          originalBatch: null,
-          audienceChanges: [],
-          title: null,
-          topic: 'Arrays',
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
+        assignmentRow('vels-a', day, VELS, VELS_FOUNDATION),
+        assignmentRow('vels-b', day, VELS, VELS_INTERMEDIATE),
+        assignmentRow('srm-a', day, SRM, SRM_FOUNDATION),
+        assignmentRow('srm-b', day, SRM, SRM_INTERMEDIATE),
       ],
     });
 
-    const forFoundation = await service.findByDay('2026-07-01', FOUNDATION_ID);
-    const forIntermediate = await service.findByDay('2026-07-01', INTERMEDIATE_ID);
-    expect(forFoundation?.id).toBe('legacy');
-    expect(forIntermediate?.id).toBe('legacy');
+    expect(
+      (await service.findByDay(day, { campusId: VELS, batchId: VELS_FOUNDATION }))?.id,
+    ).toBe('vels-a');
+    expect(
+      (await service.findByDay(day, { campusId: SRM, batchId: SRM_FOUNDATION }))?.id,
+    ).toBe('srm-a');
+    expect(
+      (await service.findByDay(day, { campusId: SRM, batchId: SRM_INTERMEDIATE }))?.id,
+    ).toBe('srm-b');
   });
 
-  it("a batch-specific assignment wins over the legacy row for that batch, but not for the other batch's own row", async () => {
+  it('returns nothing rather than the other campus’s set', async () => {
+    // The leak that would matter most: an SRM student handed Vels' questions.
+    const { service } = makeService({
+      existing: [assignmentRow('vels-a', day, VELS, VELS_FOUNDATION)],
+    });
+
+    expect(await service.findByDay(day, { campusId: SRM, batchId: SRM_FOUNDATION })).toBeNull();
+  });
+
+  it('falls back to the campus-wide row, then to the everyone row', async () => {
     const { service } = makeService({
       existing: [
-        {
-          id: 'legacy',
-          dayKey: '2026-08-13',
-          batchId: null,
-          originalBatchId: null,
-          batch: null,
-          originalBatch: null,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
-        {
-          id: 'foundation-specific',
-          dayKey: '2026-08-13',
-          batchId: FOUNDATION_ID,
-          originalBatchId: FOUNDATION_ID,
-          batch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          originalBatch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
+        assignmentRow('everyone', day, null, null),
+        assignmentRow('srm-all', day, SRM, null),
+        assignmentRow('srm-a', day, SRM, SRM_FOUNDATION),
       ],
     });
 
-    const forFoundation = await service.findByDay('2026-08-13', FOUNDATION_ID);
-    const forIntermediate = await service.findByDay('2026-08-13', INTERMEDIATE_ID);
-    expect(forFoundation?.id).toBe('foundation-specific');
-    expect(forIntermediate?.id).toBe('legacy');
+    expect((await service.findByDay(day, { campusId: SRM, batchId: SRM_FOUNDATION }))?.id).toBe(
+      'srm-a',
+    );
+    expect(
+      (await service.findByDay(day, { campusId: SRM, batchId: SRM_INTERMEDIATE }))?.id,
+    ).toBe('srm-all');
+    expect(
+      (await service.findByDay(day, { campusId: VELS, batchId: VELS_FOUNDATION }))?.id,
+    ).toBe('everyone');
+  });
+
+  it('reaches a placement-pending student through the campus-wide row', async () => {
+    const { service } = makeService({
+      existing: [assignmentRow('srm-all', day, SRM, null)],
+    });
+    expect((await service.findByDay(day, { campusId: SRM, batchId: SRM_PENDING }))?.id).toBe(
+      'srm-all',
+    );
   });
 });
 
-describe('AssignmentsService.changeTarget — retargeting the audience', () => {
-  function existingAll(): FakeAssignment {
-    return {
-      id: 'legacy-1',
-      dayKey: '2026-08-13',
-      batchId: null,
-      originalBatchId: null,
-      batch: null,
-      originalBatch: null,
-      audienceChanges: [],
-      title: null,
-      topic: null,
-      notes: null,
-      difficulty: null,
-      createdAt: new Date(),
-      createdBy: null,
-      problems: [],
-    };
-  }
+describe('AssignmentsService.changeTarget', () => {
+  const day = '2026-08-13';
 
-  it('moves a legacy "All students" assignment to Foundation only', async () => {
-    const { service, prisma } = makeService({ existing: [existingAll()] });
+  it('retargets to another campus and records the change', async () => {
+    const { service, prisma } = makeService({
+      existing: [assignmentRow('a1', day, null, null)],
+    });
 
-    const result = await service.changeTarget(
-      'legacy-1',
-      { target: 'A' },
-      { id: 'user-1', name: 'Mentor One' },
+    const updated = await service.changeTarget(
+      'a1',
+      { campus: 'SRM', target: 'A', reason: 'Vels had a different plan' },
+      { id: 'user-1', name: 'Admin' },
     );
 
-    expect(result.batchId).toBe(FOUNDATION_ID);
+    expect(updated.campusId).toBe(SRM);
+    expect(updated.batchId).toBe(SRM_FOUNDATION);
+    // The original audience is frozen, so the UI can show "was everyone, now SRM/A".
+    expect(updated.originalCampusId).toBeNull();
+    expect(updated.originalBatchId).toBeNull();
     expect(prisma.assignmentAudienceChange.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          assignmentId: 'legacy-1',
-          fromBatchId: null,
-          toBatchId: FOUNDATION_ID,
+          toCampusId: SRM,
+          toBatchId: SRM_FOUNDATION,
+          reason: 'Vels had a different plan',
         }),
       }),
     );
   });
 
-  it('refuses to retarget onto a batch that already has a separate assignment that day', async () => {
+  it('refuses a retarget that would collide with an existing audience that day', async () => {
     const { service } = makeService({
       existing: [
-        existingAll(),
-        {
-          id: 'foundation-1',
-          dayKey: '2026-08-13',
-          batchId: FOUNDATION_ID,
-          originalBatchId: FOUNDATION_ID,
-          batch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          originalBatch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
+        assignmentRow('a1', day, VELS, VELS_FOUNDATION),
+        assignmentRow('a2', day, SRM, SRM_FOUNDATION),
       ],
     });
 
     await expect(
-      service.changeTarget('legacy-1', { target: 'A' }, { id: 'user-1', name: 'Mentor One' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+      service.changeTarget('a1', { campus: 'SRM', target: 'A' }, { id: 'u', name: 'Admin' }),
+    ).rejects.toThrow(BadRequestException);
   });
 
-  it('404s for an assignment id that does not exist', async () => {
+  it('refuses a no-op retarget', async () => {
+    const { service } = makeService({
+      existing: [assignmentRow('a1', day, SRM, SRM_FOUNDATION)],
+    });
+
+    await expect(
+      service.changeTarget('a1', { campus: 'SRM', target: 'A' }, { id: 'u', name: 'Admin' }),
+    ).rejects.toThrow(/already targets/i);
+  });
+
+  it('404s for an assignment that does not exist', async () => {
     const { service } = makeService();
     await expect(
-      service.changeTarget('missing', { target: 'A' }, { id: 'user-1', name: 'Mentor One' }),
-    ).rejects.toBeInstanceOf(NotFoundException);
+      service.changeTarget('nope', { target: 'BOTH' }, { id: 'u', name: 'Admin' }),
+    ).rejects.toThrow(NotFoundException);
   });
 });
 
-describe('AssignmentsService.findAllByDay — every batch\'s own set, side by side', () => {
-  it('returns Foundation\'s and Intermediate\'s assignments independently for the same day', async () => {
+describe('AssignmentsService.findAllByDay — the history table never merges audiences', () => {
+  const day = '2026-08-13';
+
+  it('returns SRM/Foundation and Vels/Foundation as separate rows', async () => {
+    // §11: "Do not merge these rows."
     const { service } = makeService({
       existing: [
-        {
-          id: 'a1',
-          dayKey: '2026-08-13',
-          batchId: FOUNDATION_ID,
-          originalBatchId: FOUNDATION_ID,
-          batch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          originalBatch: BATCH_DIRECTORY[FOUNDATION_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
-        {
-          id: 'b1',
-          dayKey: '2026-08-13',
-          batchId: INTERMEDIATE_ID,
-          originalBatchId: INTERMEDIATE_ID,
-          batch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          originalBatch: BATCH_DIRECTORY[INTERMEDIATE_ID]!,
-          audienceChanges: [],
-          title: null,
-          topic: null,
-          notes: null,
-          difficulty: null,
-          createdAt: new Date(),
-          createdBy: null,
-          problems: [],
-        },
+        assignmentRow('vels-a', day, VELS, VELS_FOUNDATION),
+        assignmentRow('srm-a', day, SRM, SRM_FOUNDATION),
       ],
     });
 
-    const all = await service.findAllByDay('2026-08-13');
+    const all = await service.findAllByDay(day);
     expect(all).toHaveLength(2);
-    expect(all.map((a) => a.batchId).sort()).toEqual([FOUNDATION_ID, INTERMEDIATE_ID].sort());
+    expect(all.map((row) => row.audienceLabel).sort()).toEqual([
+      'SRM University — Foundation Level',
+      'Vels Institute — Foundation Level',
+    ]);
   });
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
 });

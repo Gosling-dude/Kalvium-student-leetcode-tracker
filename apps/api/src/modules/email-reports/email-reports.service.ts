@@ -17,7 +17,7 @@ import {
 } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import {
-  batchEmailSubject,
+  scopedEmailSubject,
   type DayKey,
   type EmailReportRecord,
 } from '@dsa/shared';
@@ -43,6 +43,7 @@ type EmailReportWithNames = Prisma.EmailReportGetPayload<{
     generatedBy: { select: { name: true } };
     approvedBy: { select: { name: true } };
     batch: { select: { name: true; code: true } };
+    campus: { select: { name: true; code: true } };
   };
 }>;
 
@@ -51,6 +52,7 @@ const REPORT_INCLUDE = {
   generatedBy: { select: { name: true } },
   approvedBy: { select: { name: true } },
   batch: { select: { name: true, code: true } },
+  campus: { select: { name: true, code: true } },
 } as const;
 
 @Injectable()
@@ -78,18 +80,25 @@ export class EmailReportsService {
       throw new ConflictException(`"${dayKey}" is not a valid date (expected YYYY-MM-DD)`);
     }
 
+    const campusId = dto.campusId ?? null;
     const batchId = dto.batchId ?? null;
-    const report = await this.dailyReport.build(dayKey, { squadId: dto.squadId, batchId });
+    const report = await this.dailyReport.build(dayKey, {
+      squadId: dto.squadId,
+      campusId,
+      batchId,
+    });
 
-    // The subject names the batch, so a mentor holding two pending reports for the same
-    // day can tell them apart before opening either (§13).
+    // The subject names the campus and batch, so a mentor holding several pending reports
+    // for the same day can tell them apart before opening any (§13, §33).
     const subject =
-      dto.subject?.trim() || batchEmailSubject(dayKey, report.summary.batchName);
+      dto.subject?.trim() ||
+      scopedEmailSubject(dayKey, report.summary.campusName, report.summary.batchName);
     const bodyHtml = buildDailyReportEmailHtml(report);
 
     const row = await this.prisma.emailReport.create({
       data: {
         dayKey,
+        campusId,
         batchId,
         status: 'DRAFT',
         fromEmail: dto.fromEmail,
@@ -223,12 +232,13 @@ export class EmailReportsService {
     // legitimate but has to be deliberate, so it needs `force` — the UI turns this into
     // a confirm step.
     //
-    // Scoped to the batch on purpose: sending the Foundation report must not look like a
-    // duplicate when the Intermediate report for the same day goes out afterwards. They
-    // are different reports about different students (§13).
+    // Scoped to the campus *and* batch on purpose: sending SRM's Foundation report must
+    // not look like a duplicate when Vels' Foundation report for the same day goes out
+    // afterwards. They are different reports about different students (§13, §33).
     const priorSent = await this.prisma.emailReport.findFirst({
       where: {
         dayKey: existing.dayKey,
+        campusId: existing.campusId,
         batchId: existing.batchId,
         status: 'SENT',
         id: { not: emailReportId },
@@ -236,7 +246,8 @@ export class EmailReportsService {
       orderBy: { sentAt: 'desc' },
     });
     if (priorSent && !force) {
-      const scope = existing.batch?.name ? ` (${existing.batch.name})` : '';
+      const audience = [existing.campus?.name, existing.batch?.name].filter(Boolean).join(' — ');
+      const scope = audience ? ` (${audience})` : '';
       throw new ConflictException({
         message: `A report for ${existing.dayKey}${scope} has already been sent. Confirm to send it again.`,
         previousEmailReportId: priorSent.id,
@@ -355,12 +366,13 @@ export class EmailReportsService {
     return this.toRecord(await this.mustFind(id));
   }
 
-  async history(query: ListEmailHistoryDto & { batchId?: string | null }) {
+  async history(query: ListEmailHistoryDto & { campusId?: string | null; batchId?: string | null }) {
     const page = query.page ?? 1;
     const pageSize = Math.min(query.pageSize ?? 25, 100);
 
     const where: Prisma.EmailReportWhereInput = {
       ...(query.dayKey ? { dayKey: query.dayKey } : {}),
+      ...(query.campusId ? { campusId: query.campusId } : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
       ...(query.status ? { status: query.status as Prisma.EnumEmailReportStatusFilter['equals'] } : {}),
     };
@@ -382,14 +394,15 @@ export class EmailReportsService {
   /**
    * Whether `dayKey` already has a report sitting in the approval queue or sent.
    *
-   * Batch-scoped, so the Email Reports screen shows the state of the report the mentor
-   * is actually looking at rather than conflating Foundation's and Intermediate's.
+   * Scoped to campus and batch, so the Email Reports screen shows the state of the report
+   * the mentor is actually looking at rather than conflating SRM's Foundation with Vels'.
    */
   async statusForDay(
     dayKey: DayKey,
     batchId: string | null = null,
+    campusId: string | null = null,
   ): Promise<{ sent: EmailReportRecord | null; latest: EmailReportRecord | null }> {
-    const scope = { dayKey, batchId };
+    const scope = { dayKey, campusId, batchId };
     const [sent, latest] = await Promise.all([
       this.prisma.emailReport.findFirst({
         where: { ...scope, status: 'SENT' },
@@ -421,6 +434,9 @@ export class EmailReportsService {
     return {
       id: row.id,
       dayKey: row.dayKey,
+      campusId: row.campusId,
+      campusName: row.campus?.name ?? null,
+      campusCode: row.campus?.code ?? null,
       batchId: row.batchId,
       batchName: row.batch?.name ?? null,
       batchCode: row.batch?.code ?? null,

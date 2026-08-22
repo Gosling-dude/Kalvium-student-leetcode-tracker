@@ -17,6 +17,7 @@ import { toast } from 'sonner';
 import {
   BarChart3,
   CalendarDays,
+  ClipboardCheck,
   LayoutDashboard,
   ListChecks,
   Mail,
@@ -39,6 +40,10 @@ const NAV = [
   { href: '/leaderboard', label: 'Leaderboard', icon: Trophy },
   { href: '/students', label: 'Students', icon: Users },
   { href: '/assignments', label: 'Assignments', icon: CalendarDays },
+  // Its own top-level section, deliberately not nested under Assignments: a baseline
+  // test measures independent capability and shares no scoring, streak or leaderboard
+  // with daily practice (§18, §25).
+  { href: '/baseline-tests', label: 'Baseline Tests', icon: ClipboardCheck },
   { href: '/email-reports', label: 'Email Reports', icon: Mail },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/admin', label: 'Admin', icon: Settings },

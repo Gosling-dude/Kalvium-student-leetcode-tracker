@@ -37,15 +37,19 @@ export class ReportsService {
   ) {}
 
   /**
-   * Daily report: every student's outcome for a day, optionally narrowed to one batch
-   * and/or cohort — the batch-wise, cohort-wise and all-students exports (§5).
+   * Daily report: every student's outcome for a day, optionally narrowed to one campus,
+   * batch and/or cohort — the campus-wise, batch-wise, cohort-wise and all-students
+   * exports (§5, §12).
    */
   async dailyReport(
     dayKey?: DayKey,
-    filter: { batchId?: string | null; cohort?: number | null } = {},
+    filter: { campusId?: string | null; batchId?: string | null; cohort?: number | null } = {},
   ) {
     const day = dayKey ?? this.time.today();
-    const mentor = await this.dashboard.getMentorDashboard(day, { batchId: filter.batchId });
+    const mentor = await this.dashboard.getMentorDashboard(day, {
+      campusId: filter.campusId,
+      batchId: filter.batchId,
+    });
 
     const students = mentor.buckets
       .flatMap((bucket) => bucket.students)
@@ -53,9 +57,13 @@ export class ReportsService {
 
     return {
       dayKey: day,
+      campusId: mentor.campusId,
       batchId: mentor.batchId,
       assignment: mentor.assignment,
       sections: mentor.sections.map((section) => ({
+        campusId: section.campusId,
+        campusName: section.campusName,
+        campusCode: section.campusCode,
         batchId: section.batchId,
         batchName: section.batchName,
         batchCode: section.batchCode,

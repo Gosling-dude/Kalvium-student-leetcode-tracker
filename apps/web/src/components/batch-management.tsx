@@ -1,7 +1,13 @@
 'use client';
 
 /**
- * Batch Management (§19) — one card per batch, with the figures an admin actually acts on.
+ * Campus & Batch Management — one card per `Campus → Batch` group, with the figures an
+ * admin actually acts on.
+ *
+ * Cards are grouped under their campus heading and every action carries the campus in its
+ * link, because both campuses have a "Foundation Level": an ungrouped grid would show two
+ * identically-titled cards, and "View students" from the wrong one is a silent mistake
+ * (§12).
  *
  * Deliberately reads `GET /batches/stats` rather than assembling the numbers from the
  * students list: average completion has to be computed against each batch's *own*
@@ -16,7 +22,7 @@ import { Download, FileText, ListChecks, Users } from 'lucide-react';
 import { api, downloadFile } from '@/lib/api';
 import { formatPercent, todayKey } from '@/lib/utils';
 import { Badge, Button, Card, CardHeader, EmptyState, Skeleton } from '@/components/ui';
-import { BatchChip } from '@/components/batch-filter';
+import { BatchChip, CampusChip } from '@/components/scope-filter';
 
 export function BatchManagement() {
   const dayKey = todayKey();
@@ -24,6 +30,11 @@ export function BatchManagement() {
   const { data, isLoading } = useQuery({
     queryKey: ['batch-stats', dayKey],
     queryFn: () => api.batchStats(dayKey),
+  });
+
+  const campusStats = useQuery({
+    queryKey: ['campus-stats', dayKey],
+    queryFn: () => api.campusStats(dayKey),
   });
 
   if (isLoading) {
@@ -47,19 +58,45 @@ export function BatchManagement() {
     );
   }
 
+  // Batches arrive already ordered by campus, so grouping preserves that order.
+  const byCampus = new Map<string, typeof data>();
+  for (const batch of data) {
+    const list = byCampus.get(batch.campusId) ?? [];
+    list.push(batch);
+    byCampus.set(batch.campusId, list);
+  }
+
   return (
-    <section className="space-y-3">
+    <section className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold">Batch management</h2>
+          <h2 className="text-base font-semibold">Campus &amp; batch management</h2>
           <p className="text-sm text-[var(--color-fg-muted)]">
             Figures are for {dayKey}, each measured against that batch&rsquo;s own assignment.
           </p>
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        {data.map((batch) => (
+      {[...byCampus.entries()].map(([campusId, campusBatches]) => {
+        const campus = campusStats.data?.find((entry) => entry.id === campusId);
+        const first = campusBatches[0]!;
+        return (
+          <div key={campusId} className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
+              <CampusChip code={first.campusCode} name={first.campusName} />
+              <h3 className="text-sm font-semibold">{first.campusName}</h3>
+              {campus ? (
+                <span className="text-xs text-[var(--color-fg-muted)]">
+                  {campus.activeStudents} active
+                  {campus.pendingPlacementStudents > 0
+                    ? ` · ${campus.pendingPlacementStudents} awaiting placement`
+                    : ''}
+                </span>
+              ) : null}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {campusBatches.map((batch) => (
           <Card key={batch.id} className="p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
@@ -102,7 +139,7 @@ export function BatchManagement() {
             ) : null}
 
             <div className="mt-4 flex flex-wrap gap-2">
-              <Link href={`/students?batch=${batch.code}`}>
+              <Link href={`/students?campus=${batch.campusCode}&batch=${batch.code}`}>
                 <Button className="text-xs">
                   <Users className="size-3.5" aria-hidden />
                   View students
@@ -118,8 +155,8 @@ export function BatchManagement() {
                 className="text-xs"
                 onClick={() =>
                   void downloadFile(
-                    `/reports/export/daily?dayKey=${dayKey}&format=XLSX&batch=${batch.code}`,
-                    `daily-report-${dayKey}-${batch.code}.xlsx`,
+                    `/reports/export/daily?dayKey=${dayKey}&format=XLSX&campus=${batch.campusCode}&batch=${batch.code}`,
+                    `daily-report-${dayKey}-${batch.campusCode}-${batch.code}.xlsx`,
                   )
                 }
               >
@@ -133,9 +170,12 @@ export function BatchManagement() {
                 </Button>
               </Link>
             </div>
-          </Card>
-        ))}
-      </div>
+              </Card>
+              ))}
+            </div>
+          </div>
+        );
+      })}
     </section>
   );
 }

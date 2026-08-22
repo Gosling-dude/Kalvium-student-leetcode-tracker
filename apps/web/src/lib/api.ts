@@ -14,10 +14,16 @@ import type {
   AssignmentAudienceChangeEntry,
   AssignmentSummary,
   AuthUser,
+  BaselineAttemptSummary,
+  BaselineTestReport,
+  BaselineTestSummary,
   BatchHistoryEntry,
   BatchStats,
   BatchSummary,
   BlockerRecord,
+  CampusHistoryEntry,
+  CampusStats,
+  CampusSummary,
   DailyEmailReport,
   DashboardStats,
   SquadLeaderboardRow,
@@ -30,6 +36,7 @@ import type {
   QueueHealth,
   StudentAssignmentHistoryRow,
   StudentAssignmentView,
+  StudentBaselineTest,
   StudentDashboard,
   StudentPortalProfile,
   StudentProfile,
@@ -207,17 +214,50 @@ export const api = {
   changePassword: (currentPassword: string, newPassword: string) =>
     apiFetch<void>('/auth/change-password', { method: 'POST', body: { currentPassword, newPassword } }),
 
-  dashboard: (dayKey?: string, batch?: string) =>
-    apiFetch<DashboardStats>(`/dashboard${qs({ dayKey, batch })}`),
+  dashboard: (dayKey?: string, campus?: string, batch?: string) =>
+    apiFetch<DashboardStats>(`/dashboard${qs({ dayKey, campus, batch })}`),
 
-  mentorDashboard: (dayKey?: string, squadId?: string, batch?: string) =>
-    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, squadId, batch })}`),
+  mentorDashboard: (dayKey?: string, squadId?: string, campus?: string, batch?: string) =>
+    apiFetch<MentorDashboard>(`/mentor/dashboard${qs({ dayKey, squadId, campus, batch })}`),
+
+  // --- Campuses --------------------------------------------------------------
+
+  campuses: () => apiFetch<CampusSummary[]>('/campuses'),
+
+  campusStats: (dayKey?: string) => apiFetch<CampusStats[]>(`/campuses/stats${qs({ dayKey })}`),
+
+  /** The batches at one campus — what the campus-dependent batch picker reads. */
+  campusBatches: (campusId: string) =>
+    apiFetch<BatchSummary[]>(`/campuses/${campusId}/batches`),
+
+  campusHistory: (studentId: string) =>
+    apiFetch<CampusHistoryEntry[]>(`/students/${studentId}/campus-history`),
+
+  transferStudentCampus: (
+    studentId: string,
+    toCampusId: string,
+    toBatchId?: string,
+    reason?: string,
+  ) =>
+    apiFetch<{
+      studentId: string;
+      name: string;
+      fromCampusId: string | null;
+      toCampusId: string;
+      fromBatchId: string | null;
+      toBatchId: string | null;
+      history: CampusHistoryEntry[];
+    }>(`/students/${studentId}/transfer-campus`, {
+      method: 'POST',
+      body: { toCampusId, toBatchId, reason },
+    }),
 
   // --- Batches ---------------------------------------------------------------
 
-  batches: () => apiFetch<BatchSummary[]>('/batches'),
+  batches: (campus?: string) => apiFetch<BatchSummary[]>(`/batches${qs({ campus })}`),
 
-  batchStats: (dayKey?: string) => apiFetch<BatchStats[]>(`/batches/stats${qs({ dayKey })}`),
+  batchStats: (dayKey?: string, campus?: string) =>
+    apiFetch<BatchStats[]>(`/batches/stats${qs({ dayKey, campus })}`),
 
   batchHistory: (studentId: string) =>
     apiFetch<BatchHistoryEntry[]>(`/students/${studentId}/batch-history`),
@@ -238,8 +278,16 @@ export const api = {
 
   studentFilters: () =>
     apiFetch<{
+      campuses: CampusSummary[];
       batches: BatchSummary[];
-      squads: { id: string; name: string; batchName: string | null; studentCount: number }[];
+      squads: {
+        id: string;
+        name: string;
+        campusId: string | null;
+        batchName: string | null;
+        studentCount: number;
+      }[];
+      squadNumbers: { campusId: string | null; number: number; label: string }[];
     }>('/students/filters'),
 
   createStudent: (body: unknown) =>
@@ -262,14 +310,14 @@ export const api = {
   assignments: (params: Record<string, string | number | undefined>) =>
     apiFetch<Paginated<AssignmentSummary>>(`/assignments${qs(params)}`),
 
-  /** Without a batch this returns every batch's set for today. */
-  todayAssignment: (batch?: string) =>
+  /** Without a batch this returns every matching audience's set for today. */
+  todayAssignment: (campus?: string, batch?: string) =>
     batch
-      ? apiFetch<AssignmentSummary | null>(`/assignments/today${qs({ batch })}`)
-      : apiFetch<AssignmentSummary[]>('/assignments/today'),
+      ? apiFetch<AssignmentSummary | null>(`/assignments/today${qs({ campus, batch })}`)
+      : apiFetch<AssignmentSummary[]>(`/assignments/today${qs({ campus })}`),
 
-  assignmentsForDay: (dayKey: string) =>
-    apiFetch<AssignmentSummary[]>(`/assignments/day/${dayKey}`),
+  assignmentsForDay: (dayKey: string, campus?: string, batch?: string) =>
+    apiFetch<AssignmentSummary[]>(`/assignments/day/${dayKey}${qs({ campus, batch })}`),
 
   /** Returns one assignment per batch targeted. */
   createAssignment: (body: unknown) =>
@@ -281,11 +329,15 @@ export const api = {
       { method: 'POST', body: { url } },
     ),
 
-  /** "Change Assignment Target" (§9) — admin only. `target` is a batch id/code or "BOTH". */
-  changeAssignmentTarget: (id: string, target: string, reason?: string) =>
+  /**
+   * "Change Assignment Target" (§9) — admin only.
+   *
+   * `campus` is a campus id/code or "ALL"; `target` is a batch id/code or "BOTH".
+   */
+  changeAssignmentTarget: (id: string, campus: string, target: string, reason?: string) =>
     apiFetch<AssignmentSummary>(`/assignments/${id}/target`, {
       method: 'PATCH',
-      body: { target, reason },
+      body: { campus, target, reason },
     }),
 
   assignmentTargetHistory: (id: string) =>
@@ -297,8 +349,8 @@ export const api = {
   squadLeaderboard: (params: Record<string, string | number | undefined>) =>
     apiFetch<SquadLeaderboardRow[]>(`/leaderboard/squads${qs(params)}`),
 
-  analytics: (from?: string, to?: string, batch?: string) =>
-    apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to, batch })}`),
+  analytics: (from?: string, to?: string, campus?: string, batch?: string) =>
+    apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to, campus, batch })}`),
 
   startSync: (body: { mode?: string; dayKey?: string } = {}) =>
     apiFetch<SyncJobSummary>('/sync', { method: 'POST', body }),
@@ -328,8 +380,8 @@ export const api = {
 
   // --- Daily email reporting -------------------------------------------------
 
-  dailyEmailReport: (dayKey: string, squadId?: string, batch?: string) =>
-    apiFetch<DailyEmailReport>(`/reports/daily/${dayKey}${qs({ squadId, batch })}`),
+  dailyEmailReport: (dayKey: string, squadId?: string, campus?: string, batch?: string) =>
+    apiFetch<DailyEmailReport>(`/reports/daily/${dayKey}${qs({ squadId, campus, batch })}`),
 
   generateEmail: (
     dayKey: string,
@@ -338,6 +390,8 @@ export const api = {
       toRecipients: string[];
       ccRecipients?: string[];
       subject?: string;
+      /** Omit for every campus; supply to generate a single campus's report (§33). */
+      campusId?: string;
       /** Omit for the overall report; supply to generate a single batch's report. */
       batchId?: string;
     },
@@ -361,13 +415,20 @@ export const api = {
     }),
 
   emailHistory: (
-    params: { dayKey?: string; status?: string; batch?: string; page?: number; pageSize?: number } = {},
+    params: {
+      dayKey?: string;
+      status?: string;
+      campus?: string;
+      batch?: string;
+      page?: number;
+      pageSize?: number;
+    } = {},
   ) =>
     apiFetch<Paginated<EmailReportRecord>>(`/reports/email/history${qs(params)}`),
 
-  emailStatus: (dayKey: string, batch?: string) =>
+  emailStatus: (dayKey: string, campus?: string, batch?: string) =>
     apiFetch<{ sent: EmailReportRecord | null; latest: EmailReportRecord | null }>(
-      `/reports/email/status${qs({ dayKey, batch })}`,
+      `/reports/email/status${qs({ dayKey, campus, batch })}`,
     ),
 
   emailReport: (id: string) => apiFetch<EmailReportRecord>(`/reports/email/${id}`),
@@ -408,10 +469,78 @@ export const api = {
   studentAssignment: (id: string) =>
     apiFetch<StudentAssignmentView>(`/student/assignments/${id}`),
 
-  studentLeaderboard: (period: 'DAILY' | 'WEEKLY' | 'MONTHLY', scope: 'mine' | 'all') =>
-    apiFetch<{ rows: LeaderboardRow[]; myStudentId: string }>(
+  /**
+   * `scope` is the *only* thing a student can vary — never a campus or batch id. See
+   * `StudentLeaderboardQueryDto`: the ids come from their own record, server-side (§40).
+   */
+  studentLeaderboard: (
+    period: 'DAILY' | 'WEEKLY' | 'MONTHLY',
+    scope: 'mine' | 'campus' | 'global',
+  ) =>
+    apiFetch<{ rows: LeaderboardRow[]; myStudentId: string; scope: string }>(
       `/student/leaderboard${qs({ period, scope })}`,
     ),
+
+  // --- Baseline tests ------------------------------------------------------------
+
+  baselineTests: (
+    params: { status?: string; campus?: string; batch?: string; from?: string; to?: string } = {},
+  ) => apiFetch<BaselineTestSummary[]>(`/baseline-tests${qs(params)}`),
+
+  baselineTest: (id: string) => apiFetch<BaselineTestSummary>(`/baseline-tests/${id}`),
+
+  baselineTestReport: (id: string) =>
+    apiFetch<BaselineTestReport>(`/baseline-tests/${id}/report`),
+
+  baselineTestAttempts: (id: string) =>
+    apiFetch<BaselineAttemptSummary[]>(`/baseline-tests/${id}/attempts`),
+
+  createBaselineTest: (body: unknown) =>
+    apiFetch<BaselineTestSummary>('/baseline-tests', { method: 'POST', body }),
+
+  updateBaselineTest: (id: string, body: unknown) =>
+    apiFetch<BaselineTestSummary>(`/baseline-tests/${id}`, { method: 'PATCH', body }),
+
+  duplicateBaselineTest: (id: string) =>
+    apiFetch<BaselineTestSummary>(`/baseline-tests/${id}/duplicate`, { method: 'POST' }),
+
+  publishBaselineTest: (id: string) =>
+    apiFetch<BaselineTestSummary>(`/baseline-tests/${id}/publish`, { method: 'POST' }),
+
+  closeBaselineTest: (id: string) =>
+    apiFetch<BaselineTestSummary>(`/baseline-tests/${id}/close`, { method: 'POST' }),
+
+  gradeBaselineTest: (id: string) =>
+    apiFetch<{ graded: number }>(`/baseline-tests/${id}/grade`, { method: 'POST' }),
+
+  reviewBaselineAttempt: (
+    attemptId: string,
+    reviewStatus: 'NOT_REVIEWED' | 'REVIEW_REQUIRED' | 'REVIEWED',
+    note?: string,
+  ) =>
+    apiFetch<BaselineAttemptSummary>(`/baseline-tests/attempts/${attemptId}/review`, {
+      method: 'PATCH',
+      body: { reviewStatus, note },
+    }),
+
+  deleteBaselineTest: (id: string) =>
+    apiFetch<void>(`/baseline-tests/${id}`, { method: 'DELETE' }),
+
+  // --- Baseline tests: student ---------------------------------------------------
+  //
+  // Scoped to the session like every other student route. No campus, batch or student id
+  // is ever a parameter here.
+
+  studentBaselineTests: () => apiFetch<StudentBaselineTest[]>('/student/baseline-tests'),
+
+  studentBaselineTest: (id: string) =>
+    apiFetch<StudentBaselineTest>(`/student/baseline-tests/${id}`),
+
+  startBaselineTest: (id: string) =>
+    apiFetch<StudentBaselineTest>(`/student/baseline-tests/${id}/start`, { method: 'POST' }),
+
+  submitBaselineTest: (id: string) =>
+    apiFetch<StudentBaselineTest>(`/student/baseline-tests/${id}/submit`, { method: 'POST' }),
 
   // --- Admin: student portal accounts -------------------------------------------
 

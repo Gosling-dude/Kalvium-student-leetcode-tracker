@@ -82,9 +82,18 @@ enum BatchStatus {
   ARCHIVED
 }
 
-/// What caused a `StudentBatchHistory` row. Distinguishes a mentor's deliberate move
-/// from the roster loader's initial placement, which matters when auditing why a
-/// student's batch changed.
+/// Lifecycle of a campus. Mirrors `BatchStatus` deliberately: an archived campus stops
+/// appearing in pickers, "all campuses" aggregates and new assignment targets, but keeps
+/// owning every student, batch, assignment and result it ever had. A campus is never
+/// deleted — doing so would orphan years of history.
+enum CampusStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+/// What caused a `StudentBatchHistory` or `StudentCampusHistory` row. Distinguishes a
+/// mentor's deliberate move from the roster loader's initial placement, which matters
+/// when auditing why a student's batch or campus changed.
 enum BatchChangeSource {
   MANUAL
   ROSTER_SYNC
@@ -244,6 +253,9 @@ model User {
   emailReportsGenerated     EmailReport[]              @relation("EmailReportGeneratedBy")
   emailReportsApproved      EmailReport[]              @relation("EmailReportApprovedBy")
   batchChanges              StudentBatchHistory[]      @relation("BatchChangedBy")
+  campusChanges             StudentCampusHistory[]     @relation("CampusChangedBy")
+  baselineTestsCreated      BaselineTest[]             @relation("BaselineTestAuthor")
+  baselineAttemptsReviewed  BaselineTestAttempt[]      @relation("BaselineAttemptReviewer")
   assignmentAudienceChanges AssignmentAudienceChange[] @relation("AssignmentAudienceChangedBy")
 
   @@index([role])
@@ -309,26 +321,83 @@ model ApiKey {
 }
 
 // ---------------------------------------------------------------------------
-// Cohort structure
+// Campus, cohort structure
 // ---------------------------------------------------------------------------
 
-/// A batch is a first-class organisational unit, not a label on a student.
+/// A campus is the outermost organisational unit: `Campus → Batch → Student`.
 ///
-/// Two exist today — `A` (Foundation Level) and `B` (Intermediate Level) — but nothing
-/// in the schema or the code below it assumes that number. Batches are looked up by
-/// `code` at the edges (URLs, CSV columns, filter chips) and carried as `batchId`
-/// everywhere else, so adding `C` is a row in this table plus nothing else.
+/// It exists as a table rather than a string column on `Student` for the same reason
+/// `Batch` does: campuses own things. A campus owns its batches (VELS/Foundation and
+/// SRM/Foundation are *different* groups, not one shared batch), it scopes assignments
+/// and baseline tests, and it is the unit every filter, leaderboard and report can be
+/// narrowed to. Nothing below this model hard-codes a campus name or code — adding a
+/// third campus is a row in this table plus a batch row per level.
+///
+/// `code` is the short stable key used in URLs and filter chips (`VELS`, `SRM`), stored
+/// uppercase and compared case-insensitively at the edges.
+model Campus {
+  id          String       @id @default(uuid()) @db.Uuid
+  /// Full institutional name, e.g. "Vels Institute of Science, Technology & Advanced Studies".
+  name        String       @unique
+  /// Short stable key used in URLs, filters and imports, e.g. "VELS".
+  code        String       @unique
+  description String?
+  status      CampusStatus @default(ACTIVE)
+  /// Display order for pickers and reports, so the founding campus leads regardless of
+  /// name or insertion order.
+  sortOrder   Int          @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batches             Batch[]
+  squads              Squad[]
+  students            Student[]
+  assignments         Assignment[]
+  assignmentsOriginal Assignment[]               @relation("AssignmentOriginalCampus")
+  dailyStatuses       DailyStatus[]
+  leaderboardEntries  LeaderboardEntry[]
+  emailReports        EmailReport[]
+  baselineTests       BaselineTest[]
+  baselineAttempts    BaselineTestAttempt[]
+  movementsFrom       StudentCampusHistory[]     @relation("CampusMovedFrom")
+  movementsTo         StudentCampusHistory[]     @relation("CampusMovedTo")
+  audienceChangesFrom AssignmentAudienceChange[] @relation("AssignmentAudienceCampusFrom")
+  audienceChangesTo   AssignmentAudienceChange[] @relation("AssignmentAudienceCampusTo")
+
+  @@index([status])
+  @@index([sortOrder])
+  @@map("campuses")
+}
+
+/// A batch is a first-class organisational unit, not a label on a student, and it is
+/// **campus-scoped**: `VELS/A` and `SRM/A` are two different batches that happen to
+/// share a code and a name.
+///
+/// That scoping is deliberate (§8). One global "Foundation" row shared by every campus
+/// would make `Assignment.batchId` ambiguous — an assignment targeting Foundation could
+/// not say *which campus's* Foundation it meant, and a campus filter would have to be
+/// re-derived from the students rather than read from the row. Every batch therefore
+/// belongs to exactly one campus, and `campusId` is `NOT NULL`.
+///
+/// `code` is unique *per campus*, not globally, for the same reason. Batches are looked
+/// up by `(campus, code)` at the edges (URLs, CSV columns, filter chips) and carried as
+/// `batchId` everywhere else, so adding a level — or a campus — is rows in these two
+/// tables plus nothing else.
 ///
 /// A batch owns its own assignments: two batches can have entirely different problem
 /// sets on the same day, and a student is only ever evaluated against the set belonging
 /// to the batch *they were in on that day* (see `DailyStatus.batchId`).
 model Batch {
   id          String      @id @default(uuid()) @db.Uuid
-  /// Human-readable, e.g. "Foundation Level".
-  name        String      @unique
+  /// The campus this batch belongs to. Required: a batch with no campus could not be
+  /// filtered, targeted or reported on without guessing.
+  campusId    String      @db.Uuid
+  /// Human-readable, e.g. "Foundation Level". Unique within a campus, not globally.
+  name        String
   /// Short stable key used in URLs, filters and the roster CSV, e.g. "A". Compared
-  /// case-insensitively at the edges and stored uppercase.
-  code        String      @unique
+  /// case-insensitively at the edges and stored uppercase. Unique within a campus.
+  code        String
   description String?
   status      BatchStatus @default(ACTIVE)
   /// Display order for pickers and reports, so Foundation always precedes Intermediate
@@ -344,6 +413,7 @@ model Batch {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  campus                        Campus                     @relation(fields: [campusId], references: [id], onDelete: Restrict)
   students                      Student[]
   squads                        Squad[]
   assignments                   Assignment[]
@@ -351,19 +421,30 @@ model Batch {
   dailyStatuses                 DailyStatus[]
   leaderboardEntries            LeaderboardEntry[]
   emailReports                  EmailReport[]
+  baselineTests                 BaselineTest[]
+  baselineAttempts              BaselineTestAttempt[]
   movementsFrom                 StudentBatchHistory[]      @relation("BatchMovedFrom")
   movementsTo                   StudentBatchHistory[]      @relation("BatchMovedTo")
   assignmentAudienceChangesFrom AssignmentAudienceChange[] @relation("AssignmentAudienceFrom")
   assignmentAudienceChangesTo   AssignmentAudienceChange[] @relation("AssignmentAudienceTo")
 
+  /// Campus-scoped uniqueness — see the model comment. `VELS/A` and `SRM/A` coexist.
+  @@unique([campusId, code])
+  @@unique([campusId, name])
   @@index([isActive])
   @@index([status])
+  @@index([campusId, status, sortOrder])
   @@map("batches")
 }
 
 model Squad {
   id       String  @id @default(uuid()) @db.Uuid
   name     String
+  /// The campus this squad belongs to. Denormalised from `batch.campusId` rather than
+  /// derived, because a squad can exist before it has a batch: SRM's squads arrive from
+  /// the roster while every student is still awaiting placement, so there is no batch to
+  /// read a campus from. Backfilled from the batch for every pre-campus squad.
+  campusId String? @db.Uuid
   batchId  String? @db.Uuid
   mentorId String? @db.Uuid
   color    String?
@@ -373,6 +454,7 @@ model Squad {
   updatedAt DateTime @updatedAt
 
   batch    Batch?                  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus   Campus?                 @relation(fields: [campusId], references: [id], onDelete: SetNull)
   mentor   User?                   @relation("SquadMentor", fields: [mentorId], references: [id], onDelete: SetNull)
   students Student[]
   entries  SquadLeaderboardEntry[]
@@ -385,7 +467,13 @@ model Squad {
   /// (`StudentImportService`, `prisma/seed-students.ts`) therefore looks a squad up
   /// by `(name, batchId)` before creating one.
   @@unique([batchId, name])
+  /// Squad numbers are reused across campuses (SRM has "Squad 83", Vels has "Squad 8"),
+  /// so squad identity is campus-scoped too. Batch-less squads — SRM's, until placement
+  /// happens — are looked up by `(campusId, name)`; the constraint above cannot cover
+  /// them because Postgres treats NULL `batch_id` values as distinct.
+  @@unique([campusId, name])
   @@index([mentorId])
+  @@index([campusId])
   @@map("squads")
 }
 
@@ -412,9 +500,25 @@ model Student {
   status              StudentStatus @default(ACTIVE)
   avatarUrl           String?
 
+  /// The campus the student is in *now*. Exactly the same contract as `batchId`
+  /// below: historical placement lives in `StudentCampusHistory` and in
+  /// `DailyStatus.campusId`, and a past day's campus is never re-derived from this
+  /// column. A student transferred from Vels to SRM on 20 Aug still belongs to Vels in
+  /// every report about 10 Aug (§17).
+  ///
+  /// Nullable for the same reason `batchId` is: the column has to exist before every row
+  /// has a value, and Prisma cannot add a required foreign key to a populated table
+  /// without a default. Every row is backfilled by the campus migration and every write
+  /// path sets it, so "no campus" is not a state the application produces.
+  campusId String? @db.Uuid
+
   /// The batch the student is in *now*. Historical placement lives in
   /// `StudentBatchHistory` and in `DailyStatus.batchId` — never re-derive a past day's
   /// batch from this column, which changes whenever a mentor moves someone.
+  ///
+  /// Invariant: when both are set, `batch.campusId === campusId`. Enforced by every
+  /// write path (`BatchesService.moveStudent` rejects a cross-campus batch) rather than
+  /// by a database constraint, because Postgres cannot express it without a trigger.
   batchId String? @db.Uuid
   squadId String? @db.Uuid
 
@@ -448,29 +552,39 @@ model Student {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch         Batch?                @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  squad         Squad?                @relation(fields: [squadId], references: [id], onDelete: SetNull)
-  submissions   Submission[]
-  dailyStatuses DailyStatus[]
-  syncState     StudentSyncState?
-  notes         MentorNote[]
-  achievements  StudentAchievement[]
-  entries       LeaderboardEntry[]
-  notifications NotificationLog[]
-  blockers      Blocker[]
-  batchHistory  StudentBatchHistory[]
+  batch            Batch?                 @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus           Campus?                @relation(fields: [campusId], references: [id], onDelete: SetNull)
+  squad            Squad?                 @relation(fields: [squadId], references: [id], onDelete: SetNull)
+  campusHistory    StudentCampusHistory[]
+  baselineAttempts BaselineTestAttempt[]
+  submissions      Submission[]
+  dailyStatuses    DailyStatus[]
+  syncState        StudentSyncState?
+  notes            MentorNote[]
+  achievements     StudentAchievement[]
+  entries          LeaderboardEntry[]
+  notifications    NotificationLog[]
+  blockers         Blocker[]
+  batchHistory     StudentBatchHistory[]
   /// The student's own login, if one has been provisioned (§ student portal). Optional —
   /// a student can exist on the roster for a long time before anyone provisions their
   /// portal access, exactly like `leetcodeUsername`.
-  user          User?
+  user             User?
 
   @@index([squadId])
   @@index([batchId])
+  @@index([campusId])
   @@index([status])
   @@index([name])
   @@index([cohort])
   /// The shape of nearly every current-roster query: active students in one batch.
   @@index([status, batchId])
+  /// The campus-filtered equivalents. `(status, campusId, batchId)` covers the full
+  /// `Campus → Batch` drill-down — global, campus-only and campus+batch all read the
+  /// same index, which is what keeps the directory and leaderboards from degrading as a
+  /// second campus multiplies the roster (§27).
+  @@index([status, campusId])
+  @@index([status, campusId, batchId])
   @@map("students")
 }
 
@@ -520,6 +634,51 @@ model StudentBatchHistory {
   @@map("student_batch_history")
 }
 
+/// Immutable log of every campus a student has ever belonged to.
+///
+/// The campus twin of `StudentBatchHistory`, with the same append-only contract and the
+/// same `effectiveFromDayKey` semantics, because it answers the same class of question:
+/// "which campus was this student in on 10 Aug?" must keep returning Vels after they
+/// transfer to SRM on 20 Aug (§17). Campus transfers are rarer than batch moves, but a
+/// rare rewrite of history is still a rewrite.
+///
+/// Kept as a separate table rather than extra columns on `StudentBatchHistory` because
+/// the two events are independent: moving Foundation → Intermediate within one campus
+/// must not manufacture a campus-change row, and a campus transfer that keeps the level
+/// must not manufacture a batch row that says "moved from Foundation to Foundation".
+model StudentCampusHistory {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @db.Uuid
+
+  /// Null for the very first placement — the student came from outside the programme,
+  /// or predates campuses entirely.
+  fromCampusId String? @db.Uuid
+  toCampusId   String? @db.Uuid
+
+  /// The program day this placement takes effect, inclusive.
+  effectiveFromDayKey String
+
+  reason String?
+  source BatchChangeSource @default(MANUAL)
+
+  changedById   String? @db.Uuid
+  /// Denormalised so the history still reads correctly after a mentor account is deleted.
+  changedByName String?
+
+  changedAt DateTime @default(now())
+
+  student    Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  fromCampus Campus? @relation("CampusMovedFrom", fields: [fromCampusId], references: [id], onDelete: SetNull)
+  toCampus   Campus? @relation("CampusMovedTo", fields: [toCampusId], references: [id], onDelete: SetNull)
+  changedBy  User?   @relation("CampusChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  /// The resolver's access path: newest placement at or before a given day.
+  @@index([studentId, effectiveFromDayKey])
+  @@index([toCampusId])
+  @@index([changedAt])
+  @@map("student_campus_history")
+}
+
 // ---------------------------------------------------------------------------
 // Problems & assignments
 // ---------------------------------------------------------------------------
@@ -546,45 +705,59 @@ model Problem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  assignmentProblems AssignmentProblem[]
-  submissions        Submission[]
-  problemStatuses    DailyProblemStatus[]
+  assignmentProblems   AssignmentProblem[]
+  submissions          Submission[]
+  problemStatuses      DailyProblemStatus[]
+  baselineTestProblems BaselineTestProblem[]
+  baselineResults      BaselineTestProblemResult[]
 
   @@index([difficulty])
   @@map("problems")
 }
 
-/// One day's problem set *for one batch*.
+/// One day's problem set for one **campus + batch** audience.
 ///
-/// The unique key is `(dayKey, batchId)`, not `dayKey`: Foundation and Intermediate get
-/// different questions on the same date, and a student is evaluated only against their
-/// own batch's row.
+/// The unique key is `(dayKey, campusId, batchId)`, not `dayKey`: the same calendar date
+/// legitimately carries four independent problem sets — Vels/Foundation, Vels/Intermediate,
+/// SRM/Foundation, SRM/Intermediate — and a student is evaluated only against the row for
+/// the campus and batch *they were in that day*.
 ///
-/// `batchId` is nullable, and null means something specific and permanent: this
-/// assignment predates batches and applied to everybody. Those rows are never
-/// retro-assigned to a batch — doing so would be exactly the historical rewrite §7
-/// forbids. Resolution is therefore "the row for the student's batch that day, falling
-/// back to the legacy batch-less row", which is correct in both eras.
+/// Both scope columns are nullable, and null is a widening, not a gap:
 ///
-/// Postgres treats NULLs as distinct in a unique index, so `@@unique([dayKey, batchId])`
-/// alone would still permit two legacy rows for one day. A partial unique index on
-/// `day_key WHERE batch_id IS NULL` closes that gap — see the migration.
+///  * `batchId = NULL` — every batch inside `campusId`.
+///  * `campusId = NULL` **and** `batchId = NULL` — every student everywhere. This is also
+///    exactly what the pre-campus, pre-batch legacy rows mean, which is why they need no
+///    retro-stamping: they applied to everybody at the time and they still do.
+///
+/// `campusId = NULL` with a non-null `batchId` is not a legal combination and is rejected
+/// by `AssignmentsService`: a batch already names its campus, so the pair would be able to
+/// disagree with itself. Legacy rows that had a batch before campuses existed are backfilled
+/// to that batch's campus by the migration, which is not a reinterpretation — Vels was the
+/// only campus then, so "Foundation" meant "Vels Foundation" (§38).
+///
+/// Postgres treats NULLs as distinct in a unique index, so `@@unique([dayKey, campusId,
+/// batchId])` alone would still permit two rows for the same widened audience. Partial
+/// unique indexes covering each NULL combination close that gap — see the migration.
 model Assignment {
   id     String @id @default(uuid()) @db.Uuid
   /// `YYYY-MM-DD` in the program timezone.
   dayKey String
 
-  batchId String? @db.Uuid
+  /// The campus this assignment targets; null means every campus. Always equal to
+  /// `batch.campusId` when `batchId` is set.
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
 
   /// The audience this assignment was created with, frozen forever once set (first write
-  /// wins — see the migration). `batchId` is the *current* administrative target and may
-  /// be changed later via "Change Assignment Target" (§9); `originalBatchId` is what the
-  /// UI shows as "originally assigned to" so a retarget is visible rather than silently
-  /// rewriting what actually happened. Historical evaluation does not depend on either
-  /// column directly — `DailyStatus.assignmentId` is frozen to this row's id the first
-  /// time a day is computed, so retargeting never changes what a past day was scored
-  /// against (see `RollupService.persistDailyStatus`).
-  originalBatchId String? @db.Uuid
+  /// wins — see the migration). `campusId`/`batchId` are the *current* administrative
+  /// target and may be changed later via "Change Assignment Target" (§9); the `original*`
+  /// columns are what the UI shows as "originally assigned to" so a retarget is visible
+  /// rather than silently rewriting what actually happened. Historical evaluation does not
+  /// depend on any of these columns directly — `DailyStatus.assignmentId` is frozen to this
+  /// row's id the first time a day is computed, so retargeting never changes what a past day
+  /// was scored against (see `RollupService.persistDailyStatus`).
+  originalCampusId String? @db.Uuid
+  originalBatchId  String? @db.Uuid
 
   title       String?
   topic       String?
@@ -600,14 +773,19 @@ model Assignment {
 
   createdBy       User?                      @relation("AssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
   batch           Batch?                     @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  campus          Campus?                    @relation(fields: [campusId], references: [id], onDelete: Restrict)
   originalBatch   Batch?                     @relation("AssignmentOriginalBatch", fields: [originalBatchId], references: [id], onDelete: SetNull)
+  originalCampus  Campus?                    @relation("AssignmentOriginalCampus", fields: [originalCampusId], references: [id], onDelete: SetNull)
   problems        AssignmentProblem[]
   dailyStatuses   DailyStatus[]
   audienceChanges AssignmentAudienceChange[]
 
-  @@unique([dayKey, batchId])
+  @@unique([dayKey, campusId, batchId])
   @@index([dayKey])
   @@index([batchId, dayKey])
+  /// The daily resolver's access path: one day, narrowed to one campus's rows.
+  @@index([campusId, dayKey])
+  @@index([campusId, batchId, dayKey])
   @@map("assignments")
 }
 
@@ -623,6 +801,8 @@ model Assignment {
 model AssignmentAudienceChange {
   id           String  @id @default(uuid()) @db.Uuid
   assignmentId String  @db.Uuid
+  fromCampusId String? @db.Uuid
+  toCampusId   String? @db.Uuid
   fromBatchId  String? @db.Uuid
   toBatchId    String? @db.Uuid
   reason       String?
@@ -636,6 +816,8 @@ model AssignmentAudienceChange {
   assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   fromBatch  Batch?     @relation("AssignmentAudienceFrom", fields: [fromBatchId], references: [id], onDelete: SetNull)
   toBatch    Batch?     @relation("AssignmentAudienceTo", fields: [toBatchId], references: [id], onDelete: SetNull)
+  fromCampus Campus?    @relation("AssignmentAudienceCampusFrom", fields: [fromCampusId], references: [id], onDelete: SetNull)
+  toCampus   Campus?    @relation("AssignmentAudienceCampusTo", fields: [toCampusId], references: [id], onDelete: SetNull)
   changedBy  User?      @relation("AssignmentAudienceChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
 
   @@index([assignmentId, changedAt])
@@ -709,6 +891,10 @@ model Submission {
   /// Assignment completion over the lookback window: a day-range scan narrowed to the
   /// handful of assigned slugs, for every student at once.
   @@index([dayKey, titleSlug])
+  /// Baseline grading: one student's submissions inside a wall-clock test window,
+  /// narrowed to the test's slugs. Timestamps rather than `dayKey`, because a test
+  /// window is bounded by `opensAt`/`closesAt`, not by a program day.
+  @@index([studentId, submittedAt, titleSlug])
   @@map("submissions")
 }
 
@@ -770,15 +956,17 @@ model DailyStatus {
   dayKey       String
   assignmentId String? @db.Uuid
 
-  /// The batch this student was in *on this day* — a historical fact, frozen.
+  /// The campus and batch this student was in *on this day* — historical facts, frozen.
   ///
-  /// This column is the reason a batch move cannot rewrite the past. The rollup writes
-  /// it only when it is still null (see `RollupService.persistDailyStatus`); once set it
-  /// is never updated, so recomputing 10 Aug after a 15 Aug move still reports 10 Aug
-  /// under the batch the student was actually in. Null on rows written before batches
-  /// existed, which is why batch-filtered history is explicit about the pre-batch era
-  /// rather than silently attributing it to a batch that did not exist yet.
-  batchId String? @db.Uuid
+  /// These columns are the reason a batch move or a campus transfer cannot rewrite the
+  /// past. The rollup writes each only when it is still null (see
+  /// `RollupService.persistDailyStatus`); once set neither is updated, so recomputing
+  /// 10 Aug after a 15 Aug move still reports 10 Aug under the campus and batch the
+  /// student was actually in. Null on rows written before campuses/batches existed,
+  /// which is why scoped history is explicit about the pre-campus era rather than
+  /// silently attributing it to a campus that did not exist yet.
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
 
   assignedCount Int @default(0)
   solvedCount   Int @default(0)
@@ -809,6 +997,7 @@ model DailyStatus {
   student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
   assignment      Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   batch           Batch?               @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus          Campus?              @relation(fields: [campusId], references: [id], onDelete: SetNull)
   problemStatuses DailyProblemStatus[]
 
   @@unique([studentId, dayKey])
@@ -818,6 +1007,13 @@ model DailyStatus {
   @@index([dayKey, score])
   /// The daily tracker's query: one day, one batch, bucketed by solved count.
   @@index([dayKey, batchId])
+  /// The campus-scoped equivalents — one day narrowed to a campus, or to a campus+batch.
+  @@index([dayKey, campusId])
+  @@index([dayKey, campusId, batchId])
+  /// "When was this day last computed?" — how a sync discovers that an assignment was
+  /// entered after its own date and the day was never re-evaluated. Descending so the
+  /// planner takes the newest row per day and stops instead of aggregating the whole day.
+  @@index([dayKey, computedAt(sort: Desc)])
   @@map("daily_statuses")
 }
 
@@ -859,12 +1055,32 @@ model LeaderboardEntry {
   periodKey String
   studentId String            @db.Uuid
 
-  /// The batch the student was ranked *as part of* when this snapshot was built.
-  /// Snapshotted rather than joined through `Student.batchId` so a later batch move
-  /// leaves past leaderboards historically correct — the point of materialising ranks
-  /// in the first place.
-  batchId String? @db.Uuid
+  /// The campus and batch the student was ranked *as part of* when this snapshot was
+  /// built. Snapshotted rather than joined through `Student.campusId`/`batchId` so a
+  /// later move leaves past leaderboards historically correct — the point of
+  /// materialising ranks in the first place.
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
 
+  /// The student's rank across **every** campus for this period.
+  ///
+  /// Stored beside `rank` rather than derived from it, because neither can produce the
+  /// other: interleaving per-campus positions is not the same ordering as ranking every
+  /// student together, and a global list cannot be read as a campus list without
+  /// re-numbering it (§14). Both are computed from the same underlying scores in
+  /// `RollupService.buildLeaderboard`, which is what lets a Vels student and an SRM
+  /// student sit at #1 and #2 globally while each also leads their own campus.
+  ///
+  /// Nullable only for snapshots written before campuses existed; the migration
+  /// backfills those from `rank`, which was a global rank at the time.
+  globalRank Int?
+
+  /// The student's rank **within their own campus** for this period.
+  ///
+  /// Batch-level ranks are deliberately not stored: a third column would have to be
+  /// recomputed whenever anyone moved batch, and the leaderboard service can re-rank a
+  /// campus's snapshot rows in memory far more cheaply than the schema can keep a third
+  /// materialised ordering honest.
   rank             Int
   previousRank     Int?
   score            Int     @default(0)
@@ -878,11 +1094,17 @@ model LeaderboardEntry {
 
   student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
   batch   Batch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus  Campus? @relation(fields: [campusId], references: [id], onDelete: SetNull)
 
   @@unique([period, periodKey, studentId])
   @@index([period, periodKey, rank])
   @@index([studentId])
   @@index([period, periodKey, batchId, rank])
+  /// The three leaderboard scopes read three indexes: global (`globalRank`),
+  /// campus (`campusId, rank`) and campus+batch (`campusId, batchId, rank`).
+  @@index([period, periodKey, globalRank])
+  @@index([period, periodKey, campusId, rank])
+  @@index([period, periodKey, campusId, batchId, rank])
   @@map("leaderboard_entries")
 }
 
@@ -1177,10 +1399,14 @@ model EmailReport {
   dayKey String
   status EmailReportStatus @default(DRAFT)
 
-  /// Which batch this report covers; null means the overall (all-batches) report. A day
-  /// can therefore have a Foundation report, an Intermediate report and an overall one
-  /// side by side, each tracked through its own approval lifecycle.
-  batchId String? @db.Uuid
+  /// Which campus and batch this report covers. Null widens, exactly as it does on
+  /// `Assignment`: `batchId = NULL` is every batch in the campus, and both null is the
+  /// all-campuses report. A day can therefore have an SRM/Foundation report, a
+  /// Vels/Foundation report, a per-campus roll-up and a global one side by side, each
+  /// tracked through its own approval lifecycle and each carrying only its own scope's
+  /// numbers (§33).
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
 
   fromEmail    String
   toRecipients String[]
@@ -1211,13 +1437,276 @@ model EmailReport {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  generatedBy User?  @relation("EmailReportGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
-  approvedBy  User?  @relation("EmailReportApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
-  batch       Batch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  generatedBy User?   @relation("EmailReportGeneratedBy", fields: [generatedById], references: [id], onDelete: SetNull)
+  approvedBy  User?   @relation("EmailReportApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  batch       Batch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus      Campus? @relation(fields: [campusId], references: [id], onDelete: SetNull)
 
   @@index([dayKey])
   @@index([status])
   @@index([dayKey, status])
   @@index([dayKey, batchId, status])
+  @@index([dayKey, campusId, batchId, status])
   @@map("email_reports")
+}
+
+// ---------------------------------------------------------------------------
+// Baseline tests
+// ---------------------------------------------------------------------------
+//
+// Baseline tests are a *separate feature* from daily assignments, and the separation is
+// structural rather than a convention someone has to remember (§25, §39).
+//
+// The two answer different questions. A daily assignment measures practice and
+// consistency: it feeds `DailyStatus`, the streak, the daily score and every leaderboard
+// built on them. A baseline test measures independent capability at a point in time —
+// whether a student can solve something unaided — and must not move any of those numbers.
+// If a baseline result could raise a completion percentage or extend a streak, the two
+// signals would contaminate each other and neither would mean what it says.
+//
+// So baseline data lives in its own tables with its own scoring, and *nothing* below
+// writes to `DailyStatus`, `Submission` aggregates, `Student.currentStreak`,
+// `Student.totalScore` or `LeaderboardEntry`. The one thing it shares is the submission
+// mirror it reads from: grading a baseline attempt is a query over `Submission` rows in
+// the test window, so the existing LeetCode sync remains the single ingestion path and
+// no parallel provider integration exists to drift out of step.
+
+/// Lifecycle of one baseline test.
+///
+/// `DRAFT` is editable and invisible to students. `SCHEDULED` is published — students can
+/// see that it is coming and its problems are frozen — but it has not opened. `ACTIVE`
+/// means attempts may be started and graded. `CLOSED` is terminal for participation: the
+/// report is final, and no new attempt can begin. Re-grading a closed test is still
+/// allowed, because a late LeetCode sync can legitimately fill in a submission that was
+/// made before the close time.
+enum BaselineTestStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  CLOSED
+}
+
+/// Where one student is in one baseline test.
+///
+/// `NOT_STARTED` is never stored — a student who has not started has no attempt row at
+/// all, and the report derives "not started" from the eligible roster minus the attempts.
+/// It exists in the enum so the reporting layer has one vocabulary for all three states.
+enum BaselineAttemptStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  SUBMITTED
+  EXPIRED
+}
+
+/// Whether a mentor has looked at an attempt's risk signals yet.
+///
+/// Deliberately not a verdict about the student. The system never concludes that anyone
+/// cheated; it says "review recommended" and shows the evidence that prompted it (§23).
+/// `REVIEW_REQUIRED` is set automatically when signals fire; `REVIEWED` is only ever set
+/// by a human, together with the note explaining what they concluded.
+enum BaselineReviewStatus {
+  NOT_REVIEWED
+  REVIEW_REQUIRED
+  REVIEWED
+}
+
+/// One observable, evidence-backed pattern in an attempt — never an accusation.
+///
+/// Every value here is something the submission mirror can actually demonstrate with a
+/// timestamp. There is deliberately no "PLAGIARISM" or "CHEATED" member: the public
+/// LeetCode API exposes no submitted source, so any similarity claim would be invented.
+/// If an authenticated provider ever supplies code, a `CODE_SIMILARITY` member can be
+/// added here alongside the evidence that supports it.
+enum BaselineRiskSignal {
+  /// Accepted within seconds of the test opening — faster than reading the problem.
+  IMMEDIATE_ACCEPTANCE
+  /// Several problems accepted within an implausibly short window of each other.
+  RAPID_SUCCESSION
+  /// Accepted on the first submission for every problem, with no failed attempt.
+  NO_FAILED_ATTEMPTS
+  /// Solved far faster than this student's own historical pace on comparable problems.
+  INCONSISTENT_WITH_HISTORY
+  /// An accepted submission for a test problem exists from *before* the test opened.
+  SOLVED_BEFORE_TEST
+}
+
+/// One weekly baseline test, targeted at a campus + batch audience.
+///
+/// Scope resolution is identical to `Assignment`'s and for the same reason: null widens.
+/// `campusId = NULL` means every campus, `batchId = NULL` means every batch inside the
+/// campus, and a non-null `batchId` always implies its own campus. Eligibility is
+/// evaluated against the campus and batch a student was in *on `dayKey`*, not their
+/// current ones, so a transfer mid-programme cannot retroactively add or remove someone
+/// from a test they did or did not sit.
+model BaselineTest {
+  id     String @id @default(uuid()) @db.Uuid
+  /// Mentor-facing name, e.g. "Baseline Test #3".
+  name   String
+  /// `YYYY-MM-DD` in the program timezone — the day the test belongs to.
+  dayKey String
+
+  description  String?
+  /// Shown to students on the start screen. Never contains answer keys or mentor notes;
+  /// everything students must not see lives on the attempt or in `adminNotes`.
+  instructions String?
+  /// Mentor-only. Explicitly excluded from every student-facing projection (§22).
+  adminNotes   String?
+
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
+
+  /// Wall-clock window. `opensAt`/`closesAt` bound which submissions can count towards
+  /// the test; `durationMinutes` bounds one student's individual attempt from the moment
+  /// they start it. A student who starts late gets their full duration but is still cut
+  /// off at `closesAt`.
+  durationMinutes Int       @default(60)
+  opensAt         DateTime?
+  closesAt        DateTime?
+
+  status BaselineTestStatus @default(DRAFT)
+
+  createdById String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy User?                 @relation("BaselineTestAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  campus    Campus?               @relation(fields: [campusId], references: [id], onDelete: Restrict)
+  batch     Batch?                @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  problems  BaselineTestProblem[]
+  attempts  BaselineTestAttempt[]
+
+  @@index([dayKey])
+  @@index([status])
+  @@index([campusId, batchId, dayKey])
+  @@index([status, dayKey])
+  @@map("baseline_tests")
+}
+
+/// One problem inside a baseline test, with its own weight.
+///
+/// `points` is per problem rather than a flat per-test score because a test deliberately
+/// mixes difficulties ("2 Easy, 2 Medium") and a Medium should not be worth the same as
+/// an Easy. `difficulty` is denormalised from `Problem` so a report can bucket by
+/// difficulty without joining, and so the weighting a test was built with survives even
+/// if LeetCode later reclassifies the problem.
+model BaselineTestProblem {
+  id        String @id @default(uuid()) @db.Uuid
+  testId    String @db.Uuid
+  problemId String @db.Uuid
+  /// 1-based slot.
+  position  Int
+  points    Int    @default(10)
+
+  difficulty Difficulty
+
+  test    BaselineTest                @relation(fields: [testId], references: [id], onDelete: Cascade)
+  problem Problem                     @relation(fields: [problemId], references: [id], onDelete: Restrict)
+  results BaselineTestProblemResult[]
+
+  @@unique([testId, position])
+  @@unique([testId, problemId])
+  @@index([problemId])
+  @@map("baseline_test_problems")
+}
+
+/// One student's participation in one baseline test.
+///
+/// `campusId`/`batchId` are frozen at start, exactly like `DailyStatus`'s: the report for
+/// a past test keeps grouping a student under the campus and batch they sat it in, even
+/// after a transfer (§17).
+///
+/// Scores here are never added to `Student.totalScore`, never counted towards a streak,
+/// and never written into `LeaderboardEntry` — see the section header. `score` is only
+/// ever meaningful inside baseline reporting.
+model BaselineTestAttempt {
+  id        String @id @default(uuid()) @db.Uuid
+  testId    String @db.Uuid
+  studentId String @db.Uuid
+
+  /// Frozen audience context — the campus and batch the student was in when they sat it.
+  campusId String? @db.Uuid
+  batchId  String? @db.Uuid
+
+  status BaselineAttemptStatus @default(IN_PROGRESS)
+
+  startedAt   DateTime  @default(now())
+  submittedAt DateTime?
+  /// When the individual window closes: `startedAt + durationMinutes`, clamped to the
+  /// test's `closesAt`. Stored rather than recomputed so a later change to the test's
+  /// duration cannot retroactively shorten or extend an attempt already under way.
+  expiresAt   DateTime?
+
+  solvedCount      Int  @default(0)
+  attemptedCount   Int  @default(0)
+  score            Int  @default(0)
+  maxScore         Int  @default(0)
+  /// Seconds from `startedAt` to the last accepted submission, or to submission/expiry
+  /// when nothing was solved.
+  timeTakenSeconds Int?
+
+  /// Evidence-backed patterns observed during grading. Empty is the normal case.
+  /// Mentor/admin-visible only — never projected into any student-facing response (§23).
+  riskFlags    BaselineRiskSignal[] @default([])
+  /// 0–100, derived from `riskFlags` and their severity. A triage ordering for mentors,
+  /// not a judgement about the student, and likewise never shown to students.
+  riskScore    Int                  @default(0)
+  reviewStatus BaselineReviewStatus @default(NOT_REVIEWED)
+  /// What the reviewing mentor concluded. Mentor-only.
+  reviewNote   String?
+  reviewedById String?              @db.Uuid
+  reviewedAt   DateTime?
+
+  gradedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  test       BaselineTest                @relation(fields: [testId], references: [id], onDelete: Cascade)
+  student    Student                     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  campus     Campus?                     @relation(fields: [campusId], references: [id], onDelete: SetNull)
+  batch      Batch?                      @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  reviewedBy User?                       @relation("BaselineAttemptReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  results    BaselineTestProblemResult[]
+
+  /// One attempt per student per test — re-starting resumes rather than duplicating.
+  @@unique([testId, studentId])
+  @@index([testId, status])
+  @@index([studentId])
+  @@index([testId, campusId, batchId])
+  @@index([testId, reviewStatus])
+  @@map("baseline_test_attempts")
+}
+
+/// Per-problem outcome inside one attempt, derived from the submission mirror.
+///
+/// `ATTEMPTED_NOT_ACCEPTED` and `NOT_ATTEMPTED` stay distinct here for the same reason
+/// they do in `DailyProblemStatus`: a mentor reads "tried and failed" very differently
+/// from "never opened it", and a baseline report that collapsed them would hide exactly
+/// the students who need help most.
+model BaselineTestProblemResult {
+  id            String @id @default(uuid()) @db.Uuid
+  attemptId     String @db.Uuid
+  testProblemId String @db.Uuid
+  problemId     String @db.Uuid
+
+  status   ProblemStatus @default(NOT_ATTEMPTED)
+  attempts Int           @default(0)
+  points   Int           @default(0)
+
+  firstSubmissionAt  DateTime?
+  solvedAt           DateTime?
+  /// Seconds from the attempt's `startedAt` to `solvedAt`. The input to the
+  /// `IMMEDIATE_ACCEPTANCE` and `RAPID_SUCCESSION` signals.
+  timeToSolveSeconds Int?
+  language           String?
+
+  attempt     BaselineTestAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  testProblem BaselineTestProblem @relation(fields: [testProblemId], references: [id], onDelete: Cascade)
+  problem     Problem             @relation(fields: [problemId], references: [id], onDelete: Restrict)
+
+  @@unique([attemptId, testProblemId])
+  @@index([problemId])
+  @@index([status])
+  @@map("baseline_test_problem_results")
 }

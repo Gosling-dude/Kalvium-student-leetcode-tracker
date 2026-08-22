@@ -41,6 +41,12 @@ export class BatchStatsQueryDto {
   @IsString()
   @Matches(DAY_KEY_PATTERN, { message: 'dayKey must be formatted YYYY-MM-DD' })
   dayKey?: string;
+
+  @ApiPropertyOptional({ description: 'Campus id or code. Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
 }
 
 export class ListBatchesQueryDto {
@@ -49,6 +55,12 @@ export class ListBatchesQueryDto {
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
   includeArchived?: boolean;
+
+  @ApiPropertyOptional({ description: 'Campus id or code. Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
 }
 
 /**
@@ -71,6 +83,10 @@ export class MoveBatchDto {
 }
 
 export class CreateBatchDto {
+  @ApiProperty({ description: 'The campus this batch belongs to' })
+  @IsUUID()
+  campusId!: string;
+
   @ApiProperty({ example: 'Advanced Level' })
   @IsString()
   @MinLength(2)

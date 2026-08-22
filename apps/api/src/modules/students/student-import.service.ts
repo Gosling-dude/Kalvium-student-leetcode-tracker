@@ -9,6 +9,13 @@
  *
  * Batches and squads referenced by the sheet are created on demand, because requiring
  * them to exist first makes the very first import impossible.
+ *
+ * Every import lands at exactly one campus, named by the caller. It is not inferred from
+ * the sheet and not defaulted to the founding campus: batches and squads are campus-scoped
+ * now, so a wrong guess would create a second "Foundation Level" under the wrong campus
+ * and quietly file a whole cohort where no mentor is looking for them. The one case where
+ * omitting it is safe — a single campus exists, so there is nothing to guess between — is
+ * resolved explicitly below.
  */
 
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
@@ -16,6 +23,7 @@ import ExcelJS from 'exceljs';
 import { IMPORT_COLUMN_ALIASES, type ImportResult, type ImportRowError } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import { ProgramTimeService } from '../../common/services/program-time.service';
 import { BatchesService } from '../batches/batches.service';
 
 interface ParsedRow {
@@ -39,12 +47,14 @@ export class StudentImportService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly batches: BatchesService,
+    private readonly time: ProgramTimeService,
   ) {}
 
   async import(
     buffer: Buffer,
-    options: { dryRun?: boolean; updateExisting?: boolean } = {},
+    options: { dryRun?: boolean; updateExisting?: boolean; campusId?: string } = {},
   ): Promise<ImportResult> {
+    const campusId = await this.resolveImportCampus(options.campusId);
     const rows = await this.parseWorkbook(buffer);
     const errors: ImportRowError[] = [];
     const valid: ParsedRow[] = [];
@@ -99,8 +109,8 @@ export class StudentImportService {
       };
     }
 
-    const { batchIds, createdBatches } = await this.ensureBatches(valid);
-    const { squadIds, createdSquads } = await this.ensureSquads(valid, batchIds);
+    const { batchIds, createdBatches } = await this.ensureBatches(valid, campusId);
+    const { squadIds, createdSquads } = await this.ensureSquads(valid, batchIds, campusId);
 
     let created = 0;
     let updated = 0;
@@ -141,6 +151,7 @@ export class StudentImportService {
               email: row.email,
               phone: row.phone,
               leetcodeUsername: row.leetcodeUsername.toLowerCase(),
+              campusId,
               batchId,
               squadId,
             },
@@ -153,8 +164,19 @@ export class StudentImportService {
               email: row.email,
               phone: row.phone,
               leetcodeUsername: row.leetcodeUsername.toLowerCase(),
+              campusId,
               batchId,
               squadId,
+              // Placement history from day one, so a report about today can resolve this
+              // student's campus without falling back to their current one (§17).
+              campusHistory: {
+                create: {
+                  toCampusId: campusId,
+                  effectiveFromDayKey: this.time.today(),
+                  source: 'IMPORT' as const,
+                  reason: 'Spreadsheet import',
+                },
+              },
               // A student who has never been synced must not be reported as
               // "solved 0" — they have no data yet, which is a different thing.
               syncState: { create: { status: 'NEVER_SYNCED' } },
@@ -380,22 +402,63 @@ export class StudentImportService {
     return errors;
   }
 
+  /**
+   * Which campus this import targets.
+   *
+   * Named by the caller, or inferred only when there is exactly one campus and therefore
+   * nothing to infer between. With two or more, refusing is the right answer: silently
+   * choosing one files a whole cohort under a campus nobody asked for, and the mistake is
+   * only visible once a mentor wonders why their new students are missing.
+   */
+  private async resolveImportCampus(campusId?: string): Promise<string> {
+    if (campusId) {
+      const campus = await this.prisma.campus.findUnique({
+        where: { id: campusId },
+        select: { id: true, status: true, name: true },
+      });
+      if (!campus) throw new BadRequestException(`Campus ${campusId} was not found.`);
+      if (campus.status !== 'ACTIVE') {
+        throw new BadRequestException(`${campus.name} is archived and cannot receive an import.`);
+      }
+      return campus.id;
+    }
+
+    const campuses = await this.prisma.campus.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: { sortOrder: 'asc' },
+      select: { id: true, code: true },
+    });
+    if (campuses.length === 1 && campuses[0]) return campuses[0].id;
+    if (campuses.length === 0) {
+      throw new BadRequestException('No active campus exists to import into. Create one first.');
+    }
+    throw new BadRequestException(
+      `Several campuses exist (${campuses.map((c) => c.code).join(', ')}). ` +
+        'Choose which one these students belong to before importing.',
+    );
+  }
+
   private async ensureBatches(
     rows: ParsedRow[],
+    campusId: string,
   ): Promise<{ batchIds: Map<string, string>; createdBatches: string[] }> {
     const names = [...new Set(rows.map((r) => r.batch).filter((n): n is string => !!n))];
     const batchIds = new Map<string, string>();
     const createdBatches: string[] = [];
 
     for (const name of names) {
-      const existing = await this.prisma.batch.findUnique({ where: { name } });
+      // Scoped to the campus: an "Intermediate Level" at Vels must not silently absorb
+      // an "Intermediate Level" row meant for SRM.
+      const existing = await this.prisma.batch.findUnique({
+        where: { campusId_name: { campusId, name } },
+      });
       if (existing) {
         batchIds.set(name.toLowerCase(), existing.id);
       } else {
-        // `code` is required and unique; derive one from the name for spreadsheet
-        // imports, which only carry a batch name.
+        // `code` is required and unique per campus; derive one from the name for
+        // spreadsheet imports, which only carry a batch name.
         const batch = await this.prisma.batch.create({
-          data: { name, code: await this.batches.deriveAvailableCode(name) },
+          data: { campusId, name, code: await this.batches.deriveAvailableCode(name, campusId) },
         });
         batchIds.set(name.toLowerCase(), batch.id);
         createdBatches.push(name);
@@ -408,6 +471,7 @@ export class StudentImportService {
   private async ensureSquads(
     rows: ParsedRow[],
     batchIds: Map<string, string>,
+    campusId: string,
   ): Promise<{ squadIds: Map<string, string>; createdSquads: string[] }> {
     const squadIds = new Map<string, string>();
     const createdSquads: string[] = [];
@@ -422,14 +486,14 @@ export class StudentImportService {
       const batchId = pair.batch ? (batchIds.get(pair.batch.toLowerCase()) ?? null) : null;
 
       const existing = await this.prisma.squad.findFirst({
-        where: { name: pair.squad, batchId },
+        where: { name: pair.squad, batchId, campusId },
       });
 
       if (existing) {
         squadIds.set(key, existing.id);
       } else {
         const squad = await this.prisma.squad.create({
-          data: { name: pair.squad, batchId },
+          data: { name: pair.squad, batchId, campusId },
         });
         squadIds.set(key, squad.id);
         createdSquads.push(pair.batch ? `${pair.batch} / ${pair.squad}` : pair.squad);

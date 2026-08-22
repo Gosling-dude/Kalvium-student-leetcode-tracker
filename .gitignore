@@ -54,3 +54,15 @@ tmp/
 # Student roster — real names and email addresses. Never commit to a public repo.
 # Copy roster.example.csv, fill it in, and load with `npm run db:seed:students`.
 apps/api/prisma/roster.csv
+
+# Private operational roster data (real names, emails, LeetCode handles).
+# Never commit to a public repo — see docs/CAMPUSES.md#roster-import.
+apps/api/prisma/private/
+apps/api/prisma/roster-*.csv
+
+# Local analysis scratch — generated spreadsheets and charts built from real student
+# data during ad-hoc investigations. Kept out of a public repo for the same reason the
+# roster is: one `git add -A` is all it would take.
+outputs/
+build_analysis.mjs
+inspect_*.mjs

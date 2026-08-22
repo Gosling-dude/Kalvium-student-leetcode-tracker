@@ -136,12 +136,23 @@ async function main(): Promise<void> {
     ),
   );
 
+  // The demo cohort needs a campus, because batches are campus-scoped. It goes to the
+  // founding campus by code rather than by position, so this seed keeps working after
+  // campuses are reordered — and never hard-codes a campus *name* (§1).
+  const demoCampus = await prisma.campus.findUnique({ where: { code: 'VELS' } });
+  if (!demoCampus) {
+    throw new Error(
+      'Campus VELS is missing. Run `npm run db:migrate -w @dsa/api` before seeding.',
+    );
+  }
+
   // A batch of its own, deliberately not the roster's `Batch 2026`. Sharing one would
   // let this seed synthesise 30 days of fabricated history onto real students — data
   // indistinguishable from a genuine sync in every report and leaderboard.
   const batch = await prisma.batch.upsert({
-    where: { name: DEMO_BATCH_NAME },
+    where: { campusId_name: { campusId: demoCampus.id, name: DEMO_BATCH_NAME } },
     create: {
+      campusId: demoCampus.id,
       name: DEMO_BATCH_NAME,
       code: 'DEMO',
       description: 'Synthetic demo cohort — never mixed with the real roster',
@@ -156,12 +167,15 @@ async function main(): Promise<void> {
   const squads = [];
   for (let i = 0; i < 6; i += 1) {
     const name = `Squad ${i + 1}`;
-    const existing = await prisma.squad.findFirst({ where: { name, batchId: batch.id } });
+    const existing = await prisma.squad.findFirst({
+      where: { name, batchId: batch.id, campusId: demoCampus.id },
+    });
     squads.push(
       existing ??
         (await prisma.squad.create({
           data: {
             name,
+            campusId: demoCampus.id,
             batchId: batch.id,
             mentorId: mentors[i % mentors.length]!.id,
             color: squadColors[i],
@@ -188,14 +202,23 @@ async function main(): Promise<void> {
           name,
           email: `${handle}@kalvium.com`,
           leetcodeUsername: handle,
+          campusId: demoCampus.id,
           batchId: batch.id,
           squadId: squads[i % squads.length]!.id,
           phone: `98${String(10000000 + i).slice(0, 8)}`,
           // Demo students are marked as never synced, because they are not real
           // LeetCode accounts. Their history below is synthetic and labelled as such.
           syncState: { create: { status: 'NEVER_SYNCED' } },
-          // Placed in the demo batch from the start, so the historical-batch resolver
-          // has an answer for the synthetic days generated below.
+          // Placed at the demo campus and batch from the start, so both historical
+          // resolvers have an answer for the synthetic days generated below.
+          campusHistory: {
+            create: {
+              toCampusId: demoCampus.id,
+              effectiveFromDayKey: addDays(today, -400),
+              source: 'MIGRATION' as const,
+              reason: 'Demo seed',
+            },
+          },
           batchHistory: {
             create: {
               toBatchId: batch.id,
@@ -222,18 +245,23 @@ async function main(): Promise<void> {
   for (let offset = DAYS - 1; offset >= 0; offset -= 1) {
     const dayKey = addDays(today, -offset);
 
-    // Scoped to the demo batch, not to every batch. A batch-less assignment would apply
-    // to real roster students too (that is what `batchId: null` means), which would put
-    // fabricated problem sets in front of the actual cohort.
+    // Scoped to the demo batch *and* its campus, not to every batch. A scope-less
+    // assignment would apply to real roster students too (that is what a null campus and
+    // batch mean), which would put fabricated problem sets in front of the actual cohort.
     let assignment = await prisma.assignment.findUnique({
-      where: { dayKey_batchId: { dayKey, batchId: batch.id } },
+      where: {
+        dayKey_campusId_batchId: { dayKey, campusId: demoCampus.id, batchId: batch.id },
+      },
     });
     if (!assignment) {
       const picked = [...problems].sort(() => random() - 0.5).slice(0, 4);
       assignment = await prisma.assignment.create({
         data: {
           dayKey,
+          campusId: demoCampus.id,
           batchId: batch.id,
+          originalCampusId: demoCampus.id,
+          originalBatchId: batch.id,
           topic: picked[0]?.topicTags[0] ?? 'Mixed',
           title: `Day ${DAYS - offset}`,
           createdById: admin.id,
@@ -256,7 +284,9 @@ async function main(): Promise<void> {
   for (let offset = DAYS - 1; offset >= 0; offset -= 1) {
     const dayKey = addDays(today, -offset);
     const assignment = await prisma.assignment.findUnique({
-      where: { dayKey_batchId: { dayKey, batchId: batch.id } },
+      where: {
+        dayKey_campusId_batchId: { dayKey, campusId: demoCampus.id, batchId: batch.id },
+      },
       include: { problems: { include: { problem: true } } },
     });
     if (!assignment) continue;

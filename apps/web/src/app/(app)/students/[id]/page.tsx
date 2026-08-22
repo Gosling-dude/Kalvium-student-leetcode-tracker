@@ -9,11 +9,12 @@ import {
   SYNC_STATUS_LABELS,
   isTrustworthySync,
   type BatchHistoryEntry,
+  type CampusHistoryEntry,
 } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { cn, formatPercent, timeAgo } from '@/lib/utils';
-import { BatchChip } from '@/components/batch-filter';
+import { BatchChip, CampusChip } from '@/components/scope-filter';
 import {
   Badge,
   Card,
@@ -83,13 +84,20 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
             {data.squadName ? ` · ${data.squadName}` : ''}
           </p>
           {/*
-            Batch, cohort and belt are the student's current organisational placement —
-            shown together and prominently, because they are what a mentor scanning this
-            page is checking (§9, §11).
+            Campus, batch, squad, cohort and belt are the student's current organisational
+            placement — shown together and prominently, because they are what a mentor
+            scanning this page is checking (§9, §11, §13).
           */}
           <div className="mt-2 flex flex-wrap items-center gap-2">
+            <CampusChip code={data.campusCode} name={data.campusName} />
+            <span className="text-sm">{data.campusName ?? 'No campus'}</span>
             <BatchChip code={data.batchCode} name={data.batchName} />
-            <span className="text-sm">{data.batchName ?? 'No batch'}</span>
+            <span className="text-sm">
+              {data.awaitingPlacement ? 'Placement pending' : (data.batchName ?? 'No batch')}
+            </span>
+            {data.squadNumber !== null ? (
+              <Badge tone="neutral">Squad {data.squadNumber}</Badge>
+            ) : null}
             {data.cohort !== null ? <Badge tone="info">Cohort {data.cohort}</Badge> : null}
             {data.maxBeltLevel !== null ? (
               <Badge tone="brand">Max belt {data.maxBeltLevel}</Badge>
@@ -338,6 +346,8 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         )}
       </Card>
 
+      <CampusHistorySection history={data.campusHistory} currentCampusName={data.campusName} />
+
       <BatchHistorySection history={data.batchHistory} currentBatchName={data.batchName} />
 
       {data.notes.length > 0 ? (
@@ -356,6 +366,66 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         </Card>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Campus History (§16) — every campus this student has belonged to, newest first.
+ *
+ * Rendered only once there is something to say: a single founding placement is not a
+ * history, and a section reading "Vels → Vels" would be noise on every profile.
+ */
+function CampusHistorySection({
+  history,
+  currentCampusName,
+}: {
+  history: CampusHistoryEntry[];
+  currentCampusName: string | null;
+}) {
+  if (history.length <= 1) return null;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Campus history"
+        description="Past results stay recorded under the campus the student was at when they earned them."
+      />
+      <ol className="divide-y divide-[var(--color-border)]">
+        {history.map((entry, index) => (
+          <li key={entry.id} className="flex flex-wrap items-center gap-2 px-5 py-3 text-sm">
+            <span className="w-24 shrink-0 font-mono text-xs text-[var(--color-fg-muted)]">
+              {entry.effectiveFromDayKey}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              {entry.fromCampusName ? (
+                <>
+                  <span className="text-[var(--color-fg-muted)]">{entry.fromCampusName}</span>
+                  <span aria-hidden className="text-[var(--color-fg-subtle)]">
+                    &rarr;
+                  </span>
+                </>
+              ) : null}
+              <CampusChip code={entry.toCampusCode} name={entry.toCampusName} />
+              <span className="font-medium">{entry.toCampusName ?? 'No campus'}</span>
+            </span>
+            {index === 0 && entry.toCampusName === currentCampusName ? (
+              <Badge tone="success">Current</Badge>
+            ) : null}
+            <Badge tone="neutral">{BATCH_CHANGE_SOURCE_LABELS[entry.source]}</Badge>
+            {entry.changedByName ? (
+              <span className="text-xs text-[var(--color-fg-subtle)]">
+                by {entry.changedByName}
+              </span>
+            ) : null}
+            {entry.reason ? (
+              <span className="w-full text-xs text-[var(--color-fg-muted)] sm:w-auto">
+                &ldquo;{entry.reason}&rdquo;
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </Card>
   );
 }
 

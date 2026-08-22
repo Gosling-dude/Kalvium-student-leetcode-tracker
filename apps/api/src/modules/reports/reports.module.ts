@@ -5,7 +5,8 @@ import { EXPORT_FORMATS, type ExportFormat } from '@dsa/shared';
 
 import { BadRequestException } from '@nestjs/common';
 import { BatchesModule } from '../batches/batches.module';
-import { BatchesService } from '../batches/batches.service';
+import { CampusesModule } from '../campuses/campuses.module';
+import { CampusesService } from '../campuses/campuses.service';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { LeaderboardModule } from '../leaderboard/leaderboard.module';
 import { ReportsService } from './reports.service';
@@ -16,7 +17,7 @@ import { ReportsService } from './reports.service';
 export class ReportsController {
   constructor(
     private readonly reports: ReportsService,
-    private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
   ) {}
 
   /** Rejects a non-numeric cohort rather than silently exporting every cohort. */
@@ -30,17 +31,21 @@ export class ReportsController {
   }
 
   @Get('daily')
-  @ApiOperation({ summary: 'Daily report data, overall or for one batch/cohort' })
+  @ApiOperation({ summary: 'Daily report data, overall or for one campus/batch/cohort' })
   @ApiQuery({ name: 'dayKey', required: false })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   @ApiQuery({ name: 'cohort', required: false })
   async daily(
     @Query('dayKey') dayKey?: string,
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ) {
+    const scope = await this.campuses.resolveScope({ campus, batch });
     return this.reports.dailyReport(dayKey, {
-      batchId: await this.batches.resolveSelector(batch),
+      campusId: scope.campusId,
+      batchId: scope.batchId,
       cohort: this.parseCohort(cohort),
     });
   }
@@ -74,21 +79,29 @@ export class ReportsController {
   @Get('export/daily')
   @ApiOperation({ summary: 'Download the daily report' })
   @ApiQuery({ name: 'format', required: false, enum: EXPORT_FORMATS })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus-wise export' })
   @ApiQuery({ name: 'batch', required: false, description: 'Batch-wise export' })
   @ApiQuery({ name: 'cohort', required: false, description: 'Cohort-wise export' })
   async exportDaily(
     @Res() res: Response,
     @Query('dayKey') dayKey?: string,
     @Query('format') format: ExportFormat = 'XLSX',
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ): Promise<void> {
-    const batchId = await this.batches.resolveSelector(batch);
+    const resolved = await this.campuses.resolveScope({ campus, batch });
     const cohortNumber = this.parseCohort(cohort);
-    const report = await this.reports.dailyReport(dayKey, { batchId, cohort: cohortNumber });
+    const report = await this.reports.dailyReport(dayKey, {
+      campusId: resolved.campusId,
+      batchId: resolved.batchId,
+      cohort: cohortNumber,
+    });
 
-    // The filename names the slice, so a folder of exports stays self-describing.
+    // The filename names the slice, so a folder of exports stays self-describing — and
+    // so two campuses' exports for the same day never collide in a downloads folder.
     const scope = [
+      resolved.campusCode,
       report.sections.length === 1 ? report.sections[0]!.batchCode : null,
       cohortNumber ? `cohort-${cohortNumber}` : null,
     ]
@@ -181,7 +194,7 @@ export class ReportsController {
 }
 
 @Module({
-  imports: [DashboardModule, LeaderboardModule, BatchesModule],
+  imports: [DashboardModule, LeaderboardModule, BatchesModule, CampusesModule],
   controllers: [ReportsController],
   providers: [ReportsService],
   exports: [ReportsService],

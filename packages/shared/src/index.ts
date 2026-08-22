@@ -8,6 +8,9 @@
 
 export * from './domain/time';
 export * from './domain/batch';
+export * from './domain/campus';
+export * from './domain/roster-normalisation';
+export * from './domain/baseline';
 export * from './domain/scoring';
 export * from './domain/assignment-completion';
 export * from './domain/streak';

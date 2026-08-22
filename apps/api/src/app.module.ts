@@ -20,6 +20,9 @@ import { AuthModule } from './modules/auth/auth.module';
 import { StudentsModule } from './modules/students/students.module';
 import { BatchesModule } from './modules/batches/batches.module';
 import { BatchesHttpModule } from './modules/batches/batches-http.module';
+import { CampusesModule } from './modules/campuses/campuses.module';
+import { CampusesHttpModule } from './modules/campuses/campuses-http.module';
+import { BaselineTestsModule } from './modules/baseline-tests/baseline-tests.module';
 import { AssignmentsModule } from './modules/assignments/assignments.module';
 import { ScoringModule } from './modules/scoring/scoring.module';
 import { SyncModule } from './modules/sync/sync.module';
@@ -74,7 +77,10 @@ class CoreModule {}
     StudentsModule,
     BatchesModule,
     BatchesHttpModule,
+    CampusesModule,
+    CampusesHttpModule,
     AssignmentsModule,
+    BaselineTestsModule,
     ScoringModule,
     SyncModule,
     DashboardModule,

@@ -13,6 +13,13 @@
  *    day D" from `StudentBatchHistory`, never from `Student.batchId`. That is the
  *    difference between a report that stays correct after someone is moved and one that
  *    silently rewrites itself (§7).
+ *
+ * Since campuses arrived, batch codes are unique *per campus* rather than globally: both
+ * Vels and SRM have an `A`. `resolveSelector` therefore takes an optional campus, and a
+ * bare code with no campus is only accepted while it still names exactly one batch —
+ * answering with an arbitrary one is how an SRM assignment lands on Vels students. When a
+ * request carries both halves of an audience, prefer `CampusesService.resolveScope`,
+ * which validates the pair together.
  */
 
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
@@ -21,6 +28,7 @@ import {
   deriveBatchCode,
   isRedundantMove,
   normaliseBatchCode,
+  PENDING_PLACEMENT_BATCH_CODE,
   resolveBatchOnDay,
   type BatchHistoryEntry,
   type BatchPlacement,
@@ -46,6 +54,9 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const CODE_ALIASES: Record<string, string> = {
   FOUNDATION: 'A',
   INTERMEDIATE: 'B',
+  PENDING_PLACEMENT: PENDING_PLACEMENT_BATCH_CODE,
+  'PLACEMENT-PENDING': PENDING_PLACEMENT_BATCH_CODE,
+  UNASSIGNED: PENDING_PLACEMENT_BATCH_CODE,
 };
 
 @Injectable()
@@ -58,12 +69,22 @@ export class BatchesService {
     private readonly cache: CacheService,
   ) {}
 
-  /** Every batch, in display order. */
-  async findAll(includeArchived = false): Promise<BatchSummary[]> {
+  /**
+   * Every batch, in display order, optionally narrowed to one campus.
+   *
+   * Ordered by campus first so an unfiltered list reads as `VELS/A, VELS/B, SRM/A, …`
+   * rather than interleaving two campuses' Foundation rows, which is unreadable in a
+   * picker and ambiguous in a report.
+   */
+  async findAll(includeArchived = false, campusId?: string | null): Promise<BatchSummary[]> {
     const batches = await this.prisma.batch.findMany({
-      where: includeArchived ? {} : { status: 'ACTIVE' },
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      where: {
+        ...(includeArchived ? {} : { status: 'ACTIVE' }),
+        ...(campusId ? { campusId } : {}),
+      },
+      orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
       include: {
+        campus: { select: { name: true, code: true } },
         // Current size means *current* students; archived students left the programme.
         _count: { select: { students: { where: { status: 'ACTIVE' } } } },
       },
@@ -75,7 +96,10 @@ export class BatchesService {
   async findById(id: string): Promise<BatchSummary> {
     const batch = await this.prisma.batch.findUnique({
       where: { id },
-      include: { _count: { select: { students: { where: { status: 'ACTIVE' } } } } },
+      include: {
+        campus: { select: { name: true, code: true } },
+        _count: { select: { students: { where: { status: 'ACTIVE' } } } },
+      },
     });
     if (!batch) throw new NotFoundException(`Batch ${id} was not found`);
     return this.toSummary(batch, batch._count.students);
@@ -89,31 +113,67 @@ export class BatchesService {
    * a 400, not a silent unfiltered query, because quietly widening a filter would show a
    * mentor another batch's students under their own batch's heading.
    */
-  async resolveSelector(value?: string | null): Promise<BatchSelector> {
+  async resolveSelector(value?: string | null, campusId?: string | null): Promise<BatchSelector> {
     if (value === undefined || value === null) return null;
 
     const trimmed = value.trim();
     if (trimmed === '' || trimmed.toLowerCase() === 'all') return null;
 
     if (UUID_PATTERN.test(trimmed)) {
-      const exists = await this.prisma.batch.count({ where: { id: trimmed } });
-      if (exists === 0) throw new NotFoundException(`Batch ${trimmed} was not found`);
-      return trimmed;
+      const batch = await this.prisma.batch.findUnique({
+        where: { id: trimmed },
+        select: { id: true, campusId: true },
+      });
+      if (!batch) throw new NotFoundException(`Batch ${trimmed} was not found`);
+      if (campusId && batch.campusId !== campusId) {
+        throw new BadRequestException(
+          `Batch ${trimmed} belongs to another campus. Pick a batch from the selected campus.`,
+        );
+      }
+      return batch.id;
     }
 
     const code = normaliseBatchCode(trimmed);
     const resolved = CODE_ALIASES[code] ?? code;
-    const batch = await this.prisma.batch.findUnique({ where: { code: resolved } });
-    if (!batch) {
+
+    if (campusId) {
+      const batch = await this.prisma.batch.findUnique({
+        where: { campusId_code: { campusId, code: resolved } },
+      });
+      if (batch) return batch.id;
+      const known = await this.prisma.batch.findMany({
+        where: { campusId },
+        select: { code: true },
+        orderBy: { sortOrder: 'asc' },
+      });
+      throw new BadRequestException(
+        `"${value}" is not a batch at the selected campus. Expected one of: ` +
+          `${known.map((b) => b.code).join(', ')}, or "all".`,
+      );
+    }
+
+    // No campus given. A code now names one batch *per campus*, so it is only usable
+    // while exactly one matches; resolving an ambiguous code to whichever row came back
+    // first would silently target the wrong campus.
+    const candidates = await this.prisma.batch.findMany({
+      where: { code: resolved },
+      include: { campus: { select: { code: true } } },
+    });
+    if (candidates.length === 1 && candidates[0]) return candidates[0].id;
+    if (candidates.length === 0) {
       const known = await this.prisma.batch.findMany({
         select: { code: true },
         orderBy: { sortOrder: 'asc' },
+        distinct: ['code'],
       });
       throw new BadRequestException(
         `"${value}" is not a known batch. Expected one of: ${known.map((b) => b.code).join(', ')}, or "all".`,
       );
     }
-    return batch.id;
+    throw new BadRequestException(
+      `"${value}" names a batch at ${candidates.length} campuses ` +
+        `(${candidates.map((b) => b.campus.code).join(', ')}). Add a campus filter to say which.`,
+    );
   }
 
   /**
@@ -123,24 +183,50 @@ export class BatchesService {
    * importer). Appends a counter on collision rather than failing, so importing a
    * spreadsheet whose batch name slugs to an existing code still succeeds.
    */
-  async deriveAvailableCode(name: string): Promise<string> {
+  async deriveAvailableCode(name: string, campusId: string): Promise<string> {
     const base = deriveBatchCode(name);
     for (let attempt = 0; attempt < 50; attempt += 1) {
       const candidate = attempt === 0 ? base : `${base}-${attempt + 1}`;
-      const taken = await this.prisma.batch.count({ where: { code: candidate } });
+      // Scoped to the campus: `A` being taken at Vels must not stop SRM from having one.
+      const taken = await this.prisma.batch.count({ where: { campusId, code: candidate } });
       if (taken === 0) return candidate;
     }
     // 50 batches sharing one slug is not a real scenario; fall back to something unique.
     return `${base}-${Date.now().toString(36).toUpperCase()}`.slice(0, 24);
   }
 
-  /** Lookup by code, used by the roster loader. Returns null rather than throwing. */
-  async findByCode(code: string): Promise<{ id: string; name: string; code: string } | null> {
+  /**
+   * Lookup by code within a campus, used by the roster loaders. Returns null rather than
+   * throwing.
+   *
+   * `campusId` is required rather than optional because every caller is importing into a
+   * known campus, and a campus-less lookup would silently pick one of the two `A` batches.
+   */
+  async findByCode(
+    code: string,
+    campusId: string,
+  ): Promise<{ id: string; name: string; code: string; campusId: string } | null> {
     const resolved = CODE_ALIASES[normaliseBatchCode(code)] ?? normaliseBatchCode(code);
     return this.prisma.batch.findUnique({
-      where: { code: resolved },
-      select: { id: true, name: true, code: true },
+      where: { campusId_code: { campusId, code: resolved } },
+      select: { id: true, name: true, code: true, campusId: true },
     });
+  }
+
+  /**
+   * A campus's placement-pending batch, if it has one.
+   *
+   * Where a student sits between enrolment and their diagnostic assessment. Returned as
+   * null rather than created on demand: a campus configured without one is a deliberate
+   * choice, and silently adding a batch to someone's campus during an import is not this
+   * method's business.
+   */
+  async findPendingPlacementBatch(campusId: string): Promise<{ id: string; name: string } | null> {
+    const batch = await this.prisma.batch.findUnique({
+      where: { campusId_code: { campusId, code: PENDING_PLACEMENT_BATCH_CODE } },
+      select: { id: true, name: true, status: true },
+    });
+    return batch && batch.status === 'ACTIVE' ? { id: batch.id, name: batch.name } : null;
   }
 
   // -------------------------------------------------------------------------
@@ -254,17 +340,29 @@ export class BatchesService {
   }): Promise<{ student: { id: string; name: string }; fromBatchId: string | null; toBatchId: string }> {
     const student = await this.prisma.student.findUnique({
       where: { id: input.studentId },
-      select: { id: true, name: true, batchId: true },
+      select: { id: true, name: true, batchId: true, campusId: true },
     });
     if (!student) throw new NotFoundException(`Student ${input.studentId} was not found`);
 
     const target = await this.prisma.batch.findUnique({
       where: { id: input.toBatchId },
-      select: { id: true, status: true, name: true },
+      select: { id: true, status: true, name: true, campusId: true, campus: { select: { name: true } } },
     });
     if (!target) throw new NotFoundException(`Batch ${input.toBatchId} was not found`);
     if (target.status !== 'ACTIVE') {
       throw new BadRequestException(`Batch "${target.name}" is archived — students cannot be moved into it.`);
+    }
+
+    // A batch move is a move *within* a campus. Allowing it to cross campuses here would
+    // leave `Student.campusId` disagreeing with `batch.campusId` and would skip the
+    // campus-history row entirely, so the transfer would be invisible to every audit
+    // surface. Cross-campus movement goes through `CampusesService.transferStudent`,
+    // which writes both halves (§16).
+    if (student.campusId !== null && target.campusId !== student.campusId) {
+      throw new BadRequestException(
+        `"${target.name}" belongs to ${target.campus.name}, which is not ${student.name}'s campus. ` +
+          'Use "Transfer campus" to move a student between campuses.',
+      );
     }
 
     if (isRedundantMove(student.batchId, input.toBatchId)) {
@@ -338,12 +436,19 @@ export class BatchesService {
   // Statistics
   // -------------------------------------------------------------------------
 
-  /** The figures behind the Batch Management cards, for every batch. */
-  async getStats(dayKey?: DayKey): Promise<BatchStats[]> {
+  /**
+   * The figures behind the Batch Management cards, for every batch — or for one campus's.
+   *
+   * `campusId` narrows the whole computation server-side rather than returning every
+   * batch for the client to filter: with two campuses that is a nicety, and by the fifth
+   * it is the difference between a card grid that loads and one that does not (§12, §27).
+   */
+  async getStats(dayKey?: DayKey, campusId?: string | null): Promise<BatchStats[]> {
     const day = dayKey ?? this.time.today();
     const batches = await this.prisma.batch.findMany({
-      where: { status: 'ACTIVE' },
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      where: { status: 'ACTIVE', ...(campusId ? { campusId } : {}) },
+      orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
+      include: { campus: { select: { name: true, code: true } } },
     });
 
     const stats: BatchStats[] = [];
@@ -408,6 +513,8 @@ export class BatchesService {
   private toSummary(
     batch: {
       id: string;
+      campusId: string;
+      campus?: { name: string; code: string } | null;
       name: string;
       code: string;
       description: string | null;
@@ -420,6 +527,9 @@ export class BatchesService {
   ): BatchSummary {
     return {
       id: batch.id,
+      campusId: batch.campusId,
+      campusName: batch.campus?.name ?? '',
+      campusCode: batch.campus?.code ?? '',
       name: batch.name,
       code: batch.code,
       description: batch.description,

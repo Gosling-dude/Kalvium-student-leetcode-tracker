@@ -59,20 +59,46 @@ describe('resolveSelector', () => {
     expect(await service.resolveSelector('all')).toBeNull();
   });
 
-  it('resolves a code, case-insensitively', async () => {
+  it('resolves a code within a campus, case-insensitively', async () => {
     const { service, prisma } = makeService();
     prisma.batch.findUnique.mockResolvedValue(FOUNDATION);
 
-    expect(await service.resolveSelector('a')).toBe('batch-a');
-    expect(prisma.batch.findUnique).toHaveBeenCalledWith({ where: { code: 'A' } });
+    expect(await service.resolveSelector('a', 'campus-vels')).toBe('batch-a');
+    // Codes are unique *per campus* now, so the lookup must carry the campus.
+    expect(prisma.batch.findUnique).toHaveBeenCalledWith({
+      where: { campusId_code: { campusId: 'campus-vels', code: 'A' } },
+    });
   });
 
   it('resolves the friendly aliases used in URLs', async () => {
     const { service, prisma } = makeService();
     prisma.batch.findUnique.mockResolvedValue(INTERMEDIATE);
 
-    await service.resolveSelector('intermediate');
-    expect(prisma.batch.findUnique).toHaveBeenCalledWith({ where: { code: 'B' } });
+    await service.resolveSelector('intermediate', 'campus-vels');
+    expect(prisma.batch.findUnique).toHaveBeenCalledWith({
+      where: { campusId_code: { campusId: 'campus-vels', code: 'B' } },
+    });
+  });
+
+  it('resolves a bare code with no campus while exactly one batch matches', async () => {
+    const { service, prisma } = makeService();
+    prisma.batch.findMany.mockResolvedValue([{ ...FOUNDATION, campus: { code: 'VELS' } }]);
+
+    expect(await service.resolveSelector('A')).toBe('batch-a');
+  });
+
+  /**
+   * The campus-era ambiguity case. Both campuses have an `A`, so answering with either
+   * one would silently target the wrong campus's students — worse than refusing.
+   */
+  it('refuses a bare code that names a batch at more than one campus', async () => {
+    const { service, prisma } = makeService();
+    prisma.batch.findMany.mockResolvedValue([
+      { ...FOUNDATION, campus: { code: 'VELS' } },
+      { id: 'batch-srm-a', code: 'A', campus: { code: 'SRM' } },
+    ]);
+
+    await expect(service.resolveSelector('A')).rejects.toBeInstanceOf(BadRequestException);
   });
 
   /**
@@ -82,13 +108,16 @@ describe('resolveSelector', () => {
   it('rejects an unknown batch instead of falling back to all batches', async () => {
     const { service, prisma } = makeService();
     prisma.batch.findUnique.mockResolvedValue(null);
+    prisma.batch.findMany.mockResolvedValue([]);
 
-    await expect(service.resolveSelector('Z')).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.resolveSelector('Z', 'campus-vels'),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('rejects a well-formed uuid that is not a batch', async () => {
     const { service, prisma } = makeService();
-    prisma.batch.count.mockResolvedValue(0);
+    prisma.batch.findUnique.mockResolvedValue(null);
 
     await expect(
       service.resolveSelector('11111111-2222-3333-4444-555555555555'),

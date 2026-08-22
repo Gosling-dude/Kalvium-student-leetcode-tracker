@@ -20,6 +20,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useTheme } from 'next-themes';
 import {
   CalendarCheck,
+  ClipboardCheck,
   LayoutDashboard,
   LineChart,
   Moon,
@@ -35,6 +36,7 @@ import { Button } from './ui';
 const NAV = [
   { href: '/student', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/student/assignments', label: 'Assignments', icon: CalendarCheck },
+  { href: '/student/baseline-tests', label: 'Baseline Tests', icon: ClipboardCheck },
   { href: '/student/leaderboard', label: 'Leaderboard', icon: Trophy },
   { href: '/student/progress', label: 'My Progress', icon: LineChart },
   { href: '/student/profile', label: 'Profile', icon: UserRound },

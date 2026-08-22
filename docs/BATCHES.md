@@ -1,9 +1,17 @@
 # Batches
 
-Two batches run today — `A` (Foundation Level) and `B` (Intermediate Level) — but nothing
-in the schema or the code below it assumes that number. Adding `C` is a row in the
+Two levels run at each campus — `A` (Foundation Level) and `B` (Intermediate Level), plus
+`PENDING` (Placement Pending) where a campus has students awaiting a diagnostic result.
+Nothing in the schema or the code below it assumes that number. Adding `C` is a row in the
 `batches` table plus nothing else: every filter, report, export and email discovers
 batches from the database.
+
+> **Batches are campus-scoped.** Since multi-campus support landed, `Batch.code` and
+> `Batch.name` are unique *per campus*, not globally: `VELS/A` and `SRM/A` are two
+> different batches that share a code and a name. Every lookup therefore carries a campus,
+> and a bare code with no campus is rejected as ambiguous rather than resolved to whichever
+> row came back first. See [CAMPUSES.md](CAMPUSES.md) for the full picture — this document
+> covers what is true *within* one campus.
 
 ## The two questions that must not be confused
 

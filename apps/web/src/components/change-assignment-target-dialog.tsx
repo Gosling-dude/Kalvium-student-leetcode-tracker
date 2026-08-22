@@ -1,9 +1,12 @@
 'use client';
 
 /**
- * "Change Assignment Target" (§9) — reconfigure which batch(es) an existing assignment
- * currently applies to, most often a pre-batch legacy row ("All students") being scoped
- * to Foundation, Intermediate, or explicitly kept as "Both".
+ * "Change Assignment Target" (§9) — reconfigure which campus and batch an existing
+ * assignment currently applies to.
+ *
+ * The campus half is chosen first and the batch list follows it, for the same reason the
+ * create form works that way: both campuses have a "Foundation Level", so a flat list
+ * would offer two identical labels meaning different cohorts.
  *
  * Mirrors `MoveBatchDialog`'s shape and the same instinct: state plainly what does and
  * does not change. What does not change is every day already scored against this
@@ -14,25 +17,27 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import type { AssignmentSummary, BatchSummary } from '@dsa/shared';
+import type { AssignmentSummary, BatchSummary, CampusSummary } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { Badge, Button, Modal } from '@/components/ui';
 
 const BOTH = 'BOTH';
+const ALL_CAMPUSES = 'ALL';
 
 export function ChangeAssignmentTargetDialog({
   assignment,
-  batches,
+  campuses,
   open,
   onClose,
 }: {
   assignment: AssignmentSummary | null;
-  batches: BatchSummary[];
+  campuses: CampusSummary[];
   open: boolean;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  const [campus, setCampus] = useState<string>('');
   const [target, setTarget] = useState<string>('');
   const [reason, setReason] = useState('');
 
@@ -42,18 +47,42 @@ export function ChangeAssignmentTargetDialog({
     enabled: open && !!assignment,
   });
 
+  // Batches for the campus being retargeted *to*, so the list can never offer a batch
+  // that does not belong to it — which the backend would reject anyway, but only after
+  // the admin had already chosen it.
+  const campusBatches = useQuery({
+    queryKey: ['campus-batches', campus],
+    queryFn: () => api.campusBatches(campus),
+    enabled: open && campus !== '' && campus !== ALL_CAMPUSES,
+  });
+  const batches: BatchSummary[] = campus === ALL_CAMPUSES ? [] : (campusBatches.data ?? []);
+
+  const campusOptions = [
+    { value: ALL_CAMPUSES, label: 'All campuses' },
+    ...campuses.map((entry) => ({ value: entry.id, label: entry.name })),
+  ];
   const options = [
-    { value: BOTH, label: 'Both (all batches)' },
+    { value: BOTH, label: 'All batches' },
     ...batches.map((batch) => ({ value: batch.id, label: batch.name })),
   ];
-  const currentLabel = assignment?.batchId
-    ? (assignment.batchName ?? 'that batch')
-    : 'Both (all batches)';
-  const targetLabel = options.find((option) => option.value === target)?.label ?? null;
-  const isNoop = target !== '' && (target === (assignment?.batchId ?? BOTH));
+
+  const currentLabel = assignment?.audienceLabel ?? 'All campuses — All batches';
+  const campusLabel = campusOptions.find((option) => option.value === campus)?.label ?? null;
+  const batchLabel = options.find((option) => option.value === target)?.label ?? null;
+  const targetLabel = campusLabel && batchLabel ? `${campusLabel} — ${batchLabel}` : null;
+  const isNoop =
+    campus !== '' &&
+    campus === (assignment?.campusId ?? ALL_CAMPUSES) &&
+    (target === '' || target === (assignment?.batchId ?? BOTH));
 
   const change = useMutation({
-    mutationFn: () => api.changeAssignmentTarget(assignment!.id, target, reason.trim() || undefined),
+    mutationFn: () =>
+      api.changeAssignmentTarget(
+        assignment!.id,
+        campus,
+        target || BOTH,
+        reason.trim() || undefined,
+      ),
     onSuccess: () => {
       toast.success(`Target changed to ${targetLabel ?? 'the new audience'}`, {
         description: 'Days already scored keep the results they were actually computed with.',
@@ -69,6 +98,7 @@ export function ChangeAssignmentTargetDialog({
   });
 
   const reset = (): void => {
+    setCampus('');
     setTarget('');
     setReason('');
   };
@@ -91,10 +121,12 @@ export function ChangeAssignmentTargetDialog({
             {assignment.problems.length === 1 ? '' : 's'}
           </p>
           <p className="text-[var(--color-fg-muted)]">Currently targets: {currentLabel}</p>
-          {assignment.originalBatchId !== assignment.batchId || assignment.audienceChangedAt ? (
+          {assignment.originalBatchId !== assignment.batchId ||
+          assignment.originalCampusId !== assignment.campusId ||
+          assignment.audienceChangedAt ? (
             <p className="mt-1 text-xs text-[var(--color-fg-subtle)]">
-              Originally assigned to{' '}
-              {assignment.originalBatchId ? (assignment.originalBatchName ?? 'a batch') : 'Both (all batches)'}
+              Originally assigned to {assignment.originalCampusName ?? 'All campuses'} —{' '}
+              {assignment.originalBatchName ?? 'All batches'}
               {assignment.audienceChangedAt
                 ? ` · retargeted ${new Date(assignment.audienceChangedAt).toLocaleDateString()}`
                 : ''}
@@ -104,6 +136,37 @@ export function ChangeAssignmentTargetDialog({
         </div>
 
         <div className="space-y-1.5">
+          <span className="text-sm font-medium">Target campus</span>
+          <div className="space-y-1.5">
+            {campusOptions.map((option) => (
+              <label
+                key={option.value}
+                className="flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm hover:border-[var(--color-brand)]"
+              >
+                <input
+                  type="radio"
+                  name="target-campus"
+                  value={option.value}
+                  checked={campus === option.value}
+                  onChange={(event) => {
+                    setCampus(event.target.value);
+                    // A campus change invalidates the batch choice — ids belong to one
+                    // campus, and keeping one would target the wrong cohort.
+                    setTarget('');
+                  }}
+                />
+                {option.label}
+                {option.value === (assignment.campusId ?? ALL_CAMPUSES) ? (
+                  <Badge tone="neutral" className="ml-auto">
+                    current
+                  </Badge>
+                ) : null}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-1.5" hidden={campus === '' || campus === ALL_CAMPUSES}>
           <span className="text-sm font-medium">Target batch</span>
           <div className="space-y-1.5">
             {options.map((option) => (
@@ -167,7 +230,9 @@ export function ChangeAssignmentTargetDialog({
               {history.data.map((entry) => (
                 <li key={entry.id}>
                   {new Date(entry.changedAt).toLocaleDateString()}:{' '}
-                  {entry.fromBatchName ?? 'Both'} → {entry.toBatchName ?? 'Both'}
+                  {entry.fromCampusName ?? 'All campuses'} —{' '}
+                  {entry.fromBatchName ?? 'All batches'} → {entry.toCampusName ?? 'All campuses'} —{' '}
+                  {entry.toBatchName ?? 'All batches'}
                   {entry.changedByName ? ` by ${entry.changedByName}` : ''}
                   {entry.reason ? ` — ${entry.reason}` : ''}
                 </li>
@@ -187,7 +252,7 @@ export function ChangeAssignmentTargetDialog({
           </Button>
           <Button
             variant="primary"
-            disabled={!target || isNoop}
+            disabled={campus === '' || isNoop}
             loading={change.isPending}
             onClick={() => change.mutate()}
           >

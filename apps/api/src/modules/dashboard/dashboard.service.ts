@@ -2,12 +2,15 @@ import { Injectable } from '@nestjs/common';
 import {
   CACHE_TTL,
   SYNC_STATUS_LABELS,
+  PENDING_PLACEMENT_BATCH_CODE,
   completionPercentage,
   isTrustworthySync,
+  selectAssignmentForScope,
   summarizeBucketAttempts,
   summarizeProblemStatuses,
   type AssignmentSummary,
   type DashboardBatchBreakdown,
+  type DashboardCampusBreakdown,
   type DashboardStats,
   type DayKey,
   type MentorBatchSection,
@@ -24,19 +27,31 @@ import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { AssignmentsService } from '../assignments/assignments.service';
 
-/** Options every dashboard read accepts. `batchId: null` means "all batches". */
+/**
+ * Options every dashboard read accepts.
+ *
+ * `null`/absent widens: no `campusId` is every campus, no `batchId` is every batch. The
+ * two are always applied together against the values *frozen on the day's rows*, never
+ * against the student's current campus or batch (§17).
+ */
 export interface DashboardFilter {
+  campusId?: string | null;
   batchId?: string | null;
   squadId?: string;
+}
+
+/** The composite key a `Campus → Batch` grouping is bucketed under. */
+function scopeKey(campusId: string | null, batchId: string | null): string {
+  return `${campusId ?? '-'}|${batchId ?? '-'}`;
 }
 
 /**
  * A `DailyStatus` row joined to the student fields the dashboard renders.
  *
- * Note `batchId` on the row itself: it is the batch the student was in *on that day*,
- * frozen by the rollup. Every batch grouping below uses it rather than
- * `student.batchId`, which is why a student who moved yesterday still appears under
- * their old batch in yesterday's numbers (§7).
+ * Note `campusId` and `batchId` on the row itself: they are the campus and batch the
+ * student was in *on that day*, frozen by the rollup. Every grouping below uses them
+ * rather than `student.campusId`/`student.batchId`, which is why a student who moved or
+ * transferred yesterday still appears under yesterday's campus and batch (§7, §17).
  */
 type DetailedStatusRow = Awaited<ReturnType<DashboardService['loadStatusesWithProblems']>>[number];
 
@@ -51,18 +66,26 @@ export class DashboardService {
 
   async getStats(dayKey?: DayKey, filter: DashboardFilter = {}): Promise<DashboardStats> {
     const day = dayKey ?? this.time.today();
+    const campusId = filter.campusId ?? null;
     const batchId = filter.batchId ?? null;
-    const cacheKey = `dashboard:${day}:stats:${batchId ?? 'all'}`;
+    const cacheKey = `dashboard:${day}:stats:${campusId ?? 'all'}:${batchId ?? 'all'}`;
 
     return this.cache.remember(cacheKey, CACHE_TTL.dashboard, async () => {
       const [assignments, totalStudents, statuses, lastJob] = await Promise.all([
         this.assignments.findAllByDay(day),
         this.prisma.student.count({
-          where: { status: 'ACTIVE', ...(batchId ? { batchId } : {}) },
+          where: {
+            status: 'ACTIVE',
+            ...(campusId ? { campusId } : {}),
+            ...(batchId ? { batchId } : {}),
+          },
         }),
         // With-problems, not the lighter `loadStatuses`: the attempted/not-attempted
         // split below needs each student's per-problem outcomes, not just the totals.
-        this.loadStatusesWithProblems(day, { batchId }),
+        // Both halves of the scope, not just the batch. Dropping `campusId` here made
+        // `?campus=VELS` return every campus's rows — the filter looked applied (the
+        // headline count changed) while the breakdowns silently showed everyone.
+        this.loadStatusesWithProblems(day, { campusId, batchId }),
         this.prisma.syncJob.findFirst({
           where: { status: { in: ['COMPLETED', 'COMPLETED_WITH_ERRORS'] } },
           orderBy: { finishedAt: 'desc' },
@@ -74,7 +97,8 @@ export class DashboardService {
       // Per-batch first: each batch is bucketed against *its own* problem count, so a
       // 5-problem Intermediate day and a 4-problem Foundation day are both reported
       // honestly instead of being flattened to one denominator (§10).
-      const batchBreakdown = this.buildBatchBreakdown(active, assignments, batchId);
+      const batchBreakdown = this.buildBatchBreakdown(active, assignments, campusId, batchId);
+      const campusBreakdown = await this.buildCampusBreakdown(active, campusId);
 
       // The overall bucket array spans the largest assignment of the day, so no student
       // is dropped into a bucket that does not exist.
@@ -114,16 +138,18 @@ export class DashboardService {
 
       return {
         dayKey: day,
+        campusId,
         batchId,
         totalStudents,
         activeStudents: active.length,
+        campusBreakdown,
         batchBreakdown,
         // Only meaningful when a single problem set is in view. On an unfiltered day
         // where batches were given different sets, any one of them would misreport that
         // batch's problems as everyone's, so it is null and `batchBreakdown` carries the
         // per-batch truth instead.
         assignment: batchId
-          ? this.findAssignmentFor(assignments, batchId)
+          ? this.findAssignmentFor(assignments, { campusId, batchId })
           : assignments.length === 1
             ? assignments[0]!
             : null,
@@ -170,8 +196,11 @@ export class DashboardService {
     filter: DashboardFilter = {},
   ): Promise<MentorDashboard> {
     const day = dayKey ?? this.time.today();
+    const campusId = filter.campusId ?? null;
     const batchId = filter.batchId ?? null;
-    const cacheKey = `mentor:${day}:${filter.squadId ?? 'all'}:${batchId ?? 'all'}`;
+    const cacheKey = `mentor:${day}:${filter.squadId ?? 'all'}:${campusId ?? 'all'}:${
+      batchId ?? 'all'
+    }`;
 
     return this.cache.remember(cacheKey, CACHE_TTL.dashboard, async () => {
       const [assignments, statuses, ranks] = await Promise.all([
@@ -186,30 +215,44 @@ export class DashboardService {
       const rankByStudent = new Map(ranks.map((r) => [r.studentId, r.rank]));
       const rows = statuses.map((status) => this.toBucketRow(status, rankByStudent));
 
-      // Group by the *historical* batch on the row, so a student who has since moved is
-      // still listed under the batch they were in on this day.
-      const byBatch = new Map<string | null, MentorBucketRow[]>();
+      // Group by the *historical* campus and batch on the row, so a student who has since
+      // moved or transferred is still listed under where they were on this day. The key is
+      // the pair: SRM Foundation and Vels Foundation are separate sections with separate
+      // problem sets, and merging them would misreport both (§11, §17).
+      const byScope = new Map<
+        string,
+        { campusId: string | null; batchId: string | null; rows: MentorBucketRow[] }
+      >();
       for (const [index, row] of rows.entries()) {
-        const key = statuses[index]!.batchId;
-        const list = byBatch.get(key) ?? [];
-        list.push(row);
-        byBatch.set(key, list);
+        const status = statuses[index]!;
+        const key = scopeKey(status.campusId, status.batchId);
+        const group =
+          byScope.get(key) ?? { campusId: status.campusId, batchId: status.batchId, rows: [] };
+        group.rows.push(row);
+        byScope.set(key, group);
       }
 
-      const batchOrder = await this.batchOrder();
-      const sections: MentorBatchSection[] = [...byBatch.entries()]
-        .sort(([a], [b]) => (batchOrder.get(a) ?? 999) - (batchOrder.get(b) ?? 999))
-        .map(([sectionBatchId, sectionRows]) => {
-          const assignment = this.findAssignmentFor(assignments, sectionBatchId);
+      const [batchOrder, campusOrder] = await Promise.all([this.batchOrder(), this.campusOrder()]);
+      const sections: MentorBatchSection[] = [...byScope.values()]
+        .sort(
+          (a, b) =>
+            (campusOrder.get(a.campusId) ?? 999) - (campusOrder.get(b.campusId) ?? 999) ||
+            (batchOrder.get(a.batchId) ?? 999) - (batchOrder.get(b.batchId) ?? 999),
+        )
+        .map((group) => {
+          const assignment = this.findAssignmentFor(assignments, group);
           const assignedCount = assignment?.problems.length ?? 0;
           return {
-            batchId: sectionBatchId,
-            batchName: assignment?.batchName ?? sectionRows[0]?.batchName ?? null,
-            batchCode: assignment?.batchCode ?? sectionRows[0]?.batchCode ?? null,
+            campusId: group.campusId,
+            campusName: assignment?.campusName ?? group.rows[0]?.campusName ?? null,
+            campusCode: assignment?.campusCode ?? group.rows[0]?.campusCode ?? null,
+            batchId: group.batchId,
+            batchName: assignment?.batchName ?? group.rows[0]?.batchName ?? null,
+            batchCode: assignment?.batchCode ?? group.rows[0]?.batchCode ?? null,
             assignment,
             assignedCount,
-            buckets: this.bucketise(sectionRows, assignedCount),
-            totalStudents: sectionRows.length,
+            buckets: this.bucketise(group.rows, assignedCount),
+            totalStudents: group.rows.length,
           };
         });
 
@@ -217,9 +260,12 @@ export class DashboardService {
 
       return {
         dayKey: day,
+        campusId,
         batchId,
         sections,
-        assignment: batchId ? this.findAssignmentFor(assignments, batchId) : null,
+        assignment: batchId
+          ? this.findAssignmentFor(assignments, { campusId, batchId })
+          : null,
         buckets: this.bucketise(rows, maxAssigned),
         totalStudents: rows.length,
       } satisfies MentorDashboard;
@@ -252,6 +298,7 @@ export class DashboardService {
   private statusWhere(dayKey: DayKey, filter: DashboardFilter) {
     return {
       dayKey,
+      ...(filter.campusId ? { campusId: filter.campusId } : {}),
       ...(filter.batchId ? { batchId: filter.batchId } : {}),
       student: {
         status: 'ACTIVE' as const,
@@ -266,75 +313,179 @@ export class DashboardService {
         include: {
           squad: { select: { name: true } },
           batch: { select: { name: true, code: true } },
+          campus: { select: { name: true, code: true } },
           syncState: { select: { status: true, lastError: true } },
         },
       },
       batch: { select: { name: true, code: true } },
+      campus: { select: { name: true, code: true } },
     };
   }
 
   private buildBatchBreakdown(
     statuses: DetailedStatusRow[],
     assignments: AssignmentSummary[],
+    filterCampusId: string | null,
     filterBatchId: string | null,
   ): DashboardBatchBreakdown[] {
-    const byBatch = new Map<string | null, DetailedStatusRow[]>();
+    const byScope = new Map<
+      string,
+      { campusId: string | null; batchId: string | null; rows: DetailedStatusRow[] }
+    >();
     for (const status of statuses) {
-      const list = byBatch.get(status.batchId) ?? [];
-      list.push(status);
-      byBatch.set(status.batchId, list);
+      const key = scopeKey(status.campusId, status.batchId);
+      const group =
+        byScope.get(key) ?? { campusId: status.campusId, batchId: status.batchId, rows: [] };
+      group.rows.push(status);
+      byScope.set(key, group);
     }
 
-    // A batch with an assignment but no students yet still deserves a row, otherwise the
-    // dashboard silently omits a batch that was in fact given work.
+    // A group with an assignment but no students yet still deserves a row, otherwise the
+    // dashboard silently omits an audience that was in fact given work.
     if (filterBatchId === null) {
       for (const assignment of assignments) {
-        if (!byBatch.has(assignment.batchId)) byBatch.set(assignment.batchId, []);
+        if (filterCampusId !== null && assignment.campusId !== filterCampusId) continue;
+        const key = scopeKey(assignment.campusId, assignment.batchId);
+        if (!byScope.has(key)) {
+          byScope.set(key, {
+            campusId: assignment.campusId,
+            batchId: assignment.batchId,
+            rows: [],
+          });
+        }
       }
     }
 
-    return [...byBatch.entries()]
-      .map(([batchId, rows]) => {
-        const assignment = this.findAssignmentFor(assignments, batchId);
+    return [...byScope.values()]
+      .map((group) => {
+        const assignment = this.findAssignmentFor(assignments, group);
         const assignedCount = assignment?.problems.length ?? 0;
         const buckets = new Array<number>(Math.max(assignedCount, 1) + 1).fill(0);
-        for (const row of rows) {
+        for (const row of group.rows) {
           const index = Math.min(row.solvedCount, buckets.length - 1);
           buckets[index] = (buckets[index] ?? 0) + 1;
         }
 
         const attemptCounts = summarizeBucketAttempts(
-          rows.map((row) => summarizeProblemStatuses(row.problemStatuses)),
+          group.rows.map((row) => summarizeProblemStatuses(row.problemStatuses)),
         );
 
         return {
-          batchId,
-          batchName: assignment?.batchName ?? rows[0]?.batch?.name ?? null,
-          batchCode: assignment?.batchCode ?? rows[0]?.batch?.code ?? null,
-          activeStudents: rows.length,
+          campusId: group.campusId,
+          campusName: assignment?.campusName ?? group.rows[0]?.campus?.name ?? null,
+          campusCode: assignment?.campusCode ?? group.rows[0]?.campus?.code ?? null,
+          batchId: group.batchId,
+          batchName: assignment?.batchName ?? group.rows[0]?.batch?.name ?? null,
+          batchCode: assignment?.batchCode ?? group.rows[0]?.batch?.code ?? null,
+          activeStudents: group.rows.length,
           assignedCount,
           solvedBuckets: buckets,
           completionPercent: completionPercentage(
-            rows.reduce((n, r) => n + r.solvedCount, 0),
-            rows.reduce((n, r) => n + r.assignedCount, 0),
+            group.rows.reduce((n, r) => n + r.solvedCount, 0),
+            group.rows.reduce((n, r) => n + r.assignedCount, 0),
           ),
           attemptedNotSolvedStudents: attemptCounts.studentsAttemptedCount,
           notAttemptedStudents: attemptCounts.studentsNotAttemptedCount,
         } satisfies DashboardBatchBreakdown;
       })
-      .sort((a, b) => (a.batchCode ?? 'zz').localeCompare(b.batchCode ?? 'zz'));
+      .sort(
+        (a, b) =>
+          (a.campusCode ?? 'zz').localeCompare(b.campusCode ?? 'zz') ||
+          (a.batchCode ?? 'zz').localeCompare(b.batchCode ?? 'zz'),
+      );
   }
 
-  /** The assignment applying to a batch: its own, else the pre-batch batch-less one. */
+  /**
+   * Per-campus figures for the day.
+   *
+   * Computed from the day's rows directly rather than summed from `batchBreakdown`: a
+   * campus total must count every student at that campus, including those in a batch that
+   * had no assignment and those still awaiting placement, and a sum over batch rows would
+   * quietly drop whichever of those the batch grouping did not produce a row for (§32).
+   */
+  private async buildCampusBreakdown(
+    statuses: DetailedStatusRow[],
+    filterCampusId: string | null,
+  ): Promise<DashboardCampusBreakdown[]> {
+    const byCampus = new Map<string | null, DetailedStatusRow[]>();
+    for (const status of statuses) {
+      const list = byCampus.get(status.campusId) ?? [];
+      list.push(status);
+      byCampus.set(status.campusId, list);
+    }
+
+    // Every active campus gets a row even on a day it had no work, so the dashboard shows
+    // "SRM — 0 assigned" rather than omitting the campus and looking like it does not exist.
+    const campuses = await this.prisma.campus.findMany({
+      where: { status: 'ACTIVE', ...(filterCampusId ? { id: filterCampusId } : {}) },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: { id: true, name: true, code: true },
+    });
+    for (const campus of campuses) {
+      if (!byCampus.has(campus.id)) byCampus.set(campus.id, []);
+    }
+
+    const pending = await this.prisma.student.groupBy({
+      by: ['campusId'],
+      where: {
+        status: 'ACTIVE',
+        ...(filterCampusId ? { campusId: filterCampusId } : {}),
+        OR: [{ batchId: null }, { batch: { code: PENDING_PLACEMENT_BATCH_CODE } }],
+      },
+      _count: { _all: true },
+    });
+    const pendingByCampus = new Map(pending.map((row) => [row.campusId, row._count._all]));
+
+    const byId = new Map(campuses.map((campus) => [campus.id, campus]));
+    const order = new Map(campuses.map((campus, index) => [campus.id, index]));
+
+    return [...byCampus.entries()]
+      .map(([campusId, rows]) => {
+        const attemptCounts = summarizeBucketAttempts(
+          rows.map((row) => summarizeProblemStatuses(row.problemStatuses)),
+        );
+        const solvedTotal = rows.reduce((n, r) => n + r.solvedCount, 0);
+        const assignedTotal = rows.reduce((n, r) => n + r.assignedCount, 0);
+        const campus = campusId ? byId.get(campusId) : null;
+
+        return {
+          campusId,
+          campusName: campus?.name ?? rows[0]?.campus?.name ?? null,
+          campusCode: campus?.code ?? rows[0]?.campus?.code ?? null,
+          activeStudents: rows.length,
+          assignedTotal,
+          solvedTotal,
+          completionPercent: completionPercentage(solvedTotal, assignedTotal),
+          attemptedNotSolvedStudents: attemptCounts.studentsAttemptedCount,
+          notAttemptedStudents: attemptCounts.studentsNotAttemptedCount,
+          awaitingPlacementStudents: pendingByCampus.get(campusId) ?? 0,
+        } satisfies DashboardCampusBreakdown;
+      })
+      .sort((a, b) => (order.get(a.campusId ?? '') ?? 999) - (order.get(b.campusId ?? '') ?? 999));
+  }
+
+  /**
+   * The assignment applying to one `Campus → Batch` group.
+   *
+   * Delegates to the shared three-tier resolver rather than re-implementing it, so the
+   * dashboard's idea of "what was assigned" and the rollup's are guaranteed identical.
+   */
   private findAssignmentFor(
     assignments: AssignmentSummary[],
-    batchId: string | null,
+    scope: { campusId: string | null; batchId: string | null },
   ): AssignmentSummary | null {
-    if (batchId !== null) {
-      const own = assignments.find((assignment) => assignment.batchId === batchId);
-      if (own) return own;
-    }
-    return assignments.find((assignment) => assignment.batchId === null) ?? null;
+    return selectAssignmentForScope(assignments, scope);
+  }
+
+  private async campusOrder(): Promise<Map<string | null, number>> {
+    const campuses = await this.prisma.campus.findMany({
+      select: { id: true, sortOrder: true },
+      orderBy: { sortOrder: 'asc' },
+    });
+    const order = new Map<string | null, number>(campuses.map((c) => [c.id, c.sortOrder]));
+    // Pre-campus rows sort last — a historical remnant, not a current campus.
+    order.set(null, 998);
+    return order;
   }
 
   private async batchOrder(): Promise<Map<string | null, number>> {
@@ -380,6 +531,10 @@ export class DashboardService {
       name: status.student.name,
       email: status.student.email,
       squadName: status.student.squad?.name ?? null,
+      // The campus recorded on the row (historical), falling back to the student's
+      // current campus only for pre-campus rows that never had one.
+      campusName: status.campus?.name ?? status.student.campus?.name ?? null,
+      campusCode: status.campus?.code ?? status.student.campus?.code ?? null,
       // The batch recorded on the row (historical), falling back to the student's
       // current batch only for pre-batch rows that never had one.
       batchName: status.batch?.name ?? status.student.batch?.name ?? null,

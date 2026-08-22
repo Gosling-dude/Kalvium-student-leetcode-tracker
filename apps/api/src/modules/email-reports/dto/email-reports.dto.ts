@@ -60,6 +60,15 @@ export class GenerateEmailDto extends RecipientsDto {
   squadId?: string;
 
   /**
+   * Which campus this report covers. Omitted produces the all-campuses report; supplying
+   * one produces a campus-scoped report whose numbers describe only that campus (§33).
+   */
+  @ApiPropertyOptional({ description: 'Campus this report covers. Omit for all campuses.' })
+  @IsOptional()
+  @IsUUID()
+  campusId?: string;
+
+  /**
    * Which batch this report covers. Omitted produces the overall report across every
    * batch; supplying one produces "Foundation"/"Intermediate" reports that can be
    * generated, approved and sent independently of each other (§13).
@@ -221,6 +230,12 @@ export class ListEmailHistoryDto {
   @IsOptional()
   @IsString()
   dayKey?: string;
+
+  @ApiPropertyOptional({ description: 'Campus id or code. Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
 
   @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias' })
   @IsOptional()

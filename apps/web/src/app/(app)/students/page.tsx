@@ -14,8 +14,9 @@ import {
 
 import { api, downloadFile } from '@/lib/api';
 import { timeAgo, todayKey } from '@/lib/utils';
-import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeChips, ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { MoveBatchDialog } from '@/components/move-batch-dialog';
+import { TransferCampusDialog } from '@/components/transfer-campus-dialog';
 import {
   Badge,
   Button,
@@ -43,13 +44,20 @@ export default function StudentsPage() {
   const [archiveScope, setArchiveScope] = useState('');
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [moving, setMoving] = useState<StudentSummary | null>(null);
+  const [transferring, setTransferring] = useState<StudentSummary | null>(null);
 
-  const { selected: batch, batches } = useBatchFilter();
+  const { campus, batch, campuses, batches } = useScopeFilter();
+  /** Squad number and placement-pending are directory-only filters (§13). */
+  const [squadNumber, setSquadNumber] = useState('');
+  const [awaitingPlacement, setAwaitingPlacement] = useState(false);
 
   const filters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
 
   const students = useQuery({
-    queryKey: ['students', { page, search, squadId, syncStatus, batch, cohort, archiveScope }],
+    queryKey: [
+      'students',
+      { page, search, squadId, syncStatus, campus, batch, cohort, archiveScope, squadNumber, awaitingPlacement },
+    ],
     queryFn: () =>
       api.students({
         page,
@@ -58,8 +66,11 @@ export default function StudentsPage() {
         squadId,
         syncStatus,
         sortBy: 'name',
+        campus: campus ?? undefined,
         batch: batch ?? undefined,
         cohort: cohort || undefined,
+        squadNumber: squadNumber || undefined,
+        ...(awaitingPlacement ? { awaitingPlacement: 'true' } : {}),
         ...(archiveScope === 'all'
           ? { includeArchived: 'true' }
           : archiveScope === 'ARCHIVED'
@@ -71,8 +82,9 @@ export default function StudentsPage() {
   // Today's completion for the table. Read from the daily tracker rather than recomputed
   // here, so this column can never disagree with the mentor view about the same student.
   const today = useQuery({
-    queryKey: ['mentor', todayKey(), batch],
-    queryFn: () => api.mentorDashboard(todayKey(), undefined, batch ?? undefined),
+    queryKey: ['mentor', todayKey(), campus, batch],
+    queryFn: () =>
+      api.mentorDashboard(todayKey(), undefined, campus ?? undefined, batch ?? undefined),
     staleTime: 60_000,
   });
 
@@ -117,7 +129,7 @@ export default function StudentsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <BatchFilter />
+          <ScopeFilter />
           <Button
             onClick={() =>
               void downloadFile('/students/import/template', 'dsa-tracker-students.xlsx')
@@ -190,6 +202,11 @@ export default function StudentsPage() {
             className="min-w-56 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
           />
 
+          {/*
+            Squads are narrowed to the selected campus. Squad numbers repeat across
+            campuses — SRM has 83, Vels has 8 — so an unnarrowed list would offer two
+            entries a mentor cannot tell apart (§13).
+          */}
           <select
             value={squadId}
             onChange={(event) => {
@@ -200,11 +217,18 @@ export default function StudentsPage() {
             className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none"
           >
             <option value="">All squads</option>
-            {filters.data?.squads.map((squad) => (
-              <option key={squad.id} value={squad.id}>
-                {squad.name} ({squad.studentCount})
-              </option>
-            ))}
+            {(filters.data?.squads ?? [])
+              .filter(
+                (squad) =>
+                  campus === null ||
+                  squad.campusId ===
+                    filters.data?.campuses.find((entry) => entry.code === campus)?.id,
+              )
+              .map((squad) => (
+                <option key={squad.id} value={squad.id}>
+                  {squad.name} ({squad.studentCount})
+                </option>
+              ))}
           </select>
 
           <select
@@ -228,6 +252,23 @@ export default function StudentsPage() {
             Archived students are hidden by default — they have left the programme. They
             remain reachable here because their history is intact and still worth reading.
           */}
+          {/*
+            "Placement pending" is the SRM intake's default state and the query a mentor
+            runs most often in the first weeks: who still needs a diagnostic result (§13)?
+          */}
+          <label className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={awaitingPlacement}
+              onChange={(event) => {
+                setAwaitingPlacement(event.target.checked);
+                setPage(1);
+              }}
+              className="size-3.5 accent-[var(--color-brand)]"
+            />
+            Placement pending
+          </label>
+
           <select
             value={archiveScope}
             onChange={(event) => {
@@ -240,6 +281,36 @@ export default function StudentsPage() {
             <option value="">Current students</option>
             <option value="all">Current + archived</option>
             <option value="ARCHIVED">Archived only</option>
+          </select>
+
+          <select
+            value={squadNumber}
+            onChange={(event) => {
+              setSquadNumber(event.target.value);
+              setPage(1);
+            }}
+            aria-label="Filter by squad number"
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none"
+          >
+            <option value="">All squad numbers</option>
+            {[
+              ...new Set(
+                (filters.data?.squadNumbers ?? [])
+                  .filter(
+                    (entry) =>
+                      campus === null ||
+                      entry.campusId ===
+                        filters.data?.campuses.find((c) => c.code === campus)?.id,
+                  )
+                  .map((entry) => entry.number),
+              ),
+            ]
+              .sort((a, b) => a - b)
+              .map((value) => (
+                <option key={value} value={value}>
+                  Squad {value}
+                </option>
+              ))}
           </select>
 
           <select
@@ -275,8 +346,9 @@ export default function StudentsPage() {
               <thead>
                 <tr>
                   <Th>Student</Th>
-                  <Th>Batch</Th>
+                  <Th>Campus / Batch</Th>
                   <Th className="text-right">Cohort</Th>
+                  <Th className="text-right">Squad</Th>
                   <Th className="text-right">Max belt</Th>
                   <Th>LeetCode</Th>
                   <Th>Streak</Th>
@@ -304,8 +376,19 @@ export default function StudentsPage() {
                       </p>
                     </Td>
                     <Td>
-                      <div className="flex items-center gap-1.5">
-                        <BatchChip code={student.batchCode} name={student.batchName} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <ScopeChips
+                          campusCode={student.campusCode}
+                          campusName={student.campusName}
+                          batchCode={student.batchCode}
+                          batchName={student.batchName}
+                        />
+                        {/* An explicit state, not an empty cell: these students are
+                            enrolled and waiting for a diagnostic result, which is a very
+                            different thing from missing data (§7, §13). */}
+                        {student.awaitingPlacement && student.status !== 'ARCHIVED' ? (
+                          <Badge tone="warning">Placement pending</Badge>
+                        ) : null}
                         {student.status === 'ARCHIVED' ? (
                           <Badge tone="neutral">Archived</Badge>
                         ) : null}
@@ -313,6 +396,9 @@ export default function StudentsPage() {
                     </Td>
                     <Td className="text-right tabular-nums text-[var(--color-fg-muted)]">
                       {student.cohort ?? '—'}
+                    </Td>
+                    <Td className="text-right tabular-nums text-[var(--color-fg-muted)]">
+                      {student.squadNumber ?? '—'}
                     </Td>
                     <Td className="text-right tabular-nums">{student.maxBeltLevel ?? '—'}</Td>
                     <Td>
@@ -352,13 +438,26 @@ export default function StudentsPage() {
                       {student.status === 'ARCHIVED' ? (
                         <span className="text-xs text-[var(--color-fg-subtle)]">—</span>
                       ) : (
-                        <Button
-                          variant="ghost"
-                          className="px-2 py-1 text-xs"
-                          onClick={() => setMoving(student)}
-                        >
-                          Move batch
-                        </Button>
+                        <span className="inline-flex gap-1">
+                          <Button
+                            variant="ghost"
+                            className="px-2 py-1 text-xs"
+                            onClick={() => setMoving(student)}
+                          >
+                            Move batch
+                          </Button>
+                          {/* Only offered when there is somewhere to transfer *to*.
+                              With one campus the control would be a dead end. */}
+                          {campuses.length > 1 ? (
+                            <Button
+                              variant="ghost"
+                              className="px-2 py-1 text-xs"
+                              onClick={() => setTransferring(student)}
+                            >
+                              Transfer campus
+                            </Button>
+                          ) : null}
+                        </span>
                       )}
                     </Td>
                   </tr>
@@ -391,6 +490,13 @@ export default function StudentsPage() {
         batches={batches}
         open={moving !== null}
         onClose={() => setMoving(null)}
+      />
+
+      <TransferCampusDialog
+        student={transferring}
+        campuses={campuses}
+        open={transferring !== null}
+        onClose={() => setTransferring(null)}
       />
     </div>
   );

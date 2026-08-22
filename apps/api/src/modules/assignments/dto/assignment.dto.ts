@@ -23,20 +23,42 @@ export class CreateAssignmentDto {
   dayKey!: string;
 
   /**
+   * Which campus receives this problem set.
+   *
+   * Omitted, or `all`, targets every campus. Naming a campus scopes the assignment to it,
+   * and any `batches` below are then resolved *within* that campus — which is what makes
+   * `campus=SRM, batches=[A]` mean SRM's Foundation and never Vels' (§9).
+   */
+  @ApiPropertyOptional({
+    example: 'SRM',
+    description: 'Campus id or code. Omit or "all" for every campus.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
+
+  /**
    * Which batches receive this problem set.
    *
-   * Omitted means every active batch — the "All" option in the UI — and creates one
-   * assignment *per batch* rather than a single shared row. Separate rows are what let
-   * a batch's problems be edited later without touching the other's, and what make
-   * "which set was this student evaluated against" answerable from the row itself.
+   * Omitted means "every batch in the selected campus" and creates a **single** row that
+   * says so, rather than fanning out into one row per batch. With more than one campus
+   * that fan-out would silently manufacture four or six assignments from a form filled in
+   * once, none of which the admin asked for (§10).
    *
-   * To give two batches *different* problems on the same day, post twice: once per
-   * batch, each with its own `problemUrls`.
+   * Naming batches creates one assignment *per batch*. Separate rows are what let a
+   * batch's problems be edited later without touching another's, and what make "which set
+   * was this student evaluated against" answerable from the row itself.
+   *
+   * To give two batches *different* problems on the same day, post twice: once per batch,
+   * each with its own `problemUrls`.
    */
   @ApiPropertyOptional({
     type: [String],
     example: ['A'],
-    description: 'Batch ids, codes (A/B) or aliases. Omit for all active batches.',
+    description:
+      'Batch ids, codes (A/B/PENDING) or aliases, resolved within `campus`. ' +
+      'Omit for every batch in that campus.',
   })
   @IsOptional()
   @IsArray()
@@ -136,16 +158,35 @@ export class AssignmentQueryDto extends PaginationQueryDto {
   @Matches(DAY_KEY)
   to?: string;
 
-  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias. Omit for all batches.' })
+  @ApiPropertyOptional({ description: 'Campus id or code. Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
+
+  @ApiPropertyOptional({
+    description: 'Batch id, code or alias, resolved within `campus`. Omit for all batches.',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(64)
   batch?: string;
 }
 
-/** `GET /assignments/day/:dayKey?batch=` — the day's set for one batch, or all of them. */
+/**
+ * `GET /assignments/day/:dayKey?campus=&batch=` — the day's set for one audience, or
+ * every audience's.
+ */
 export class AssignmentDayQueryDto {
-  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias. Omit for all batches.' })
+  @ApiPropertyOptional({ description: 'Campus id or code. Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
+
+  @ApiPropertyOptional({
+    description: 'Batch id, code or alias, resolved within `campus`. Omit for all batches.',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(64)
@@ -154,9 +195,20 @@ export class AssignmentDayQueryDto {
 
 /** `PATCH /assignments/:id/target` — "Change Assignment Target" (§9). */
 export class ChangeAssignmentTargetDto {
+  @ApiPropertyOptional({
+    example: 'SRM',
+    description: 'Campus id or code, or "ALL" for every campus. Omit to target every campus.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
+
   @ApiProperty({
     example: 'FOUNDATION',
-    description: 'Batch id, code (A/B), alias (foundation/intermediate), or "BOTH" for every batch.',
+    description:
+      'Batch id, code (A/B/PENDING), alias (foundation/intermediate), or "BOTH" for ' +
+      'every batch in the selected campus.',
   })
   @IsString()
   @MaxLength(64)

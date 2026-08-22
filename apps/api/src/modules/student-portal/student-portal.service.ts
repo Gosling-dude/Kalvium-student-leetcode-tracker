@@ -3,14 +3,22 @@
  *
  * Every number here is produced by the same services and cached tables the admin/mentor
  * screens read — `StudentsService.getProfile` (streak, totalSolved, heatmap, weekly/
- * monthly completion), `AssignmentsService` (batch-aware assignment resolution),
+ * monthly completion), `AssignmentsService` (campus + batch aware assignment resolution),
  * `LeaderboardService` (rank) and the `DailyProblemStatus` rows `RollupService` already
  * writes. Nothing is recomputed a second way, and identity is never taken from a request
  * parameter — every method here takes the authenticated `RequestUser` and resolves
  * `studentId` from it (§18, §19).
+ *
+ * With two campuses, that last property becomes load-bearing rather than tidy. The
+ * student's audience — their campus *and* batch — is read from their own record on the
+ * server every time, so there is no campus parameter for a student to change (§40). The
+ * cross-campus checks below are defence in depth on top of that: an SRM student asking
+ * for a Vels assignment by id gets the same 404 as for an id that does not exist, which
+ * means they cannot even probe whether it exists.
  */
 
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { scopeApplies } from '@dsa/shared';
 import type {
   AssignmentSummary,
   LeaderboardRow,
@@ -83,7 +91,12 @@ export class StudentPortalService {
       .reduce((sum, d) => sum + d.solvedCount, 0);
 
     const [todayAssignmentSummary, rank] = await Promise.all([
-      this.assignments.findByDay(today, profile.batchId),
+      // The audience is the student's own campus and batch, read from their record —
+      // never from anything the request carried.
+      this.assignments.findByDay(today, {
+        campusId: profile.campusId,
+        batchId: profile.batchId,
+      }),
       this.leaderboard.myRank(studentId, 'WEEKLY', today),
     ]);
 
@@ -93,8 +106,15 @@ export class StudentPortalService {
 
     return {
       name: profile.name,
+      campusId: profile.campusId,
+      campusName: profile.campusName,
+      campusCode: profile.campusCode,
       batchName: profile.batchName,
       batchCode: profile.batchCode,
+      // Surfaced so the portal can say "Placement Pending" rather than render a blank
+      // where a level should be — the student is enrolled, not missing data (§15, §34).
+      awaitingPlacement: profile.awaitingPlacement,
+      squadNumber: profile.squadNumber,
       cohort: profile.cohort,
       maxBeltLevel: profile.maxBeltLevel,
       currentStreak: profile.currentStreak,
@@ -106,7 +126,15 @@ export class StudentPortalService {
       monthlySolved,
       weeklyCompletionPercent: profile.weeklyCompletionPercent,
       monthlyCompletionPercent: profile.monthlyCompletionPercent,
-      currentRank: rank ? { period: 'WEEKLY', rank: rank.rank, total: rank.total } : null,
+      currentRank: rank
+        ? {
+            period: 'WEEKLY',
+            rank: rank.rank,
+            total: rank.total,
+            globalRank: rank.globalRank,
+            globalTotal: rank.globalTotal,
+          }
+        : null,
       recentDays: profile.recentDays.slice(0, 14).map((d) => ({
         dayKey: d.dayKey,
         solvedCount: d.solvedCount,
@@ -126,7 +154,7 @@ export class StudentPortalService {
     const page = await this.assignments.findAll({
       page: query.page,
       pageSize: query.pageSize,
-      batchId: student.batchId,
+      scope: { campusId: student.campusId, batchId: student.batchId },
     });
 
     // One indexed query for the whole page's outcomes, not one per row (§34).
@@ -171,27 +199,46 @@ export class StudentPortalService {
     const assignment = await this.assignments.findById(assignmentId);
     if (!assignment) throw new NotFoundException('Assignment not found');
 
-    // A batch-targeted assignment for a batch this student is not in is not a 403 —
-    // it is treated exactly like it does not exist, so a student cannot tell the
-    // difference between "wrong id" and "not your batch's assignment" (§9, §19).
-    if (assignment.batchId !== null && assignment.batchId !== student.batchId) {
-      throw new NotFoundException('Assignment not found');
-    }
+    // An assignment aimed at an audience this student is not in is not a 403 — it is
+    // treated exactly like it does not exist, so a student cannot tell the difference
+    // between "wrong id" and "another campus's assignment", and therefore cannot use this
+    // endpoint to enumerate what other campuses were set (§9, §19, §40).
+    //
+    // `scopeApplies` is the same predicate the resolver uses, so what a student may read
+    // and what they were actually assigned can never drift apart.
+    const applies = scopeApplies(
+      { campusId: assignment.campusId, batchId: assignment.batchId },
+      { campusId: student.campusId, batchId: student.batchId },
+    );
+    if (!applies) throw new NotFoundException('Assignment not found');
 
     return this.withOutcome(assignment, studentId);
   }
 
+  /**
+   * The leaderboard, at whichever of the three scopes the student asked for.
+   *
+   * Students may legitimately see all three (§15): the global board across every campus,
+   * their own campus's, and their own batch's. What they may *not* do is name someone
+   * else's scope — `campus` and `batch` are never read from the request. `scope` selects
+   * between "everyone", "my campus" and "my batch", and the ids come from the student's
+   * own record, so there is no parameter to tamper with (§40).
+   */
   async myLeaderboard(
     user: RequestUser,
     query: StudentLeaderboardQueryDto,
-  ): Promise<{ rows: LeaderboardRow[]; myStudentId: string }> {
+  ): Promise<{ rows: LeaderboardRow[]; myStudentId: string; scope: string }> {
     const studentId = this.requireStudentId(user);
-    const student = query.scope === 'mine' ? await this.students.findOne(studentId) : null;
+    const scope = query.scope ?? 'campus';
+    const student =
+      scope === 'global' ? null : await this.students.findOne(studentId);
 
     const rows = await this.leaderboard.getLeaderboard(query.period as Period, undefined, {
-      batchId: student?.batchId ?? undefined,
+      campusId: scope === 'global' ? undefined : (student?.campusId ?? undefined),
+      // "mine" is the student's own batch; "campus" stops at the campus.
+      batchId: scope === 'mine' ? (student?.batchId ?? undefined) : undefined,
     });
-    return { rows, myStudentId: studentId };
+    return { rows, myStudentId: studentId, scope };
   }
 
   // -------------------------------------------------------------------------
@@ -241,6 +288,9 @@ export class StudentPortalService {
     return {
       id: assignment.id,
       dayKey: assignment.dayKey,
+      campusId: assignment.campusId,
+      campusName: assignment.campusName,
+      campusCode: assignment.campusCode,
       batchId: assignment.batchId,
       batchName: assignment.batchName,
       batchCode: assignment.batchCode,

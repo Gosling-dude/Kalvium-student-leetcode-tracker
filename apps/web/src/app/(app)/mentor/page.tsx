@@ -14,7 +14,7 @@ import {
 
 import { api, downloadFile } from '@/lib/api';
 import { todayKey } from '@/lib/utils';
-import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeChips, ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import {
   Badge,
   Button,
@@ -36,21 +36,24 @@ import {
 export default function MentorPage() {
   const [dayKey, setDayKey] = useState(todayKey());
   const [exporting, setExporting] = useState(false);
-  const { selected: batch } = useBatchFilter();
+  const { campus, batch } = useScopeFilter();
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['mentor', dayKey, batch],
-    queryFn: () => api.mentorDashboard(dayKey, undefined, batch ?? undefined),
+    queryKey: ['mentor', dayKey, campus, batch],
+    queryFn: () => api.mentorDashboard(dayKey, undefined, campus ?? undefined, batch ?? undefined),
   });
 
   const onExport = async (): Promise<void> => {
     setExporting(true);
     try {
       // The export follows the filter: what you are looking at is what you download.
-      const scope = batch ? `&batch=${encodeURIComponent(batch)}` : '';
+      const scope =
+        (campus ? `&campus=${encodeURIComponent(campus)}` : '') +
+        (batch ? `&batch=${encodeURIComponent(batch)}` : '');
+      const suffix = [campus, batch].filter(Boolean).join('-');
       await downloadFile(
         `/reports/export/daily?dayKey=${dayKey}&format=XLSX${scope}`,
-        `daily-report-${dayKey}${batch ? `-${batch}` : ''}.xlsx`,
+        `daily-report-${dayKey}${suffix ? `-${suffix}` : ''}.xlsx`,
       );
       toast.success('Report downloaded');
     } catch (err) {
@@ -72,7 +75,7 @@ export default function MentorPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <BatchFilter />
+          <ScopeFilter />
           <label htmlFor="dayKey" className="sr-only">
             Date
           </label>
@@ -117,13 +120,27 @@ export default function MentorPage() {
   );
 }
 
-/** One batch's heading plus its "solved N" tables. */
+/**
+ * One `Campus → Batch` heading plus its "solved N" tables.
+ *
+ * The heading names both halves. Two sections labelled "Foundation Level" on one screen —
+ * one Vels, one SRM — would be indistinguishable, and a mentor acting on the wrong one is
+ * a real cost, not a cosmetic one (§11).
+ */
 function BatchSectionTables({ section }: { section: MentorBatchSection }) {
+  const heading = [section.campusName, section.batchName ?? 'No batch']
+    .filter(Boolean)
+    .join(' — ');
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
-        <BatchChip code={section.batchCode} name={section.batchName} />
-        <h2 className="text-base font-semibold">{section.batchName ?? 'No batch'}</h2>
+        <ScopeChips
+          campusCode={section.campusCode}
+          campusName={section.campusName}
+          batchCode={section.batchCode}
+          batchName={section.batchName}
+        />
+        <h2 className="text-base font-semibold">{heading}</h2>
         <span className="text-sm text-[var(--color-fg-muted)]">
           {section.assignedCount} assigned · {section.totalStudents} student
           {section.totalStudents === 1 ? '' : 's'}

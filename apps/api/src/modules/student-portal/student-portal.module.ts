@@ -5,9 +5,10 @@ import { AssignmentsModule } from '../assignments/assignments.module';
 import { LeaderboardModule } from '../leaderboard/leaderboard.module';
 import { StudentPortalController } from './student-portal.controller';
 import { StudentPortalService } from './student-portal.service';
+import { CampusesModule } from '../campuses/campuses.module';
 
 @Module({
-  imports: [StudentsModule, AssignmentsModule, LeaderboardModule],
+  imports: [CampusesModule, StudentsModule, AssignmentsModule, LeaderboardModule],
   controllers: [StudentPortalController],
   providers: [StudentPortalService],
 })

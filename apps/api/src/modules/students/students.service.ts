@@ -5,7 +5,10 @@ import {
   evaluateAchievements,
   heatmapIntensity,
   levelProgress,
+  normaliseSquadNumber,
+  PENDING_PLACEMENT_BATCH_CODE,
   type BatchHistoryEntry,
+  type CampusHistoryEntry,
   type Paginated,
   type StudentProfile,
   type StudentSummary,
@@ -30,9 +33,24 @@ const SORTABLE = [
 
 type StudentWithRelations = Student & {
   batch: { id: string; name: string; code: string } | null;
+  campus: { id: string; name: string; code: string } | null;
   squad: { id: string; name: string } | null;
   syncState: { status: string; lastSyncedAt: Date | null } | null;
 };
+
+/**
+ * The relations every student projection needs.
+ *
+ * Named once rather than repeated at each call site: the five `include` blocks that used
+ * to be written out by hand are exactly where a new relation gets forgotten on one route
+ * and the campus column silently renders blank on that screen alone.
+ */
+const STUDENT_INCLUDE = {
+  batch: true,
+  campus: true,
+  squad: true,
+  syncState: true,
+} as const;
 
 @Injectable()
 export class StudentsService {
@@ -49,7 +67,7 @@ export class StudentsService {
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.student.findMany({
         where,
-        include: { batch: true, squad: true, syncState: true },
+        include: STUDENT_INCLUDE,
         orderBy: { [sortBy]: query.sortOrder },
         skip: query.skip,
         take: query.take,
@@ -68,7 +86,7 @@ export class StudentsService {
   async findOne(id: string): Promise<StudentSummary> {
     const student = await this.prisma.student.findUnique({
       where: { id },
-      include: { batch: true, squad: true, syncState: true },
+      include: STUDENT_INCLUDE,
     });
     if (!student) throw new NotFoundException(`Student ${id} was not found`);
     return this.toSummary(student as StudentWithRelations);
@@ -81,14 +99,27 @@ export class StudentsService {
         email: dto.email.toLowerCase(),
         phone: dto.phone ?? null,
         leetcodeUsername: dto.leetcodeUsername?.toLowerCase() ?? null,
+        campusId: dto.campusId ?? null,
         batchId: dto.batchId ?? null,
         squadId: dto.squadId ?? null,
         cohort: dto.cohort ?? null,
         maxBeltLevel: dto.maxBeltLevel ?? null,
         status: dto.status ?? 'ACTIVE',
         syncState: { create: { status: 'NEVER_SYNCED' } },
-        // A student created straight into a batch starts their placement history there,
-        // so a later report about today can resolve their batch without guessing.
+        // A student created straight into a campus or batch starts their placement
+        // history there, so a later report about today can resolve both without guessing.
+        ...(dto.campusId
+          ? {
+              campusHistory: {
+                create: {
+                  toCampusId: dto.campusId,
+                  effectiveFromDayKey: this.time.today(),
+                  source: 'MANUAL' as const,
+                  reason: 'Initial campus at creation',
+                },
+              },
+            }
+          : {}),
         ...(dto.batchId
           ? {
               batchHistory: {
@@ -102,7 +133,7 @@ export class StudentsService {
             }
           : {}),
       },
-      include: { batch: true, squad: true, syncState: true },
+      include: STUDENT_INCLUDE,
     });
     return this.toSummary(student as StudentWithRelations);
   }
@@ -110,7 +141,7 @@ export class StudentsService {
   async update(id: string, dto: UpdateStudentDto): Promise<StudentSummary> {
     const before = await this.prisma.student.findUnique({
       where: { id },
-      select: { id: true, batchId: true, status: true },
+      select: { id: true, batchId: true, campusId: true, status: true },
     });
     if (!before) throw new NotFoundException(`Student ${id} was not found`);
 
@@ -122,6 +153,11 @@ export class StudentsService {
     // history trail as `POST /students/:id/move-batch`, or a placement made here would
     // be invisible to every historical query.
     const batchChanged = dto.batchId !== undefined && dto.batchId !== before.batchId;
+
+    // Same rule for campus. A campus change here must leave the same trail as
+    // `POST /students/:id/transfer-campus`, or a transfer made through this route would
+    // be invisible to every historical query and to the audit log (§16).
+    const campusChanged = dto.campusId !== undefined && dto.campusId !== before.campusId;
 
     // Archiving through this route records *when*, so "removed from the programme" is a
     // dated fact rather than an inference from the current status.
@@ -137,12 +173,26 @@ export class StudentsService {
         ...(dto.leetcodeUsername !== undefined
           ? { leetcodeUsername: dto.leetcodeUsername.toLowerCase() }
           : {}),
+        ...(dto.campusId !== undefined ? { campusId: dto.campusId } : {}),
         ...(dto.batchId !== undefined ? { batchId: dto.batchId } : {}),
         ...(dto.squadId !== undefined ? { squadId: dto.squadId } : {}),
         ...(dto.cohort !== undefined ? { cohort: dto.cohort } : {}),
         ...(dto.maxBeltLevel !== undefined ? { maxBeltLevel: dto.maxBeltLevel } : {}),
         ...(archiving ? { archivedAt: new Date() } : {}),
         ...(unarchiving ? { archivedAt: null, archivedReason: null } : {}),
+        ...(campusChanged
+          ? {
+              campusHistory: {
+                create: {
+                  fromCampusId: before.campusId,
+                  toCampusId: dto.campusId ?? null,
+                  effectiveFromDayKey: this.time.today(),
+                  source: 'MANUAL' as const,
+                  reason: 'Campus changed via student update',
+                },
+              },
+            }
+          : {}),
         ...(batchChanged
           ? {
               batchHistory: {
@@ -174,7 +224,7 @@ export class StudentsService {
             }
           : {}),
       },
-      include: { batch: true, squad: true, syncState: true },
+      include: STUDENT_INCLUDE,
     });
 
     return this.toSummary(student as StudentWithRelations);
@@ -292,14 +342,15 @@ export class StudentsService {
   async getProfile(id: string, days = 120): Promise<StudentProfile> {
     const student = await this.prisma.student.findUnique({
       where: { id },
-      include: { batch: true, squad: true, syncState: true },
+      include: STUDENT_INCLUDE,
     });
     if (!student) throw new NotFoundException(`Student ${id} was not found`);
 
     const today = this.time.today();
     const from = this.time.addDays(today, -(days - 1));
 
-    const [statuses, notes, achievements, placements] = await this.prisma.$transaction([
+    const [statuses, notes, achievements, placements, campusPlacements] =
+      await this.prisma.$transaction([
       this.prisma.dailyStatus.findMany({
         where: { studentId: id, dayKey: { gte: from, lte: today } },
         orderBy: { dayKey: 'asc' },
@@ -315,6 +366,14 @@ export class StudentsService {
         include: {
           fromBatch: { select: { name: true, code: true } },
           toBatch: { select: { name: true, code: true } },
+        },
+        orderBy: [{ effectiveFromDayKey: 'desc' }, { changedAt: 'desc' }],
+      }),
+      this.prisma.studentCampusHistory.findMany({
+        where: { studentId: id },
+        include: {
+          fromCampus: { select: { name: true, code: true } },
+          toCampus: { select: { name: true, code: true } },
         },
         orderBy: [{ effectiveFromDayKey: 'desc' }, { changedAt: 'desc' }],
       }),
@@ -401,6 +460,24 @@ export class StudentsService {
           changedAt: row.changedAt.toISOString(),
         }),
       ),
+      campusHistory: campusPlacements.map(
+        (row): CampusHistoryEntry => ({
+          id: row.id,
+          studentId: row.studentId,
+          fromCampusId: row.fromCampusId,
+          fromCampusName: row.fromCampus?.name ?? null,
+          fromCampusCode: row.fromCampus?.code ?? null,
+          toCampusId: row.toCampusId,
+          toCampusName: row.toCampus?.name ?? null,
+          toCampusCode: row.toCampus?.code ?? null,
+          effectiveFromDayKey: row.effectiveFromDayKey,
+          reason: row.reason,
+          source: row.source,
+          changedById: row.changedById,
+          changedByName: row.changedByName,
+          changedAt: row.changedAt.toISOString(),
+        }),
+      ),
       achievements: evaluated,
       difficultyBreakdown: {
         easy: student.easySolved,
@@ -468,28 +545,68 @@ export class StudentsService {
     await this.prisma.mentorNote.delete({ where: { id: noteId } });
   }
 
-  /** Distinct values powering the filter dropdowns. */
+  /**
+   * Distinct values powering the filter dropdowns.
+   *
+   * Batches and squads carry their campus so the directory's batch picker can narrow
+   * itself when a campus is chosen, rather than offering two identically-named
+   * "Foundation Level" options the user cannot tell apart (§10, §13).
+   */
   async getFilterOptions() {
-    const [batches, squads] = await this.prisma.$transaction([
-      this.prisma.batch.findMany({
+    const [campuses, batches, squads, squadNumbers] = await this.prisma.$transaction([
+      this.prisma.campus.findMany({
         where: { status: 'ACTIVE' },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-        // Archived students have left the programme and are not part of a batch's size.
-        include: { _count: { select: { students: { where: { status: 'ACTIVE' } } } } },
+        include: {
+          _count: {
+            select: {
+              students: { where: { status: 'ACTIVE' } },
+              batches: { where: { status: 'ACTIVE' } },
+            },
+          },
+        },
+      }),
+      this.prisma.batch.findMany({
+        where: { status: 'ACTIVE' },
+        orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
+        include: {
+          campus: { select: { name: true, code: true } },
+          // Archived students have left the programme and are not part of a batch's size.
+          _count: { select: { students: { where: { status: 'ACTIVE' } } } },
+        },
       }),
       this.prisma.squad.findMany({
         orderBy: { name: 'asc' },
         include: {
           batch: { select: { name: true } },
+          campus: { select: { id: true, name: true, code: true } },
           mentor: { select: { id: true, name: true } },
           _count: { select: { students: true } },
         },
       }),
+      this.prisma.squad.findMany({
+        where: { students: { some: { status: 'ACTIVE' } } },
+        select: { name: true, campusId: true },
+        orderBy: { name: 'asc' },
+      }),
     ]);
 
     return {
+      campuses: campuses.map((c) => ({
+        id: c.id,
+        name: c.name,
+        code: c.code,
+        description: c.description,
+        status: c.status,
+        sortOrder: c.sortOrder,
+        studentCount: c._count.students,
+        batchCount: c._count.batches,
+      })),
       batches: batches.map((b) => ({
         id: b.id,
+        campusId: b.campusId,
+        campusName: b.campus.name,
+        campusCode: b.campus.code,
         name: b.name,
         code: b.code,
         description: b.description,
@@ -502,6 +619,8 @@ export class StudentsService {
       squads: squads.map((g) => ({
         id: g.id,
         name: g.name,
+        campusId: g.campusId,
+        campusName: g.campus?.name ?? null,
         batchId: g.batchId,
         batchName: g.batch?.name ?? null,
         mentorId: g.mentorId,
@@ -509,6 +628,24 @@ export class StudentsService {
         studentCount: g._count.students,
         color: g.color,
       })),
+      /**
+       * Squad *numbers* in use, per campus — what the directory's squad filter offers.
+       *
+       * Separate from `squads` because the two answer different questions: `squads` is
+       * every squad record including empty ones, while this is the set a mentor can
+       * usefully filter by. Numbers repeat across campuses (SRM's 83, Vels' 8), so the
+       * campus travels with each one.
+       */
+      squadNumbers: squadNumbers
+        .map((squad) => ({
+          campusId: squad.campusId,
+          number: normaliseSquadNumber(squad.name),
+          label: squad.name,
+        }))
+        .filter((entry): entry is { campusId: string | null; number: number; label: string } =>
+          entry.number !== null,
+        )
+        .sort((a, b) => a.number - b.number),
     };
   }
 
@@ -535,19 +672,40 @@ export class StudentsService {
     return {
       ...archiveScope,
       ...(query.squadId ? { squadId: query.squadId } : {}),
+      ...(query.campusId ? { campusId: query.campusId } : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
+      ...(query.squadNumber !== undefined
+        ? // Squad names are stored as "Squad 144"; matching the number alone would also
+          // catch "Squad 1440". Anchoring both ends keeps 144 and 1440 distinct.
+          { squad: { name: { in: [`Squad ${query.squadNumber}`, `${query.squadNumber}`] } } }
+        : {}),
+      ...(query.awaitingPlacement
+        ? {
+            // "Awaiting placement" is either the campus's PENDING batch or no batch at
+            // all. Both mean the same thing to a mentor and must filter together (§13).
+            OR: [{ batchId: null }, { batch: { code: PENDING_PLACEMENT_BATCH_CODE } }],
+          }
+        : {}),
       ...(query.cohort !== undefined ? { cohort: query.cohort } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.syncStatus ? { syncState: { status: query.syncStatus } } : {}),
       ...(query.minStreak !== undefined ? { currentStreak: { gte: query.minStreak } } : {}),
       ...(search
         ? {
-            OR: [
-              { name: { contains: search, mode: 'insensitive' } },
-              { email: { contains: search, mode: 'insensitive' } },
-              { leetcodeUsername: { contains: search, mode: 'insensitive' } },
-              { squad: { name: { contains: search, mode: 'insensitive' } } },
-              { batch: { name: { contains: search, mode: 'insensitive' } } },
+            // `AND` rather than a second `OR` key: an object literal can only carry one
+            // `OR`, so combining search with the placement filter above by spreading
+            // would silently drop whichever came first.
+            AND: [
+              {
+                OR: [
+                  { name: { contains: search, mode: 'insensitive' } },
+                  { email: { contains: search, mode: 'insensitive' } },
+                  { leetcodeUsername: { contains: search, mode: 'insensitive' } },
+                  { squad: { name: { contains: search, mode: 'insensitive' } } },
+                  { batch: { name: { contains: search, mode: 'insensitive' } } },
+                  { campus: { name: { contains: search, mode: 'insensitive' } } },
+                ],
+              },
             ],
           }
         : {}),
@@ -567,9 +725,17 @@ export class StudentsService {
       phone: student.phone,
       leetcodeUsername: student.leetcodeUsername,
       status: student.status,
+      campusId: student.campusId,
+      campusName: student.campus?.name ?? null,
+      campusCode: student.campus?.code ?? null,
       batchId: student.batchId,
       batchName: student.batch?.name ?? null,
       batchCode: student.batch?.code ?? null,
+      // Surfaced as its own flag rather than left for each caller to infer from a null
+      // batch: "Placement Pending" is a state to display, not missing data (§7, §15).
+      awaitingPlacement:
+        student.batchId === null || student.batch?.code === PENDING_PLACEMENT_BATCH_CODE,
+      squadNumber: normaliseSquadNumber(student.squad?.name ?? null),
       cohort: student.cohort,
       maxBeltLevel: student.maxBeltLevel,
       squadId: student.squadId,

@@ -3,6 +3,7 @@
  */
 
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -44,6 +45,11 @@ import { StudentAccountsService } from '../auth/student-accounts.service';
 
 class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
+  /**
+   * Which campus the batch belongs to. Required on create, because a batch with the
+   * wrong campus is invisible to the filters that were meant to find it.
+   */
+  @IsOptional() @IsUUID() campusId?: string;
 }
 
 class UpsertSquadDto {
@@ -135,13 +141,41 @@ export class AdminController {
 
   @Post('batches')
   @Audit('BATCH_CREATED', 'Batch')
-  @ApiOperation({ summary: 'Create a batch' })
+  @ApiOperation({ summary: 'Create a batch at a campus' })
   async createBatch(@Body() dto: UpsertBatchDto) {
-    // `code` is required and unique; derive one so this legacy name-only route keeps
-    // working alongside the richer POST /batches.
+    // Batches are campus-scoped, so this route now needs a campus. It is only inferred
+    // when a single campus exists and there is therefore nothing to infer between —
+    // defaulting to the founding campus would put SRM's batch under Vels silently.
+    const campusId = dto.campusId ?? (await this.soleCampusId());
+
+    // `code` is required and unique *per campus*; derive one so this legacy name-only
+    // route keeps working alongside the richer POST /batches.
     return this.prisma.batch.create({
-      data: { name: dto.name, code: await this.batches.deriveAvailableCode(dto.name) },
+      data: {
+        campusId,
+        name: dto.name,
+        code: await this.batches.deriveAvailableCode(dto.name, campusId),
+      },
     });
+  }
+
+  /**
+   * The one campus, when there is only one. Throws rather than choosing otherwise.
+   */
+  private async soleCampusId(): Promise<string> {
+    const campuses = await this.prisma.campus.findMany({
+      where: { status: 'ACTIVE' },
+      orderBy: { sortOrder: 'asc' },
+      select: { id: true, code: true },
+    });
+    if (campuses.length === 1 && campuses[0]) return campuses[0].id;
+    if (campuses.length === 0) {
+      throw new BadRequestException('No active campus exists. Create one first.');
+    }
+    throw new BadRequestException(
+      `Several campuses exist (${campuses.map((c) => c.code).join(', ')}). ` +
+        'Say which one this batch belongs to.',
+    );
   }
 
   @Patch('batches/:id')

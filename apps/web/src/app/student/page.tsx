@@ -58,13 +58,35 @@ export default function StudentDashboardPage() {
         <h1 className="text-xl font-semibold tracking-tight">
           {greeting()}, {firstName} 👋
         </h1>
+        {/*
+          Campus, level, squad and cohort — the student's whole organisational identity
+          in one line (§15). "Placement Pending" is shown as its own badge rather than
+          left as an absent level, because a blank there reads as a broken page when the
+          truth is simply that the diagnostic has not happened yet (§34).
+        */}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[var(--color-fg-muted)]">
-          {data.batchName ? <Badge tone="brand">{data.batchName}</Badge> : null}
+          {data.campusName ? <Badge tone="neutral">{data.campusName}</Badge> : null}
+          {data.awaitingPlacement ? (
+            <Badge tone="warning">Placement pending</Badge>
+          ) : data.batchName ? (
+            <Badge tone="brand">{data.batchName}</Badge>
+          ) : null}
+          {data.squadNumber !== null ? (
+            <Badge tone="neutral">Squad {data.squadNumber}</Badge>
+          ) : null}
           {data.cohort !== null ? <Badge tone="neutral">Cohort {data.cohort}</Badge> : null}
           {data.maxBeltLevel !== null ? (
             <Badge tone="neutral">Max Belt Level: {data.maxBeltLevel}</Badge>
           ) : null}
         </div>
+
+        {data.awaitingPlacement ? (
+          <p className="mt-3 rounded-lg bg-[var(--color-warning-soft)] p-3 text-sm text-[var(--color-warning)]">
+            You are enrolled and awaiting your initial diagnostic assessment. Until it is
+            done you will not see level-specific daily assignments — anything set for your
+            whole campus still applies to you.
+          </p>
+        ) : null}
 
         {today ? (
           <div className="mt-4">
@@ -92,7 +114,17 @@ export default function StudentDashboardPage() {
         <StatTile
           label="Current rank"
           value={data.currentRank ? `#${data.currentRank.rank}` : '—'}
-          hint={data.currentRank ? `of ${data.currentRank.total} this week` : 'No leaderboard yet'}
+          hint={
+            data.currentRank
+              ? // Campus standing first — that is the group they compete in day to day —
+                // with the overall position beside it so they can see the whole programme
+                // too. Showing only one of the two would answer half the question (§14).
+                `of ${data.currentRank.total} at ${data.campusCode ?? 'your campus'}` +
+                (data.currentRank.globalRank !== null
+                  ? ` · #${data.currentRank.globalRank} of ${data.currentRank.globalTotal} overall`
+                  : '')
+              : 'No leaderboard yet'
+          }
           icon={<Trophy className="size-4" aria-hidden />}
           tone="brand"
         />

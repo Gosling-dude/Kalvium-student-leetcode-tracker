@@ -23,9 +23,22 @@ const PERIODS = [
   { value: 'MONTHLY', label: 'Monthly' },
 ] as const;
 
+/**
+ * The three boards a student may see (§14, §15).
+ *
+ * `scope` is the only thing the student varies — never a campus or batch id. The ids come
+ * from their own record on the server, so this control cannot be used to look at another
+ * campus's board (§40).
+ */
+const SCOPES = [
+  { value: 'mine', label: 'My batch' },
+  { value: 'campus', label: 'My campus' },
+  { value: 'global', label: 'All campuses' },
+] as const;
+
 export default function StudentLeaderboardPage() {
   const [period, setPeriod] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY'>('WEEKLY');
-  const [scope, setScope] = useState<'mine' | 'all'>('mine');
+  const [scope, setScope] = useState<'mine' | 'campus' | 'global'>('campus');
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['student', 'leaderboard', period, scope],
@@ -37,7 +50,13 @@ export default function StudentLeaderboardPage() {
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Leaderboard</h1>
-          <p className="text-sm text-[var(--color-fg-muted)]">See where you stand.</p>
+          <p className="text-sm text-[var(--color-fg-muted)]">
+            {scope === 'global'
+              ? 'Every student across every campus, ranked together.'
+              : scope === 'campus'
+                ? 'Everyone at your campus.'
+                : 'Your batch.'}
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-0.5">
@@ -57,18 +76,18 @@ export default function StudentLeaderboardPage() {
             ))}
           </div>
           <div className="inline-flex rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-0.5">
-            {(['mine', 'all'] as const).map((s) => (
+            {SCOPES.map((option) => (
               <button
-                key={s}
-                onClick={() => setScope(s)}
+                key={option.value}
+                onClick={() => setScope(option.value)}
                 className={cn(
                   'rounded-md px-3 py-1.5 text-xs font-medium transition',
-                  scope === s
+                  scope === option.value
                     ? 'bg-[var(--color-brand)] text-[var(--color-brand-fg)]'
                     : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]',
                 )}
               >
-                {s === 'mine' ? 'My batch' : 'All batches'}
+                {option.label}
               </button>
             ))}
           </div>
@@ -90,7 +109,11 @@ export default function StudentLeaderboardPage() {
             <thead>
               <tr>
                 <Th>Rank</Th>
+                {/* The overall standing travels with every row, so narrowing to a batch
+                    never hides where someone sits in the whole programme (§14). */}
+                {scope !== 'global' ? <Th>Overall</Th> : null}
                 <Th>Student</Th>
+                <Th>Campus</Th>
                 <Th>Batch</Th>
                 <Th>Solved</Th>
                 <Th>Streak</Th>
@@ -103,6 +126,11 @@ export default function StudentLeaderboardPage() {
                 return (
                   <tr key={row.studentId} className={cn(isYou && 'bg-[var(--color-brand-soft)]')}>
                     <Td className="tabular-nums">#{row.rank}</Td>
+                    {scope !== 'global' ? (
+                      <Td className="tabular-nums text-[var(--color-fg-muted)]">
+                        {row.globalRank !== null ? `#${row.globalRank}` : '—'}
+                      </Td>
+                    ) : null}
                     <Td className="font-medium">
                       {row.name}
                       {isYou ? (
@@ -111,6 +139,7 @@ export default function StudentLeaderboardPage() {
                         </Badge>
                       ) : null}
                     </Td>
+                    <Td>{row.campusCode ?? '—'}</Td>
                     <Td>{row.batchCode ?? '—'}</Td>
                     <Td className="tabular-nums">{row.solvedCount}</Td>
                     <Td>

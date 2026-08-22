@@ -29,6 +29,11 @@ const normaliseUsername = ({ value }: { value: unknown }): unknown => {
 };
 
 export class CreateStudentDto {
+  @ApiPropertyOptional({ description: 'Campus this student belongs to' })
+  @IsOptional()
+  @IsUUID()
+  campusId?: string;
+
   @ApiProperty({ example: 'Asha Menon' })
   @IsString()
   @MinLength(2)
@@ -98,6 +103,15 @@ export class CreateStudentDto {
 }
 
 export class UpdateStudentDto {
+  /**
+   * Changing this writes a `StudentCampusHistory` row, exactly as the dedicated transfer
+   * endpoint does — a campus change made here must not be invisible to the audit trail.
+   */
+  @ApiPropertyOptional({ description: 'Campus this student belongs to' })
+  @IsOptional()
+  @IsUUID()
+  campusId?: string | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -170,17 +184,55 @@ export class StudentQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
+  campusId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
   batchId?: string;
+
+  /**
+   * Campus by id or code (`SRM`). Resolved to `campusId` by the controller before the
+   * service sees it, so the service only ever deals in ids.
+   */
+  @ApiPropertyOptional({ description: 'Campus id or code (VELS/SRM). Omit or "all" for every campus.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  campus?: string;
 
   /**
    * Batch by id, code (`A`) or alias (`foundation`). Resolved to `batchId` by the
    * controller before the service sees it, so the service only ever deals in ids.
+   *
+   * Resolved *within* `campus` when one is given — otherwise a bare `A` names a batch at
+   * every campus and could not pick between them.
    */
-  @ApiPropertyOptional({ description: 'Batch id, code (A/B) or alias (foundation/intermediate)' })
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B/PENDING) or alias (foundation/intermediate/pending_placement)' })
   @IsOptional()
   @IsString()
   @MaxLength(64)
   batch?: string;
+
+  /** Squad number from the roster, e.g. 144. Independent of cohort and batch (§6, §13). */
+  @ApiPropertyOptional({ description: 'Squad number, e.g. 144', minimum: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  squadNumber?: number;
+
+  /**
+   * Only students who have not been placed into a level yet.
+   *
+   * Matches both the campus's placement-pending batch and students with no batch at all,
+   * because a mentor asking "who still needs placing?" means the same thing by both (§13).
+   */
+  @ApiPropertyOptional({ description: 'Only students awaiting placement into a batch' })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === true || value === 'true')
+  awaitingPlacement?: boolean;
 
   @ApiPropertyOptional({ description: 'Cohort number', minimum: 1 })
   @IsOptional()

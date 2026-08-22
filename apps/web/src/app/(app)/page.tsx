@@ -14,7 +14,7 @@ import { SYNC_STATUS_LABELS, type SyncStatus } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { formatPercent, timeAgo } from '@/lib/utils';
-import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import {
   Badge,
   Card,
@@ -28,13 +28,14 @@ import {
 } from '@/components/ui';
 
 export default function DashboardPage() {
-  const { selected: batch } = useBatchFilter();
+  const { campus, batch } = useScopeFilter();
 
   const { data, isLoading, error, refetch } = useQuery({
-    // The batch is part of the key, so switching filters refetches rather than showing
-    // the previous batch's numbers under the new heading.
-    queryKey: ['dashboard', batch],
-    queryFn: () => api.dashboard(undefined, batch ?? undefined),
+    // Both halves are part of the key, so switching filters refetches rather than showing
+    // the previous campus's numbers under the new heading — a cross-campus leak of
+    // exactly the kind §12 rules out, and an invisible one.
+    queryKey: ['dashboard', campus, batch],
+    queryFn: () => api.dashboard(undefined, campus ?? undefined, batch ?? undefined),
   });
 
   if (isLoading) {
@@ -75,7 +76,7 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <BatchFilter />
+          <ScopeFilter />
           {data.lastSyncStatus === 'COMPLETED_WITH_ERRORS' ? (
             <Badge tone="warning">
               <AlertTriangle className="size-3" aria-hidden />
@@ -147,17 +148,70 @@ export default function DashboardPage() {
       </div>
 
       {/*
-        Per-batch figures. Each batch is measured against its own assignment, so a day
-        where Foundation had 4 problems and Intermediate had 5 reads correctly instead of
-        being averaged into one misleading denominator (§10).
+        Per-campus roll-up (§32). Shown above the batch cards because it answers the
+        coarser question first: how is each campus doing, and how many of its students are
+        still waiting to be placed.
+
+        Every figure comes from the campus's own rows rather than from summing the batch
+        cards below — a campus total has to count students in batches that had no
+        assignment and students awaiting placement, and a sum over batch cards would
+        quietly drop both.
+      */}
+      {data.campusBreakdown.length > 1 ? (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {data.campusBreakdown.map((campusRow) => (
+            <Card key={campusRow.campusId ?? 'none'} className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">
+                    {campusRow.campusName ?? 'No campus'}
+                  </p>
+                  <p className="text-xs text-[var(--color-fg-muted)]">
+                    {campusRow.activeStudents} active student
+                    {campusRow.activeStudents === 1 ? '' : 's'}
+                  </p>
+                </div>
+                <span className="text-lg font-semibold tabular-nums">
+                  {formatPercent(campusRow.completionPercent)}
+                </span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {campusRow.awaitingPlacementStudents > 0 ? (
+                  <Badge tone="warning">
+                    {campusRow.awaitingPlacementStudents} awaiting placement
+                  </Badge>
+                ) : null}
+                {campusRow.assignedTotal === 0 ? (
+                  <Badge tone="neutral">No assignment today</Badge>
+                ) : (
+                  <Badge tone="neutral">
+                    {campusRow.solvedTotal}/{campusRow.assignedTotal} solved
+                  </Badge>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      ) : null}
+
+      {/*
+        Per campus + batch figures. Each group is measured against its own assignment, so a
+        day where SRM Foundation had 4 problems and Vels Intermediate had 5 reads correctly
+        instead of being averaged into one misleading denominator (§10, §32).
       */}
       {data.batchBreakdown.length > 1 ? (
         <div className="grid gap-3 sm:grid-cols-2">
           {data.batchBreakdown.map((batchRow) => (
-            <Card key={batchRow.batchId ?? 'none'} className="p-4">
+            <Card key={`${batchRow.campusId ?? '-'}|${batchRow.batchId ?? '-'}`} className="p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold">{batchRow.batchName ?? 'No batch'}</p>
+                  {/* Both halves named. Two cards headed "Foundation Level" — one Vels,
+                      one SRM — would be indistinguishable side by side (§32). */}
+                  <p className="text-sm font-semibold">
+                    {[batchRow.campusName, batchRow.batchName ?? 'No batch']
+                      .filter(Boolean)
+                      .join(' — ')}
+                  </p>
                   <p className="text-xs text-[var(--color-fg-muted)]">
                     {batchRow.activeStudents} student{batchRow.activeStudents === 1 ? '' : 's'} ·{' '}
                     {batchRow.assignedCount} assigned

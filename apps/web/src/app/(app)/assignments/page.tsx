@@ -8,7 +8,7 @@ import type { AssignmentSummary } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { todayKey } from '@/lib/utils';
-import { BatchChip, BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { BatchChip, CampusChip, ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { ChangeAssignmentTargetDialog } from '@/components/change-assignment-target-dialog';
 import {
   Badge,
@@ -40,62 +40,104 @@ export default function AssignmentsPage() {
   const [urls, setUrls] = useState<string[]>(Array(DEFAULT_PROBLEM_SLOTS).fill(''));
   const [creating, setCreating] = useState(false);
 
-  const { selected: batchFilter, batches, isLoading: batchesLoading } = useBatchFilter();
+  const { campus: campusFilter, batch: batchFilter, campuses } = useScopeFilter();
 
   const me = useQuery({ queryKey: ['me'], queryFn: api.me });
   const isAdmin = me.data?.role === 'ADMIN';
   const [retargeting, setRetargeting] = useState<AssignmentSummary | null>(null);
 
   /**
-   * Which batches receive this problem set. Empty means every batch.
+   * Which campus receives this problem set. `null` means every campus.
+   *
+   * Held separately from the page's filter: an admin often browses one campus's history
+   * while writing another campus's assignment, and silently inheriting the filter would
+   * make the target depend on where they happened to be looking.
+   */
+  const [targetCampusId, setTargetCampusId] = useState<string | null>(null);
+  const [campusChoiceMade, setCampusChoiceMade] = useState(false);
+
+  /**
+   * Which batches receive this problem set, within the chosen campus. Empty means every
+   * batch at that campus.
    *
    * Assigning different questions to each batch on the same date is two saves, one per
-   * batch — which is exactly how the batches are meant to diverge (§20).
+   * batch — which is exactly how the batches are meant to diverge (§9).
    */
   const [targetBatchIds, setTargetBatchIds] = useState<string[]>([]);
 
   /**
-   * Whether the mentor has *actually* touched the batch selector.
+   * Whether the mentor has *actually* touched each selector.
    *
-   * "All batches" is a real, supported choice, but it must never be the thing a mentor
-   * gets by default just because they never looked at the selector — that is exactly how
-   * a Foundation-only assignment quietly becomes "every batch" (§20). The create button
-   * stays disabled until a deliberate choice is made, one way or the other.
+   * "All campuses" and "All batches" are real, supported choices, but neither must ever
+   * be the thing a mentor gets by default just because they never looked — that is
+   * exactly how an SRM-only assignment quietly becomes everyone's (§10). The create
+   * button stays disabled until a deliberate choice is made, either way.
    */
   const [batchChoiceMade, setBatchChoiceMade] = useState(false);
-  const batchSelectionRequired = !batchesLoading && batches.length > 0;
+
+  // Batches at the chosen target campus. Only fetched once a campus is chosen: with no
+  // campus there is no single batch list, and offering one would be a guess.
+  const targetBatches = useQuery({
+    queryKey: ['campus-batches', targetCampusId],
+    queryFn: () => api.campusBatches(targetCampusId!),
+    enabled: targetCampusId !== null,
+    staleTime: 5 * 60_000,
+  });
+  const batches = targetBatches.data ?? [];
+  const batchesLoading = targetBatches.isLoading;
+  const batchSelectionRequired = targetCampusId !== null && batches.length > 0;
 
   const history = useQuery({
-    queryKey: ['assignments', batchFilter],
-    queryFn: () => api.assignments({ page: 1, pageSize: 30, batch: batchFilter ?? undefined }),
+    queryKey: ['assignments', campusFilter, batchFilter],
+    queryFn: () =>
+      api.assignments({
+        page: 1,
+        pageSize: 30,
+        campus: campusFilter ?? undefined,
+        batch: batchFilter ?? undefined,
+      }),
   });
 
   // What already exists for the chosen date, so the form can refuse a duplicate before
-  // the request rather than surfacing a server error afterwards (§20).
+  // the request rather than surfacing a server error afterwards (§10).
   const existingForDay = useQuery({
     queryKey: ['assignments', 'day', dayKey],
     queryFn: () => api.assignmentsForDay(dayKey),
     enabled: creating,
   });
 
-  const takenBatchIds = new Set((existingForDay.data ?? []).map((a) => a.batchId));
+  // Keyed on the *pair*: SRM/Foundation being taken must not grey out Vels/Foundation.
+  const takenBatchIds = new Set(
+    (existingForDay.data ?? [])
+      .filter((a) => targetCampusId === null || a.campusId === targetCampusId)
+      .map((a) => a.batchId),
+  );
+  const wholeCampusTaken = (existingForDay.data ?? []).some(
+    (a) => a.campusId === targetCampusId && a.batchId === null,
+  );
+
+  const targetCampusName =
+    campuses.find((entry) => entry.id === targetCampusId)?.name ?? 'All campuses';
 
   const create = useMutation({
     mutationFn: () =>
       api.createAssignment({
         dayKey,
         topic: topic || undefined,
+        campus: targetCampusId ?? undefined,
         batches: targetBatchIds.length > 0 ? targetBatchIds : undefined,
         problemUrls: urls.map((url) => url.trim()).filter(Boolean),
       }),
     onSuccess: (created) => {
       toast.success(
         created.length === 1
-          ? `Assignment created for ${created[0]!.batchName ?? 'all students'}`
-          : `Assignment created for ${created.length} batches`,
+          ? `Assignment created for ${created[0]!.audienceLabel}`
+          : `Assignment created for ${created.length} audiences`,
       );
       setUrls(Array(DEFAULT_PROBLEM_SLOTS).fill(''));
       setTopic('');
+      setTargetCampusId(null);
+      setCampusChoiceMade(false);
       setTargetBatchIds([]);
       setBatchChoiceMade(false);
       setCreating(false);
@@ -119,15 +161,17 @@ export default function AssignmentsPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <BatchFilter />
+          <ScopeFilter />
           <Button
             variant="primary"
             onClick={() =>
               setCreating((open) => {
-                // Reopening (or opening fresh) always starts with no batch choice made,
-                // so a stale "All batches" selection from a previous session can never
-                // carry forward silently.
+                // Reopening (or opening fresh) always starts with no choice made, so a
+                // stale "All campuses" or "All batches" selection from a previous
+                // session can never carry forward silently.
                 if (!open) {
+                  setTargetCampusId(null);
+                  setCampusChoiceMade(false);
                   setTargetBatchIds([]);
                   setBatchChoiceMade(false);
                 }
@@ -176,15 +220,79 @@ export default function AssignmentsPage() {
             </div>
 
             {/*
-              Target Batch. Required, and never pre-selected: a mentor must actively pick
-              Foundation, Intermediate, or explicitly "All batches" before they can create
-              anything, so an assignment can never end up targeting every batch just
-              because nobody looked at the selector (§20).
-              "All batches" creates one assignment per batch rather than a single shared
-              row, so either batch's questions can later be edited without touching the
-              other's.
+              Target Campus. Required, and never pre-selected, for the same reason the
+              batch selector is: an assignment must not reach a campus because nobody
+              looked at the control (§10).
             */}
-            {batchesLoading ? (
+            <div>
+              <span className="mb-1.5 block text-xs font-medium">
+                Campus <span className="text-[var(--color-danger)]">*</span>
+              </span>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  aria-pressed={campusChoiceMade && targetCampusId === null}
+                  onClick={() => {
+                    setTargetCampusId(null);
+                    setCampusChoiceMade(true);
+                    // A campus change invalidates any batch choice: batch ids belong to
+                    // one campus, and carrying them across would target the wrong one.
+                    setTargetBatchIds([]);
+                    setBatchChoiceMade(false);
+                  }}
+                  className={
+                    campusChoiceMade && targetCampusId === null
+                      ? 'rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]'
+                      : 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'
+                  }
+                >
+                  All campuses
+                </button>
+                {campuses.map((entry) => {
+                  const isSelected = campusChoiceMade && targetCampusId === entry.id;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      aria-pressed={isSelected}
+                      onClick={() => {
+                        setTargetCampusId(entry.id);
+                        setCampusChoiceMade(true);
+                        setTargetBatchIds([]);
+                        setBatchChoiceMade(false);
+                      }}
+                      className={
+                        isSelected
+                          ? 'rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]'
+                          : 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'
+                      }
+                    >
+                      {entry.name}
+                    </button>
+                  );
+                })}
+              </div>
+              {campusChoiceMade && targetCampusId === null ? (
+                <p className="mt-1.5 text-xs text-[var(--color-warning)]">
+                  This creates one assignment that applies to every student at every
+                  campus. Pick a campus if you meant one of them.
+                </p>
+              ) : null}
+            </div>
+
+            {/*
+              Target Batch, resolved *within* the chosen campus. Required, and never
+              pre-selected: a mentor must actively pick Foundation, Intermediate,
+              Placement Pending, or explicitly "All batches" before they can create
+              anything (§10).
+            */}
+            {targetCampusId === null ? (
+              campusChoiceMade ? (
+                <p className="text-xs text-[var(--color-fg-subtle)]">
+                  With every campus selected, this assignment applies to all batches.
+                </p>
+              ) : null
+            ) : batchesLoading ? (
               <p className="text-xs text-[var(--color-fg-subtle)]">Loading batches…</p>
             ) : batches.length > 0 ? (
               <div>
@@ -195,6 +303,12 @@ export default function AssignmentsPage() {
                   <button
                     type="button"
                     aria-pressed={batchChoiceMade && targetBatchIds.length === 0}
+                    disabled={wholeCampusTaken}
+                    title={
+                      wholeCampusTaken
+                        ? `${dayKey} already has a whole-campus assignment for ${targetCampusName}.`
+                        : undefined
+                    }
                     onClick={() => {
                       setTargetBatchIds([]);
                       setBatchChoiceMade(true);
@@ -202,10 +316,10 @@ export default function AssignmentsPage() {
                     className={
                       batchChoiceMade && targetBatchIds.length === 0
                         ? 'rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]'
-                        : 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]'
+                        : 'rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-sm font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] disabled:cursor-not-allowed disabled:opacity-50'
                     }
                   >
-                    All batches
+                    All batches at {targetCampusName}
                   </button>
                   {batches.map((batch) => {
                     const isSelected = batchChoiceMade && targetBatchIds.includes(batch.id);
@@ -241,14 +355,16 @@ export default function AssignmentsPage() {
                     );
                   })}
                 </div>
-                {/* One line per taken batch — Foundation's message never mentions
-                    Intermediate and vice versa, and neither blocks picking the other. */}
-                {(existingForDay.data ?? []).map((a) => (
-                  <p key={a.id} className="mt-1.5 text-xs text-[var(--color-warning)]">
-                    {dayKey} already has an assignment for {a.batchName ?? 'all students'}. Edit
-                    the existing assignment instead.
-                  </p>
-                ))}
+                {/* One line per taken audience — SRM/Foundation's message never mentions
+                    Vels/Foundation and vice versa, and neither blocks picking the other. */}
+                {(existingForDay.data ?? [])
+                  .filter((a) => a.campusId === targetCampusId)
+                  .map((a) => (
+                    <p key={a.id} className="mt-1.5 text-xs text-[var(--color-warning)]">
+                      {dayKey} already has an assignment for {a.audienceLabel}. Edit the
+                      existing assignment instead.
+                    </p>
+                  ))}
                 {!batchChoiceMade ? (
                   <p className="mt-1.5 text-xs text-[var(--color-fg-subtle)]">
                     Pick a target batch before adding problems.
@@ -285,18 +401,18 @@ export default function AssignmentsPage() {
               <div className="rounded-lg bg-[var(--color-surface-sunken)] p-3 text-sm">
                 <p className="font-medium">Preview</p>
                 <p className="mt-1 text-[var(--color-fg-muted)]">
-                  {batchSelectionRequired && !batchChoiceMade
-                    ? 'Pick a target batch above to see what will be created.'
-                    : `${filledCount} problem${filledCount === 1 ? '' : 's'} on ${dayKey} for ${
-                        targetBatchIds.length === 0
-                          ? `every batch (${batches.length} assignment${batches.length === 1 ? '' : 's'}: ${batches
-                              .map((batch) => batch.name)
-                              .join(', ')})`
-                          : batches
-                              .filter((batch) => targetBatchIds.includes(batch.id))
-                              .map((batch) => batch.name)
-                              .join(', ')
-                      }.`}
+                  {!campusChoiceMade
+                    ? 'Pick a target campus above to see what will be created.'
+                    : batchSelectionRequired && !batchChoiceMade
+                      ? 'Pick a target batch above to see what will be created.'
+                      : `${filledCount} problem${filledCount === 1 ? '' : 's'} on ${dayKey} for ${
+                          targetBatchIds.length === 0
+                            ? `${targetCampusName} — All batches`
+                            : batches
+                                .filter((batch) => targetBatchIds.includes(batch.id))
+                                .map((batch) => `${targetCampusName} — ${batch.name}`)
+                                .join('; ')
+                        }.`}
                 </p>
               </div>
             ) : null}
@@ -308,9 +424,10 @@ export default function AssignmentsPage() {
                 loading={create.isPending}
                 disabled={
                   filledCount === 0 ||
+                  !campusChoiceMade ||
                   (batchSelectionRequired && !batchChoiceMade) ||
                   targetBatchIds.some((id) => takenBatchIds.has(id)) ||
-                  (targetBatchIds.length === 0 && takenBatchIds.size > 0)
+                  (targetBatchIds.length === 0 && wholeCampusTaken)
                 }
               >
                 Create assignment
@@ -349,9 +466,11 @@ export default function AssignmentsPage() {
             <thead>
               <tr>
                 <Th>Date</Th>
+                <Th>Campus</Th>
                 <Th>Batch</Th>
                 <Th>Topic</Th>
                 <Th>Problems</Th>
+                <Th className="text-right">Students</Th>
                 <Th className="text-right">Count</Th>
                 {isAdmin ? <Th className="text-right">Actions</Th> : null}
               </tr>
@@ -360,6 +479,21 @@ export default function AssignmentsPage() {
               {history.data.items.map((assignment) => (
                 <tr key={assignment.id} className="transition hover:bg-[var(--color-surface-sunken)]">
                   <Td className="font-medium tabular-nums">{assignment.dayKey}</Td>
+                  {/* Campus and batch are separate columns, and rows are never merged:
+                      22 Aug can carry an SRM/Foundation row and a Vels/Foundation row,
+                      and collapsing them would misreport both (§11). */}
+                  <Td>
+                    {assignment.campusCode ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <CampusChip code={assignment.campusCode} name={assignment.campusName} />
+                        <span className="text-xs text-[var(--color-fg-muted)]">
+                          {assignment.campusName}
+                        </span>
+                      </span>
+                    ) : (
+                      <Badge tone="neutral">All campuses</Badge>
+                    )}
+                  </Td>
                   <Td>
                     {assignment.batchCode ? (
                       <span className="inline-flex items-center gap-1.5">
@@ -369,14 +503,16 @@ export default function AssignmentsPage() {
                         </span>
                       </span>
                     ) : (
-                      <Badge tone="neutral">All students</Badge>
+                      <Badge tone="neutral">All batches</Badge>
                     )}
                     {/* Distinguishes a retargeted row from one that has always been what it
                         says (§9) — never silently presented as if it always applied here. */}
                     {assignment.audienceChangedAt ? (
                       <span
                         className="ml-1.5 text-xs text-[var(--color-fg-subtle)]"
-                        title={`Originally ${assignment.originalBatchId ? (assignment.originalBatchName ?? 'a batch') : 'All students'}`}
+                        title={`Originally ${
+                          assignment.originalCampusName ?? 'All campuses'
+                        } — ${assignment.originalBatchName ?? 'All batches'}`}
                       >
                         (retargeted)
                       </span>
@@ -398,6 +534,9 @@ export default function AssignmentsPage() {
                         </a>
                       ))}
                     </div>
+                  </Td>
+                  <Td className="text-right tabular-nums text-[var(--color-fg-muted)]">
+                    {assignment.studentCount}
                   </Td>
                   <Td className="text-right tabular-nums">{assignment.problems.length}</Td>
                   {isAdmin ? (
@@ -421,7 +560,7 @@ export default function AssignmentsPage() {
 
       <ChangeAssignmentTargetDialog
         assignment={retargeting}
-        batches={batches}
+        campuses={campuses}
         open={!!retargeting}
         onClose={() => setRetargeting(null)}
       />

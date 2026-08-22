@@ -61,7 +61,9 @@ function makeService() {
     monthBounds: vi.fn().mockReturnValue({ from: '2026-08-01', to: '2026-08-31' }),
   };
   const students = {
-    findOne: vi.fn().mockResolvedValue({ id: 'student-1', batchId: 'batch-b' }),
+    findOne: vi
+      .fn()
+      .mockResolvedValue({ id: 'student-1', campusId: 'campus-srm', batchId: 'batch-b' }),
     getProfile: vi.fn().mockResolvedValue(makeProfile()),
   };
   const assignments = {
@@ -106,12 +108,13 @@ describe('StudentPortalService.profile — never leaks mentor notes', () => {
   });
 });
 
-describe('StudentPortalService.assignmentDetail — batch isolation', () => {
-  it('returns the assignment when it targets the caller\'s own batch', async () => {
+describe('StudentPortalService.assignmentDetail — campus and batch isolation', () => {
+  it('returns the assignment when it targets the caller\'s own campus and batch', async () => {
     const { service, assignments } = makeService();
     assignments.findById.mockResolvedValue({
       id: 'a1',
       dayKey: '2026-08-13',
+      campusId: 'campus-srm',
       batchId: 'batch-b',
       batchName: 'Intermediate Level',
       batchCode: 'B',
@@ -130,6 +133,7 @@ describe('StudentPortalService.assignmentDetail — batch isolation', () => {
     assignments.findById.mockResolvedValue({
       id: 'a1',
       dayKey: '2026-08-13',
+      campusId: null,
       batchId: null,
       batchName: null,
       batchCode: null,
@@ -148,10 +152,54 @@ describe('StudentPortalService.assignmentDetail — batch isolation', () => {
     assignments.findById.mockResolvedValue({
       id: 'a1',
       dayKey: '2026-08-13',
+      campusId: 'campus-srm',
       batchId: 'batch-a', // Foundation; the caller is in Intermediate (batch-b)
       batchName: 'Foundation Level',
       batchCode: 'A',
       title: 'Not yours',
+      topic: null,
+      difficulty: null,
+      problems: [],
+    });
+
+    await expect(service.assignmentDetail(STUDENT_USER, 'a1')).rejects.toThrow(NotFoundException);
+  });
+
+  /**
+   * The cross-campus case, and the reason it is a 404 rather than a 403.
+   *
+   * A 403 would confirm the assignment exists. Repeated over a range of ids that turns
+   * the endpoint into a way to enumerate what another campus was set — so "not yours"
+   * and "no such thing" must be indistinguishable (§40).
+   */
+  it('404s when the assignment belongs to another campus, even at the same batch level', async () => {
+    const { service, assignments } = makeService();
+    assignments.findById.mockResolvedValue({
+      id: 'a1',
+      dayKey: '2026-08-13',
+      campusId: 'campus-vels', // caller is at SRM
+      batchId: 'batch-vels-b',
+      batchName: 'Intermediate Level',
+      batchCode: 'B',
+      title: "Vels' problems",
+      topic: null,
+      difficulty: null,
+      problems: [],
+    });
+
+    await expect(service.assignmentDetail(STUDENT_USER, 'a1')).rejects.toThrow(NotFoundException);
+  });
+
+  it('404s for a whole-campus assignment belonging to another campus', async () => {
+    const { service, assignments } = makeService();
+    assignments.findById.mockResolvedValue({
+      id: 'a1',
+      dayKey: '2026-08-13',
+      campusId: 'campus-vels',
+      batchId: null,
+      batchName: null,
+      batchCode: null,
+      title: 'All of Vels',
       topic: null,
       difficulty: null,
       problems: [],
@@ -167,12 +215,46 @@ describe('StudentPortalService.assignmentDetail — batch isolation', () => {
   });
 });
 
-describe('StudentPortalService.assignmentHistory — scoped to the caller\'s own batch', () => {
-  it('passes the caller\'s batchId, never a client-supplied one', async () => {
+describe("StudentPortalService.assignmentHistory — scoped to the caller's own audience", () => {
+  it("passes the caller's own campus and batch, never a client-supplied one", async () => {
     const { service, assignments } = makeService();
     await service.assignmentHistory(STUDENT_USER, { page: 1, pageSize: 20 } as never);
     expect(assignments.findAll).toHaveBeenCalledWith(
-      expect.objectContaining({ batchId: 'batch-b' }),
+      expect.objectContaining({
+        scope: { campusId: 'campus-srm', batchId: 'batch-b' },
+      }),
+    );
+  });
+});
+
+describe('StudentPortalService.myLeaderboard — a student cannot name someone else’s scope', () => {
+  it('scopes to the caller’s own campus by default', async () => {
+    const { service, leaderboard } = makeService();
+    await service.myLeaderboard(STUDENT_USER, { period: 'WEEKLY', scope: 'campus' } as never);
+    expect(leaderboard.getLeaderboard).toHaveBeenCalledWith(
+      'WEEKLY',
+      undefined,
+      expect.objectContaining({ campusId: 'campus-srm', batchId: undefined }),
+    );
+  });
+
+  it('narrows to the caller’s own batch for "mine"', async () => {
+    const { service, leaderboard } = makeService();
+    await service.myLeaderboard(STUDENT_USER, { period: 'WEEKLY', scope: 'mine' } as never);
+    expect(leaderboard.getLeaderboard).toHaveBeenCalledWith(
+      'WEEKLY',
+      undefined,
+      expect.objectContaining({ campusId: 'campus-srm', batchId: 'batch-b' }),
+    );
+  });
+
+  it('drops every scope filter for the global board, which students may see', async () => {
+    const { service, leaderboard } = makeService();
+    await service.myLeaderboard(STUDENT_USER, { period: 'WEEKLY', scope: 'global' } as never);
+    expect(leaderboard.getLeaderboard).toHaveBeenCalledWith(
+      'WEEKLY',
+      undefined,
+      expect.objectContaining({ campusId: undefined, batchId: undefined }),
     );
   });
 });
@@ -185,6 +267,7 @@ describe("StudentPortalService.assignmentDetail — this student's own attempt b
   const ASSIGNMENT = {
     id: 'a1',
     dayKey: '2026-08-10',
+    campusId: 'campus-srm',
     batchId: 'batch-b',
     batchName: 'Intermediate Level',
     batchCode: 'B',

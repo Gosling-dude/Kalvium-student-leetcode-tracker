@@ -15,6 +15,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { BatchesService } from './batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 import { StudentsService } from '../students/students.service';
 import { StudentQueryDto } from '../students/dto/student.dto';
 import {
@@ -31,20 +32,23 @@ import {
 export class BatchesController {
   constructor(
     private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
     private readonly students: StudentsService,
     private readonly prisma: PrismaService,
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'All batches, in display order' })
-  findAll(@Query() query: ListBatchesQueryDto) {
-    return this.batches.findAll(query.includeArchived ?? false);
+  @ApiOperation({ summary: 'All batches, in display order. Optionally one campus only.' })
+  async findAll(@Query() query: ListBatchesQueryDto) {
+    const campusId = await this.campuses.resolveSelector(query.campus);
+    return this.batches.findAll(query.includeArchived ?? false, campusId);
   }
 
   @Get('stats')
   @ApiOperation({ summary: 'Per-batch student counts, completion, belt average and cohorts' })
-  stats(@Query() query: BatchStatsQueryDto) {
-    return this.batches.getStats(query.dayKey);
+  async stats(@Query() query: BatchStatsQueryDto) {
+    const campusId = await this.campuses.resolveSelector(query.campus);
+    return this.batches.getStats(query.dayKey, campusId);
   }
 
   @Get(':id')
@@ -67,25 +71,41 @@ export class BatchesController {
     return this.students.findAll(query);
   }
 
+  /**
+   * Create a batch at a campus.
+   *
+   * `campusId` is required rather than defaulted: a batch that silently landed at the
+   * founding campus would be invisible to the campus it was meant for, and the mistake
+   * only surfaces once an assignment targets it and reaches nobody.
+   */
   @Post()
   @Roles('ADMIN')
   @Audit('BATCH_CREATED', 'Batch')
-  @ApiOperation({ summary: 'Create a batch' })
+  @ApiOperation({ summary: 'Create a batch at a campus' })
   async create(@Body() dto: CreateBatchDto) {
+    const campus = await this.prisma.campus.findUnique({ where: { id: dto.campusId } });
+    if (!campus) throw new NotFoundException(`Campus ${dto.campusId} was not found`);
+
+    // Uniqueness is per campus, so the clash check must be too — otherwise SRM could
+    // never have a Foundation batch, because Vels already has one.
     const clash = await this.prisma.batch.findFirst({
-      where: { OR: [{ code: dto.code }, { name: dto.name }] },
+      where: {
+        campusId: dto.campusId,
+        OR: [{ code: dto.code }, { name: dto.name }],
+      },
       select: { code: true, name: true },
     });
     if (clash) {
       throw new BadRequestException(
         clash.code === dto.code
-          ? `A batch with code "${dto.code}" already exists.`
-          : `A batch named "${dto.name}" already exists.`,
+          ? `${campus.name} already has a batch with code "${dto.code}".`
+          : `${campus.name} already has a batch named "${dto.name}".`,
       );
     }
 
     const created = await this.prisma.batch.create({
       data: {
+        campusId: dto.campusId,
         name: dto.name,
         code: dto.code,
         description: dto.description ?? null,

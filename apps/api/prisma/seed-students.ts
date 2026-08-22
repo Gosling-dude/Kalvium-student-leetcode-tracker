@@ -10,10 +10,21 @@
  *
  * ## What "synchronise" means
  *
- * The CSV is the authority on *who is currently in the programme*, and email is the
- * identity. For every row: create the student if missing, otherwise update their name,
- * batch, cohort and belt in place. For every student in the database who is **not** in
- * the CSV: archive them.
+ * The CSV is the authority on *who is currently in the programme at one campus*, and
+ * email is the identity. For every row: create the student if missing, otherwise update
+ * their name, batch, cohort and belt in place. For every student **at that campus** who
+ * is not in the CSV: archive them.
+ *
+ * ## Why the campus scope is load-bearing
+ *
+ * This script archives everyone it does not find. Before campuses existed that was the
+ * whole roster, and it was right. It is now catastrophically wrong unscoped: running the
+ * Vels roster would archive every SRM student, because none of them appear in Vels' CSV.
+ *
+ * So every read, write and archive below is confined to one campus, named by
+ * `--campus=<code>` or the `ROSTER_CAMPUS` environment variable. When neither is set and
+ * exactly one campus exists there is nothing to choose between and that one is used;
+ * with several, the script refuses rather than guessing which cohort to archive.
  *
  * ## What is never touched
  *
@@ -38,8 +49,9 @@
  * deploy build runs this on every deploy.
  *
  * Options:
- *   --dry-run   Parse, validate and report what *would* change. Writes nothing.
- *   --file=X    Load a different CSV (same headers).
+ *   --dry-run    Parse, validate and report what *would* change. Writes nothing.
+ *   --file=X     Load a different CSV (same headers).
+ *   --campus=X   Campus code this roster belongs to (e.g. VELS). Also `ROSTER_CAMPUS`.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -371,6 +383,52 @@ interface Summary {
   failures: string[];
 }
 
+/**
+ * Which campus this roster belongs to.
+ *
+ * `--campus=<code>`, then `ROSTER_CAMPUS`, then — only when a single campus exists and
+ * there is genuinely nothing to choose between — that one. With several campuses and no
+ * instruction, this throws: the alternative is picking one and archiving the other
+ * campus's entire cohort, which is the worst thing this script could possibly do.
+ */
+async function resolveCampus(): Promise<{ id: string; code: string; name: string }> {
+  const flag = process.argv.find((arg) => arg.startsWith('--campus='))?.split('=')[1];
+  const requested = (flag ?? process.env.ROSTER_CAMPUS ?? '').trim().toUpperCase();
+
+  if (requested) {
+    const campus = await prisma.campus.findUnique({
+      where: { code: requested },
+      select: { id: true, code: true, name: true, status: true },
+    });
+    if (!campus) {
+      const known = await prisma.campus.findMany({ select: { code: true } });
+      throw new Error(
+        `No campus with code "${requested}". Known codes: ${known.map((c) => c.code).join(', ')}.`,
+      );
+    }
+    if (campus.status !== 'ACTIVE') {
+      throw new Error(`Campus "${requested}" is archived and cannot receive a roster sync.`);
+    }
+    return { id: campus.id, code: campus.code, name: campus.name };
+  }
+
+  const campuses = await prisma.campus.findMany({
+    where: { status: 'ACTIVE' },
+    orderBy: { sortOrder: 'asc' },
+    select: { id: true, code: true, name: true },
+  });
+  if (campuses.length === 1 && campuses[0]) return campuses[0];
+  if (campuses.length === 0) {
+    throw new Error('No active campus exists. Run the migrations first.');
+  }
+  throw new Error(
+    `Several campuses exist (${campuses.map((c) => c.code).join(', ')}) and this roster does ` +
+      'not say which one it is for. Pass --campus=<code> or set ROSTER_CAMPUS.\n' +
+      'This is refused rather than guessed because syncing a roster archives every student ' +
+      'at that campus who is not in it.',
+  );
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
@@ -397,10 +455,19 @@ async function main(): Promise<void> {
   }
   console.log(`  ${rows.length} valid row(s), ${problems.length} problem(s)`);
 
+  const campus = await resolveCampus();
+  console.log(`  Campus: ${campus.code} — ${campus.name}`);
+
   // Batches must already exist — they are created by the batch-architecture migration.
   // Failing here is deliberate: silently creating a batch from a typo'd CSV cell would
   // split the roster across a batch nobody meant to make.
-  const batches = await prisma.batch.findMany({ select: { id: true, code: true, name: true } });
+  //
+  // Scoped to the campus, because batch codes are per campus now: an unscoped lookup
+  // would happily resolve this roster's `A` to the *other* campus's Foundation batch.
+  const batches = await prisma.batch.findMany({
+    where: { campusId: campus.id },
+    select: { id: true, code: true, name: true },
+  });
   const batchByCode = new Map(batches.map((batch) => [batch.code.toUpperCase(), batch]));
 
   const unknownBatches = [...new Set(rows.map((r) => r.batchCode))].filter(
@@ -441,11 +508,18 @@ async function main(): Promise<void> {
 
     for (const [position, key] of squadKeys.entries()) {
       const [batchId, name] = key.split('::') as [string, string];
-      const existing = await prisma.squad.findFirst({ where: { name, batchId } });
+      const existing = await prisma.squad.findFirst({
+        where: { name, batchId, campusId: campus.id },
+      });
       const squad =
         existing ??
         (await prisma.squad.create({
-          data: { name, batchId, color: squadColors[position % squadColors.length] },
+          data: {
+            name,
+            batchId,
+            campusId: campus.id,
+            color: squadColors[position % squadColors.length],
+          },
         }));
       squadIds.set(key, squad.id);
     }
@@ -463,6 +537,7 @@ async function main(): Promise<void> {
         select: {
           id: true,
           name: true,
+          campusId: true,
           batchId: true,
           cohort: true,
           maxBeltLevel: true,
@@ -472,6 +547,18 @@ async function main(): Promise<void> {
           createdAt: true,
         },
       });
+
+      // The same email at a *different* campus is a conflict, not an update. Silently
+      // moving them here would transfer a student between campuses with no history row
+      // and no audit trail — a campus transfer is a deliberate act, not a side effect of
+      // someone appearing in two spreadsheets (§16).
+      if (existing && existing.campusId !== null && existing.campusId !== campus.id) {
+        summary.failures.push(
+          `line ${row.line}: ${label} already exists at another campus. ` +
+            'Use "Transfer campus" rather than adding them to this roster.',
+        );
+        continue;
+      }
 
       if (!existing) {
         // A handle already taken by *another* student would violate the unique index.
@@ -496,6 +583,7 @@ async function main(): Promise<void> {
               name: row.name,
               email: row.email,
               leetcodeUsername,
+              campusId: campus.id,
               batchId: batch.id,
               squadId,
               cohort: row.cohort,
@@ -508,6 +596,14 @@ async function main(): Promise<void> {
               // roster is stating what has been true all along, not making a change now.
               // It cannot rewrite anything, because a DailyStatus that already carries a
               // batch is never re-stamped (§7).
+              campusHistory: {
+                create: {
+                  toCampusId: campus.id,
+                  effectiveFromDayKey: today,
+                  source: 'ROSTER_SYNC',
+                  reason: 'Initial campus from roster',
+                },
+              },
               batchHistory: {
                 create: {
                   toBatchId: batch.id,
@@ -613,8 +709,16 @@ async function main(): Promise<void> {
   // — and their past results are facts that stay true after they leave (§2, §24, §29).
   // Archiving removes them from every current view; it removes nothing from the record.
 
+  //
+  // `campusId` is the guard that makes this safe with more than one campus. Without it,
+  // synchronising Vels' roster would archive the entire SRM cohort in a single run,
+  // because not one of them appears in Vels' CSV (§30).
   const orphans = await prisma.student.findMany({
-    where: { email: { notIn: [...mentionedEmails] }, status: { not: 'ARCHIVED' } },
+    where: {
+      campusId: campus.id,
+      email: { notIn: [...mentionedEmails] },
+      status: { not: 'ARCHIVED' },
+    },
     select: { id: true, name: true, email: true },
   });
 
@@ -687,7 +791,7 @@ async function main(): Promise<void> {
   if (!dryRun) {
     const perBatch = await prisma.student.groupBy({
       by: ['batchId'],
-      where: { status: 'ACTIVE' },
+      where: { status: 'ACTIVE', campusId: campus.id },
       _count: { _all: true },
     });
     const nameById = new Map(batches.map((b) => [b.id, `${b.code} — ${b.name}`]));
@@ -703,7 +807,9 @@ async function main(): Promise<void> {
     }
     console.log(`    ${'TOTAL'.padEnd(28)} ${total}`);
 
-    const archivedTotal = await prisma.student.count({ where: { status: 'ARCHIVED' } });
+    const archivedTotal = await prisma.student.count({
+      where: { status: 'ARCHIVED', campusId: campus.id },
+    });
     console.log(`\n  Archived (retained with full history): ${archivedTotal}`);
   }
 

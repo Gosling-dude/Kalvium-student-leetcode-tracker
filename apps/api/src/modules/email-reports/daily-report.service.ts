@@ -11,6 +11,7 @@
 
 import { Injectable } from '@nestjs/common';
 import {
+  describeScope,
   ACTION_TIER_META,
   BLOCKER_SUMMARY_LABELS,
   BLOCKER_SUMMARY_ORDER,
@@ -49,33 +50,51 @@ export class DailyReportService {
   /**
    * The full report — everything the dashboard page and the email body need.
    *
-   * `filter.batchId` scopes the whole report to one batch, which is what produces the
-   * separate "Foundation" and "Intermediate" daily emails; omitting it produces the
-   * overall report, whose per-batch blocks live in `batchSections` because two batches
-   * with different problem counts have no single meaningful denominator (§13).
+   * `filter.campusId` and `filter.batchId` scope the whole report, which is what produces
+   * the separate "SRM University — Foundation" and "Vels — Intermediate" daily emails.
+   * Omitting both produces the all-campuses report, whose per-audience blocks live in
+   * `batchSections` because two groups with different problem counts have no single
+   * meaningful denominator (§13, §33).
+   *
+   * The scope filter is applied all the way down to the `DailyStatus` rows, not to the
+   * rendering: an SRM report is built from SRM's rows only, so a campus's statistics can
+   * never be diluted by another's (§33, "Do not mix campus statistics accidentally").
    */
   async build(
     dayKey: DayKey,
-    filter: { squadId?: string; batchId?: string | null } = {},
+    filter: { squadId?: string; campusId?: string | null; batchId?: string | null } = {},
   ): Promise<DailyEmailReport> {
     const today = this.time.today();
     const isFutureDate = dayKey > today;
+    const campusId = filter.campusId ?? null;
     const batchId = filter.batchId ?? null;
 
-    const batch = batchId
-      ? await this.prisma.batch.findUnique({
-          where: { id: batchId },
-          select: { name: true, code: true },
-        })
-      : null;
+    const [campus, batch] = await Promise.all([
+      campusId
+        ? this.prisma.campus.findUnique({
+            where: { id: campusId },
+            select: { name: true, code: true },
+          })
+        : null,
+      batchId
+        ? this.prisma.batch.findUnique({
+            where: { id: batchId },
+            select: { name: true, code: true },
+          })
+        : null,
+    ]);
 
     const emptySummary = {
       dayKey,
       dayLabelLong: formatDayKeyLong(dayKey),
       dayLabelShort: formatDayKeyShort(dayKey),
+      campusId,
+      campusName: campus?.name ?? null,
+      campusCode: campus?.code ?? null,
       batchId,
       batchName: batch?.name ?? null,
       batchCode: batch?.code ?? null,
+      audienceLabel: describeScope(campus?.name ?? null, batch?.name ?? null),
       problemsAssigned: 0,
       studentsTracked: 0,
       bucketCounts: [],
@@ -103,6 +122,7 @@ export class DailyReportService {
 
     const mentor = await this.dashboard.getMentorDashboard(dayKey, {
       squadId: filter.squadId,
+      campusId,
       batchId,
     });
 
@@ -192,6 +212,10 @@ export class DailyReportService {
       const sectionAssigned = sectionStudents.reduce((sum, s) => sum + s.assignedCount, 0);
 
       return {
+        campusId: section.campusId,
+        campusName: section.campusName,
+        campusCode: section.campusCode,
+        audienceLabel: describeScope(section.campusName, section.batchName),
         batchId: section.batchId,
         batchName: section.batchName,
         batchCode: section.batchCode,
@@ -222,9 +246,16 @@ export class DailyReportService {
         dayKey,
         dayLabelLong: formatDayKeyLong(dayKey),
         dayLabelShort: formatDayKeyShort(dayKey),
+        campusId,
+        campusName: campus?.name ?? singleSection?.campusName ?? null,
+        campusCode: campus?.code ?? singleSection?.campusCode ?? null,
         batchId,
         batchName: batch?.name ?? singleSection?.batchName ?? null,
         batchCode: batch?.code ?? singleSection?.batchCode ?? null,
+        audienceLabel: describeScope(
+          campus?.name ?? singleSection?.campusName ?? null,
+          batch?.name ?? singleSection?.batchName ?? null,
+        ),
         problemsAssigned: singleSection?.assignedCount ?? maxAssigned,
         studentsTracked: students.length,
         // "Solved 0" alone answers nothing about whether those students tried and

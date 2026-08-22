@@ -19,7 +19,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { resolveBatchOnDay, selectAssignmentForBatch } from '@dsa/shared';
+import { resolveBatchOnDay, selectAssignmentForScope } from '@dsa/shared';
 
 const prisma = new PrismaClient();
 
@@ -30,6 +30,7 @@ const email = (name: string): string => `${RUN}-${name}@batch-history.invalid`;
 const AUG_10 = '2026-08-10';
 const AUG_15 = '2026-08-15';
 
+let campusId: string;
 let foundationId: string;
 let intermediateId: string;
 let studentId: string;
@@ -40,8 +41,21 @@ const problemIds: string[] = [];
 const createdAssignmentIds: string[] = [];
 
 beforeAll(async () => {
-  const foundation = await prisma.batch.findUnique({ where: { code: 'A' } });
-  const intermediate = await prisma.batch.findUnique({ where: { code: 'B' } });
+  // Batch codes are unique per campus now, so the founding campus has to be named.
+  const campus = await prisma.campus.findUnique({ where: { code: 'VELS' } });
+  if (!campus) {
+    throw new Error(
+      'Campus VELS is missing. Run `npm run db:migrate -w @dsa/api` before the e2e suite.',
+    );
+  }
+  campusId = campus.id;
+
+  const foundation = await prisma.batch.findUnique({
+    where: { campusId_code: { campusId, code: 'A' } },
+  });
+  const intermediate = await prisma.batch.findUnique({
+    where: { campusId_code: { campusId, code: 'B' } },
+  });
 
   if (!foundation || !intermediate) {
     throw new Error(
@@ -91,6 +105,7 @@ beforeAll(async () => {
   const aug10 = await prisma.assignment.create({
     data: {
       dayKey: AUG_10,
+      campusId,
       batchId: foundationId,
       title: 'Foundation 10 Aug',
       problems: { create: [{ problemId: problemIds[0]!, position: 1 }] },
@@ -102,6 +117,7 @@ beforeAll(async () => {
   const aug15 = await prisma.assignment.create({
     data: {
       dayKey: AUG_15,
+      campusId,
       batchId: intermediateId,
       title: 'Intermediate 15 Aug',
       problems: { create: [{ problemId: problemIds[1]!, position: 1 }] },
@@ -201,7 +217,12 @@ describe('a student moved between batches mid-programme', () => {
     ] as const) {
       const candidates = await prisma.assignment.findMany({ where: { dayKey } });
       const batchOnDay = resolveBatchOnDay(placements, dayKey);
-      const selected = selectAssignmentForBatch(candidates, batchOnDay);
+      // The student is at the founding campus throughout this scenario; the batch move is
+      // the only thing changing, which is exactly what this assertion isolates.
+      const selected = selectAssignmentForScope(candidates, {
+        campusId,
+        batchId: batchOnDay,
+      });
 
       expect(selected?.id).toBe(expectedAssignmentId);
     }
@@ -226,6 +247,7 @@ describe('per-batch assignment constraints', () => {
     const second = await prisma.assignment.create({
       data: {
         dayKey: AUG_10,
+        campusId,
         batchId: intermediateId,
         title: 'Intermediate 10 Aug',
         problems: { create: [{ problemId: problemIds[1]!, position: 1 }] },
@@ -237,7 +259,7 @@ describe('per-batch assignment constraints', () => {
     // Scoped to the two batches under test: the database may legitimately also hold a
     // pre-batch (batch-less) assignment for this date, which is not what this asserts.
     const sameDay = await prisma.assignment.findMany({
-      where: { dayKey: AUG_10, batchId: { in: [foundationId, intermediateId] } },
+      where: { dayKey: AUG_10, campusId, batchId: { in: [foundationId, intermediateId] } },
     });
     expect(sameDay).toHaveLength(2);
     expect(new Set(sameDay.map((a) => a.batchId))).toEqual(
@@ -246,9 +268,13 @@ describe('per-batch assignment constraints', () => {
 
   });
 
-  it('refuses a second assignment for the same batch and date', async () => {
+  it('refuses a second assignment for the same campus, batch and date', async () => {
+    // Uniqueness is `(dayKey, campusId, batchId)` now. The campus has to be part of the
+    // duplicate for this to be testing the constraint rather than a different audience.
     await expect(
-      prisma.assignment.create({ data: { dayKey: AUG_10, batchId: foundationId } }),
+      prisma.assignment.create({
+        data: { dayKey: AUG_10, campusId, batchId: foundationId },
+      }),
     ).rejects.toThrow();
   });
 });
@@ -306,14 +332,14 @@ describe('archived students', () => {
 describe('email is the canonical student identity', () => {
   it('refuses a second student with the same email', async () => {
     const first = await prisma.student.create({
-      data: { name: `${RUN} First`, email: email('dupe'), batchId: foundationId },
+      data: { name: `${RUN} First`, email: email('dupe'), campusId, batchId: foundationId },
     });
 
     // The roster matches on email, so two rows sharing one would split a student's
     // history across both and make "which is the real one" unanswerable.
     await expect(
       prisma.student.create({
-        data: { name: `${RUN} Second`, email: email('dupe'), batchId: intermediateId },
+        data: { name: `${RUN} Second`, email: email('dupe'), campusId, batchId: intermediateId },
       }),
     ).rejects.toThrow();
 

@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Minus } from 'lucide-react';
 
 import { api } from '@/lib/api';
-import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { cn, formatPercent } from '@/lib/utils';
 import {
   Badge,
@@ -27,12 +27,17 @@ const PERIODS: Period[] = ['DAILY', 'WEEKLY', 'MONTHLY'];
 
 export default function LeaderboardPage() {
   const [period, setPeriod] = useState<Period>('DAILY');
-  const { selected: batch } = useBatchFilter();
+  const { campus, batch } = useScopeFilter();
   const [scope, setScope] = useState<Scope>('students');
 
+  // No campus is the *global* board — every active student ranked together, from the
+  // rollup's `globalRank`. Adding a campus narrows it, and adding a batch narrows again.
+  // Each row still carries its global rank whatever the scope, so nobody vanishes
+  // because a filter was applied (§14).
   const students = useQuery({
-    queryKey: ['leaderboard', 'students', period, batch],
-    queryFn: () => api.leaderboard({ period, batch: batch ?? undefined }),
+    queryKey: ['leaderboard', 'students', period, campus, batch],
+    queryFn: () =>
+      api.leaderboard({ period, campus: campus ?? undefined, batch: batch ?? undefined }),
     enabled: scope === 'students',
   });
 
@@ -56,7 +61,7 @@ export default function LeaderboardPage() {
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Squad rankings are not batch-scoped: a squad already belongs to one batch. */}
-          {scope === 'students' ? <BatchFilter /> : null}
+          {scope === 'students' ? <ScopeFilter /> : null}
           <SegmentedControl
             options={[
               { value: 'students', label: 'Students' },

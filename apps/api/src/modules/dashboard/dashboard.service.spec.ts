@@ -131,14 +131,28 @@ function assignmentSummary(overrides: {
   };
 }
 
+/** Captures the `where` each `dailyStatus.findMany` ran with, for the scoping tests. */
+const capturedWheres: Record<string, unknown>[] = [];
+
 function makeService(dailyStatusRows: unknown[], assignments: unknown[] = []) {
   const prisma = {
-    dailyStatus: { findMany: async () => dailyStatusRows },
-    student: { count: async () => dailyStatusRows.length },
+    dailyStatus: {
+      findMany: async ({ where }: { where?: Record<string, unknown> } = {}) => {
+        if (where) capturedWheres.push(where);
+        return dailyStatusRows;
+      },
+    },
+    student: {
+      count: async () => dailyStatusRows.length,
+      // Backs the campus breakdown's placement-pending count. These fixtures carry no
+      // campus, so there is nothing awaiting placement to report.
+      groupBy: async () => [],
+    },
     syncJob: { findFirst: async () => null },
     leaderboardEntry: { findMany: async () => [] },
     squadLeaderboardEntry: { findFirst: async () => null },
     batch: { findMany: async () => [] },
+    campus: { findMany: async () => [] },
   };
   const cache = { remember: async (_key: string, _ttl: number, fn: () => unknown) => fn() };
   const time = {
@@ -431,5 +445,52 @@ describe('DashboardService.getStats — aggregate attempted/not-attempted split'
     const stats = await service.getStats('2026-08-10');
     expect(stats.attemptedNotSolvedStudents).toBe(1);
     expect(stats.notAttemptedStudents).toBe(1);
+  });
+});
+
+
+/**
+ * The scope filter must reach the database, not just the response shape.
+ *
+ * This is a regression test for a real bug: `getStats` built its own filter object and
+ * dropped `campusId`, so `?campus=VELS` changed the headline count while every breakdown
+ * still contained SRM's rows. The filter *looked* applied, which is the worst kind of
+ * wrong — a mentor scoped to one campus was reading another campus's students (§12).
+ */
+describe('DashboardService — the campus filter reaches the query', () => {
+  beforeEach(() => {
+    capturedWheres.length = 0;
+  });
+
+  it('passes campusId through on getStats, not only batchId', async () => {
+    const service = makeService([]);
+    await service.getStats('2026-08-10', { campusId: 'campus-vels', batchId: 'batch-a' });
+
+    expect(capturedWheres.length).toBeGreaterThan(0);
+    for (const where of capturedWheres) {
+      expect(where).toMatchObject({ campusId: 'campus-vels', batchId: 'batch-a' });
+    }
+  });
+
+  it('passes campusId through on the mentor dashboard', async () => {
+    const service = makeService([]);
+    await service.getMentorDashboard('2026-08-10', { campusId: 'campus-srm' });
+
+    expect(capturedWheres.length).toBeGreaterThan(0);
+    for (const where of capturedWheres) {
+      expect(where).toMatchObject({ campusId: 'campus-srm' });
+    }
+  });
+
+  it('omits both keys entirely when nothing is filtered, rather than sending nulls', async () => {
+    // `campusId: null` would match only rows whose frozen campus is null — the pre-campus
+    // remnants — instead of matching everything.
+    const service = makeService([]);
+    await service.getStats('2026-08-10', {});
+
+    for (const where of capturedWheres) {
+      expect(where).not.toHaveProperty('campusId');
+      expect(where).not.toHaveProperty('batchId');
+    }
   });
 });

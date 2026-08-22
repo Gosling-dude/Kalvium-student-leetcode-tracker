@@ -113,7 +113,7 @@ function problemsList(report: DailyEmailReport): string {
     return `<p style="margin:0; font-size:14px; color:${COLORS.muted};">No problems were assigned this day.</p>`;
   }
 
-  if (sections.length === 1 && !sections[0]!.batchName) {
+  if (sections.length === 1 && !sections[0]!.batchName && !sections[0]!.campusName) {
     return problemItems(sections[0]!.problems);
   }
 
@@ -122,7 +122,7 @@ function problemsList(report: DailyEmailReport): string {
       (batchSection) => `
       <div style="margin-bottom:18px;">
         <h3 style="margin:0 0 6px; font-size:14px; color:${COLORS.text};">
-          ${escapeHtml(batchSection.batchName ?? 'All students')}
+          ${escapeHtml(batchSection.audienceLabel)}
           <span style="font-weight:400; color:${COLORS.muted};">
             — ${batchSection.assignedCount} assigned · ${batchSection.studentsTracked} student(s) · ${batchSection.completionPercent}% complete
           </span>
@@ -153,7 +153,7 @@ function batchBreakdownTable(report: DailyEmailReport): string {
       return `
         <tr>
           <td style="padding:8px 0; font-size:14px; color:${COLORS.text}; border-bottom:1px solid ${COLORS.border};">
-            <strong>${escapeHtml(batchSection.batchName ?? 'Unassigned')}</strong>
+            <strong>${escapeHtml(batchSection.audienceLabel)}</strong>
             <span style="color:${COLORS.muted};"> — ${batchSection.assignedCount} assigned, ${batchSection.studentsTracked} student(s)</span>
             <br/>
             <span style="font-size:13px; color:${COLORS.muted};">${buckets}</span>
@@ -275,7 +275,7 @@ export function buildDailyReportEmailHtml(report: DailyEmailReport): string {
       : 'No assignment was published for this day, so there is nothing to report.';
     return wrap(`
       <tr><td style="padding:8px 0 24px;">
-        <h1 style="margin:0 0 8px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report${summary.batchName ? ` — ${escapeHtml(summary.batchName)}` : ''} — ${escapeHtml(summary.dayLabelShort)}</h1>
+        <h1 style="margin:0 0 8px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report — ${escapeHtml(summary.audienceLabel)} — ${escapeHtml(summary.dayLabelShort)}</h1>
         <p style="margin:0; font-size:14px; color:${COLORS.muted};">${escapeHtml(reason)}</p>
       </td></tr>
     `);
@@ -285,14 +285,14 @@ export function buildDailyReportEmailHtml(report: DailyEmailReport): string {
     <tr><td style="padding:8px 0 4px;">
       <h1 style="margin:0 0 4px; font-size:20px; color:${COLORS.text};">Daily DSA Assignment Report</h1>
       <p style="margin:0; font-size:14px; color:${COLORS.muted};">
-        ${summary.batchName ? `${escapeHtml(summary.batchName)} &middot; ` : ''}${escapeHtml(summary.dayLabelLong)}
+        ${escapeHtml(summary.audienceLabel)} &middot; ${escapeHtml(summary.dayLabelLong)}
       </p>
     </td></tr>
     <tr><td style="padding:16px 0 0; font-size:14px; color:${COLORS.text};">
       Hello Team,<br/><br/>
-      Here is the DSA assignment progress report for ${escapeHtml(summary.dayLabelLong)}${
-        summary.batchName ? ` (${escapeHtml(summary.batchName)})` : ''
-      }.
+      Here is the DSA assignment progress report for ${escapeHtml(summary.dayLabelLong)} (${escapeHtml(
+        summary.audienceLabel,
+      )}).
     </td></tr>
     ${section('Assignment Summary', summaryTable(report))}
     ${

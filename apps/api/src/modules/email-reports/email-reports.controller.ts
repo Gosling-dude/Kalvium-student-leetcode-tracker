@@ -24,7 +24,7 @@ import { EXPORT_FORMATS, type ExportFormat } from '@dsa/shared';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { ReportsService } from '../reports/reports.service';
-import { BatchesService } from '../batches/batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 import { DailyReportService } from './daily-report.service';
 import { EmailReportsService } from './email-reports.service';
 import { BlockersService } from './blockers.service';
@@ -48,7 +48,7 @@ export class EmailReportsController {
     private readonly emailReports: EmailReportsService,
     private readonly blockers: BlockersService,
     private readonly exportService: ReportsService,
-    private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
   ) {}
 
   // --- Report reconstruction ------------------------------------------------
@@ -56,29 +56,37 @@ export class EmailReportsController {
   @Get('daily/:date')
   @ApiOperation({ summary: 'Full daily report for one date — summary, buckets, action items, blockers' })
   @ApiQuery({ name: 'squadId', required: false })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   async daily(
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
+    const scope = await this.campuses.resolveScope({ campus, batch });
     return this.dailyReport.build(date, {
       squadId,
-      batchId: await this.batches.resolveSelector(batch),
+      campusId: scope.campusId,
+      batchId: scope.batchId,
     });
   }
 
   @Get('daily/:date/summary')
   @ApiOperation({ summary: 'Just the summary card numbers for one date' })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   async summary(
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
+    const scope = await this.campuses.resolveScope({ campus, batch });
     const report = await this.dailyReport.build(date, {
       squadId,
-      batchId: await this.batches.resolveSelector(batch),
+      campusId: scope.campusId,
+      batchId: scope.batchId,
     });
     return report.summary;
   }
@@ -86,16 +94,20 @@ export class EmailReportsController {
   @Get('daily/:date/students')
   @ApiOperation({ summary: 'The student table for one date' })
   @ApiQuery({ name: 'tier', required: false, description: 'Filter by action tier' })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   async students(
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
     @Query('tier') tier?: string,
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
+    const scope = await this.campuses.resolveScope({ campus, batch });
     const report = await this.dailyReport.build(date, {
       squadId,
-      batchId: await this.batches.resolveSelector(batch),
+      campusId: scope.campusId,
+      batchId: scope.batchId,
     });
     return tier ? report.students.filter((s) => s.actionTier === tier) : report.students;
   }
@@ -103,6 +115,7 @@ export class EmailReportsController {
   @Get('daily/:date/export')
   @ApiOperation({ summary: 'Download the student table (CSV/XLSX)' })
   @ApiQuery({ name: 'format', required: false, enum: EXPORT_FORMATS })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   @ApiQuery({ name: 'cohort', required: false, description: 'Restrict the export to one cohort' })
   async exportDaily(
@@ -110,11 +123,16 @@ export class EmailReportsController {
     @Param('date') date: string,
     @Query('format') format: ExportFormat = 'CSV',
     @Query('squadId') squadId?: string,
+    @Query('campus') campus?: string,
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ): Promise<void> {
-    const batchId = await this.batches.resolveSelector(batch);
-    const report = await this.dailyReport.build(date, { squadId, batchId });
+    const scope = await this.campuses.resolveScope({ campus, batch });
+    const report = await this.dailyReport.build(date, {
+      squadId,
+      campusId: scope.campusId,
+      batchId: scope.batchId,
+    });
 
     // Cohort narrowing happens here rather than in the report build: the report is the
     // batch's full picture, and an export is a slice of it (§5).
@@ -217,18 +235,26 @@ export class EmailReportsController {
   @Get('email/history')
   @ApiOperation({ summary: 'Email report history' })
   async history(@Query() query: ListEmailHistoryDto) {
+    const scope = await this.campuses.resolveScope({ campus: query.campus, batch: query.batch });
     return this.emailReports.history({
       ...query,
-      batchId: await this.batches.resolveSelector(query.batch),
+      campusId: scope.campusId,
+      batchId: scope.batchId,
     });
   }
 
   @Get('email/status')
   @ApiOperation({ summary: 'Whether a date already has a sent (or in-flight) report' })
   @ApiQuery({ name: 'dayKey', required: true })
+  @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
-  async status(@Query('dayKey') dayKey: string, @Query('batch') batch?: string) {
-    return this.emailReports.statusForDay(dayKey, await this.batches.resolveSelector(batch));
+  async status(
+    @Query('dayKey') dayKey: string,
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
+  ) {
+    const scope = await this.campuses.resolveScope({ campus, batch });
+    return this.emailReports.statusForDay(dayKey, scope.batchId, scope.campusId);
   }
 
   @Get('email/:id')

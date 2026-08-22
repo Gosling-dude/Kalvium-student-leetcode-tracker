@@ -29,7 +29,7 @@ import type { Response } from 'express';
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { StudentImportService } from './student-import.service';
 import { StudentsService } from './students.service';
-import { BatchesService } from '../batches/batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 import {
   BulkIdsDto,
   BulkUpdateStudentsDto,
@@ -61,28 +61,36 @@ export class StudentsController {
   constructor(
     private readonly students: StudentsService,
     private readonly importer: StudentImportService,
-    private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
   ) {}
 
   /**
-   * `?batch=` accepts an id, a code (`A`) or an alias (`foundation`); it is resolved to
-   * an id here so the service only ever filters on ids. An unknown value is rejected
-   * rather than ignored — silently dropping a bad filter would show a mentor every
-   * batch's students under one batch's heading.
+   * `?campus=` and `?batch=` accept ids, codes (`SRM`, `A`) or aliases (`foundation`),
+   * and are resolved to ids here so the service only ever filters on ids. The pair is
+   * resolved *together*, so `campus=SRM&batch=A` can only mean SRM's Foundation.
+   *
+   * An unknown value is rejected rather than ignored — silently dropping a bad filter
+   * would show a mentor every campus's students under one campus's heading, which is the
+   * cross-campus leak §12 exists to prevent.
    */
   @Get()
-  @ApiOperation({ summary: 'Search, filter and paginate students' })
+  @ApiOperation({ summary: 'Search, filter and paginate students across campuses' })
   async findAll(@Query() query: StudentQueryDto) {
     // Mutated rather than spread: `skip`/`take` are getters on `PaginationQueryDto`, and
     // spreading the instance would silently drop them and paginate from row 0 every time.
-    if (query.batch) {
-      query.batchId = (await this.batches.resolveSelector(query.batch)) ?? undefined;
+    if (query.campus || query.batch) {
+      const scope = await this.campuses.resolveScope({
+        campus: query.campus,
+        batch: query.batch,
+      });
+      query.campusId = scope.campusId ?? undefined;
+      query.batchId = scope.batchId ?? undefined;
     }
     return this.students.findAll(query);
   }
 
   @Get('filters')
-  @ApiOperation({ summary: 'Batch and squad options for filter controls' })
+  @ApiOperation({ summary: 'Campus, batch, cohort and squad options for filter controls' })
   filters() {
     return this.students.getFilterOptions();
   }

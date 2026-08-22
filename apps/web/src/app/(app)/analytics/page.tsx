@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { api } from '@/lib/api';
-import { BatchFilter, useBatchFilter } from '@/components/batch-filter';
+import { ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { formatPercent, todayKey } from '@/lib/utils';
 import {
   Card,
@@ -35,11 +35,12 @@ const RANGES = [
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState(RANGES[1]!);
-  const { selected: batch } = useBatchFilter();
+  const { campus, batch } = useScopeFilter();
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['analytics', range.days, batch],
-    queryFn: () => api.analytics(daysAgo(range.days), todayKey(), batch ?? undefined),
+    queryKey: ['analytics', range.days, campus, batch],
+    queryFn: () =>
+      api.analytics(daysAgo(range.days), todayKey(), campus ?? undefined, batch ?? undefined),
   });
 
   return (
@@ -52,7 +53,7 @@ export default function AnalyticsPage() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-        <BatchFilter />
+        <ScopeFilter />
         <div className="inline-flex rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-0.5">
           {RANGES.map((option) => (
             <button

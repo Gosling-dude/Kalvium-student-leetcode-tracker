@@ -207,6 +207,27 @@ export function batchEmailSubject(dayKey: DayKey, batchName?: string | null): st
 }
 
 /**
+ * The subject line for a campus-scoped report (§33).
+ *
+ * Names the campus before the batch, because that is the coarser distinction and the one
+ * a recipient needs first: two "Foundation" reports arriving the same morning are
+ * indistinguishable without it. An unscoped report says "All Campuses" outright rather
+ * than staying silent, so nobody has to infer from an absence what population it covers.
+ *
+ * Falls back to `batchEmailSubject` when there is no campus at all, which keeps every
+ * pre-campus subject line — and the tests asserting them — reading exactly as before.
+ */
+export function scopedEmailSubject(
+  dayKey: DayKey,
+  campusName?: string | null,
+  batchName?: string | null,
+): string {
+  if (!campusName) return batchEmailSubject(dayKey, batchName);
+  const audience = batchName ? `${campusName} — ${batchName}` : campusName;
+  return `Daily DSA Assignment Report — ${audience} — ${formatDayKeyShort(dayKey)}`;
+}
+
+/**
  * Blocker-summary bucket key. `NOT_REPORTED` is distinct from the `NO_BLOCKER` category
  * — one means nobody asked yet, the other means a mentor asked and there genuinely was
  * none (§8). Collapsing them would hide exactly the gap this feature exists to surface.

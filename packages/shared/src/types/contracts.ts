@@ -10,10 +10,17 @@
 import type { DayKey } from '../domain/time';
 import type { BadgeSummary, EvaluatedAchievement, LevelProgress } from '../domain/gamification';
 import type { ScoreComponent } from '../domain/scoring';
+import type {
+  BaselineAttemptStatus,
+  BaselineRiskSignal,
+  BaselineReviewStatus,
+  BaselineTestStatus,
+} from '../domain/baseline';
 import type { ActionTier, BlockerSummaryKey, StatusLabel } from '../domain/daily-email-report';
 import type {
   BatchChangeSource,
   BatchStatus,
+  CampusStatus,
   BlockerCategory,
   Difficulty,
   EmailReportStatus,
@@ -57,10 +64,60 @@ export interface LoginResponse extends AuthTokens {
   user: AuthUser;
 }
 
-export interface BatchSummary {
+/** A campus, as every picker, filter chip and report header renders it. */
+export interface CampusSummary {
   id: string;
   name: string;
-  /** Short stable key used in URLs and filters, e.g. `A`. */
+  /** Short stable key used in URLs and filters, e.g. `VELS`. */
+  code: string;
+  description: string | null;
+  status: CampusStatus;
+  sortOrder: number;
+  /** Active students only — archived students are not part of a campus's current size. */
+  studentCount: number;
+  /** Active batches at this campus, in display order. */
+  batchCount: number;
+}
+
+/** A campus plus the figures the campus cards and the campus-aware dashboard show. */
+export interface CampusStats extends CampusSummary {
+  activeStudents: number;
+  archivedStudents: number;
+  /** Active students at this campus with no batch yet, or in a placement-pending batch. */
+  pendingPlacementStudents: number;
+  /** Mean completion over the requested day, 0–100, across this campus only. */
+  averageCompletionPercent: number;
+  /** Per-batch breakdown, in display order. */
+  batches: BatchSummary[];
+  dayKey: DayKey;
+}
+
+/** One row of a student's campus history, newest first in API responses. */
+export interface CampusHistoryEntry {
+  id: string;
+  studentId: string;
+  fromCampusId: string | null;
+  fromCampusName: string | null;
+  fromCampusCode: string | null;
+  toCampusId: string | null;
+  toCampusName: string | null;
+  toCampusCode: string | null;
+  effectiveFromDayKey: DayKey;
+  reason: string | null;
+  source: BatchChangeSource;
+  changedById: string | null;
+  changedByName: string | null;
+  changedAt: string;
+}
+
+export interface BatchSummary {
+  id: string;
+  /** The campus this batch belongs to. `VELS/A` and `SRM/A` are different batches. */
+  campusId: string;
+  campusName: string;
+  campusCode: string;
+  name: string;
+  /** Short stable key used in URLs and filters, e.g. `A`. Unique per campus, not globally. */
   code: string;
   description: string | null;
   status: BatchStatus;
@@ -107,6 +164,8 @@ export interface BatchHistoryEntry {
 export interface SquadSummary {
   id: string;
   name: string;
+  campusId: string | null;
+  campusName: string | null;
   batchId: string | null;
   batchName: string | null;
   mentorId: string | null;
@@ -123,9 +182,22 @@ export interface StudentSummary {
   /** Null when no LeetCode account has been linked yet — see the schema note. */
   leetcodeUsername: string | null;
   status: StudentStatus;
+  /** The campus the student is in *now*. Never used to interpret a past day (§17). */
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /**
+   * True when the student is enrolled but not yet placed into a level — they sit in the
+   * campus's placement-pending batch, or in no batch at all. Surfaced explicitly rather
+   * than inferred from a null batch so the UI can say "Placement Pending" instead of
+   * rendering an empty cell that reads like missing data (§7, §15).
+   */
+  awaitingPlacement: boolean;
+  /** Squad number from the roster, e.g. 144. Independent of cohort and batch (§6). */
+  squadNumber: number | null;
   /** Current cohort (1…6 today). Null when the student has not been assigned one. */
   cohort: number | null;
   /**
@@ -193,7 +265,34 @@ export interface StudentDailyReport {
 }
 
 /** Headline figures for one batch on the dashboard, sized to that batch's assignment. */
+/** One campus's figures for a day, across every batch it has. */
+export interface DashboardCampusBreakdown {
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
+  activeStudents: number;
+  /** Sum of every in-scope student's assigned problems — not one batch's problem count. */
+  assignedTotal: number;
+  solvedTotal: number;
+  completionPercent: number;
+  attemptedNotSolvedStudents: number;
+  notAttemptedStudents: number;
+  /** Active students at this campus not yet placed into a level (§7, §13). */
+  awaitingPlacementStudents: number;
+}
+
+/**
+ * One `Campus → Batch` group's figures for a day.
+ *
+ * Keyed by the pair, not by batch alone: `VELS/Foundation` and `SRM/Foundation` are
+ * different groups with different problem sets, and collapsing them into one
+ * "Foundation" row would average two unrelated cohorts into a number that describes
+ * neither (§32).
+ */
 export interface DashboardBatchBreakdown {
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
@@ -213,12 +312,21 @@ export interface DashboardBatchBreakdown {
 
 export interface DashboardStats {
   dayKey: DayKey;
+  /** The campus filter applied; `null` when showing every campus. */
+  campusId: string | null;
   /** The batch filter applied; `null` when showing all batches. */
   batchId: string | null;
   /** Active students only — archived students are not part of the current programme. */
   totalStudents: number;
   activeStudents: number;
-  /** Per-batch figures, always present so the dashboard can show both without a refetch. */
+  /**
+   * Per-campus roll-up, always present so the dashboard can show the global picture and
+   * each campus's without a refetch. Every number is computed from the day's data rather
+   * than summed from `batchBreakdown`, so a campus total stays right even when one of its
+   * batches had no assignment (§32).
+   */
+  campusBreakdown: DashboardCampusBreakdown[];
+  /** Per campus + batch figures, always present for the same reason. */
   batchBreakdown: DashboardBatchBreakdown[];
   /** Null on an unfiltered multi-batch day: there is no single assignment for everyone. */
   assignment: AssignmentSummary | null;
@@ -257,12 +365,26 @@ export interface AssignmentSummary {
   id: string;
   dayKey: DayKey;
   /**
-   * The batch this problem set *currently* targets. `null` means "all batches" — either
-   * because it predates batches, or because an admin retargeted it to "Both" (§9).
+   * The campus this problem set *currently* targets. `null` means "every campus".
+   * Always the batch's own campus when `batchId` is set.
+   */
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
+  /**
+   * The batch this problem set *currently* targets. `null` means "all batches within
+   * `campusId`" — or, when `campusId` is also null, literally everyone (§9).
    */
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /** `SRM University — Foundation Level`. What the preview and history rows render. */
+  audienceLabel: string;
+  /** Active students this assignment currently applies to. */
+  studentCount: number;
+  originalCampusId: string | null;
+  originalCampusName: string | null;
+  originalCampusCode: string | null;
   /**
    * The audience this assignment was first created with, frozen forever. Differs from
    * `batchId` only after a "Change Assignment Target" retarget — comparing the two is how
@@ -286,6 +408,12 @@ export interface AssignmentSummary {
 export interface AssignmentAudienceChangeEntry {
   id: string;
   assignmentId: string;
+  fromCampusId: string | null;
+  fromCampusName: string | null;
+  fromCampusCode: string | null;
+  toCampusId: string | null;
+  toCampusName: string | null;
+  toCampusCode: string | null;
   fromBatchId: string | null;
   fromBatchName: string | null;
   fromBatchCode: string | null;
@@ -320,6 +448,9 @@ export interface MentorBucketRow {
   name: string;
   email: string;
   squadName: string | null;
+  /** The campus the student was in *on this day*, not their campus now. */
+  campusName: string | null;
+  campusCode: string | null;
   /** The batch the student was in *on this day*, not their batch now. */
   batchName: string | null;
   batchCode: string | null;
@@ -371,7 +502,11 @@ export interface MentorBucket {
  * have 4 problems on a day Intermediate has 5, and bucketing either against the other's
  * count would invent students who "solved 5 of 4".
  */
+/** One `Campus → Batch` section of the daily tracker. */
 export interface MentorBatchSection {
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
@@ -384,6 +519,8 @@ export interface MentorBatchSection {
 
 export interface MentorDashboard {
   dayKey: DayKey;
+  /** The campus filter that produced this view; `null` when showing every campus. */
+  campusId: string | null;
   /** The batch filter that produced this view; `null` when showing all batches. */
   batchId: string | null;
   /**
@@ -404,11 +541,23 @@ export interface MentorDashboard {
 }
 
 export interface LeaderboardRow {
+  /** Rank *within the scope that was requested* — global, campus, or campus + batch. */
   rank: number;
+  /**
+   * Rank across every campus for the same period, always present.
+   *
+   * Carried alongside `rank` so a campus-scoped view can still show "#3 at SRM, #11
+   * overall" — and so a student's standing never disappears merely because someone
+   * narrowed the filter to a campus they are not in (§14).
+   */
+  globalRank: number | null;
   isTied: boolean;
   studentId: string;
   name: string;
   squadName: string | null;
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchName: string | null;
   batchCode: string | null;
   cohort: number | null;
@@ -549,6 +698,14 @@ export interface StudentProfile extends StudentSummary {
    * which batch it was earned in.
    */
   batchHistory: BatchHistoryEntry[];
+  /**
+   * Every campus this student has belonged to, newest first.
+   *
+   * Alongside `batchHistory` for the same reason it exists: a mentor reading a result
+   * from 10 Aug needs to know it was earned at Vels, not at the campus the student is at
+   * today (§16, §17).
+   */
+  campusHistory: CampusHistoryEntry[];
   achievements: EvaluatedAchievement[];
   difficultyBreakdown: DifficultyBreakdown;
   /** Explicitly separated headline numbers — see `StudentMetrics`. */
@@ -702,10 +859,24 @@ export interface DailyEmailReportSummary {
   dayKey: DayKey;
   dayLabelLong: string;
   dayLabelShort: string;
-  /** Which batch this report covers; `null` is the overall (all-batches) report. */
+  /**
+   * The audience this report covers. `null` widens: no campus is every campus, no batch
+   * is every batch within it. Both null is the all-campuses report (§33).
+   */
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /**
+   * `SRM University — Foundation Level`, or `All campuses — All batches`.
+   *
+   * Rendered into the email's heading and subject so a recipient can tell at a glance
+   * which population the numbers below describe — the single most important thing to get
+   * right once two campuses receive similar-looking reports on the same morning.
+   */
+  audienceLabel: string;
   problemsAssigned: number;
   studentsTracked: number;
   /** Indexed by solved count, `assignedCount` entries long — e.g. `bucketCounts[0]` = "solved 4 of 4". */
@@ -715,15 +886,21 @@ export interface DailyEmailReportSummary {
 }
 
 /**
- * One batch's portion of a report. An overall report carries one of these per batch, so
- * the email can print "Foundation — 4 assigned" and "Intermediate — 5 assigned" as
- * separate blocks instead of averaging two different assignments into one meaningless
- * number.
+ * One `Campus → Batch` group's portion of a report.
+ *
+ * An all-campuses report carries one of these per group, so the email can print
+ * "Vels — Foundation: 4 assigned" and "SRM — Foundation: 4 assigned" as separate blocks
+ * instead of averaging two unrelated cohorts into one meaningless number (§33).
  */
 export interface DailyEmailReportBatchSection {
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /** `SRM University — Foundation Level`, the block's heading. */
+  audienceLabel: string;
   assignedCount: number;
   studentsTracked: number;
   completionPercent: number;
@@ -778,7 +955,13 @@ export interface EmailPreview {
 export interface EmailReportRecord {
   id: string;
   dayKey: DayKey;
-  /** Which batch this report covered; `null` for the overall report. */
+  /**
+   * The audience this report covered. `null` widens, exactly as on the summary: both null
+   * is the all-campuses report (§33).
+   */
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
@@ -834,6 +1017,9 @@ export interface StudentProblemOutcome {
 export interface StudentAssignmentView {
   id: string;
   dayKey: DayKey;
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
@@ -868,8 +1054,21 @@ export interface StudentAssignmentHistoryRow {
 /** Everything `/student/dashboard` needs in one round trip. */
 export interface StudentDashboard {
   name: string;
+  /** The student's campus, shown alongside their level in the portal header (§15). */
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /**
+   * True while the student is enrolled but not yet placed into a level.
+   *
+   * The portal renders "Placement Pending" from this instead of an empty batch label, and
+   * uses it to explain why no batch-specific assignments are listed yet — an explicit
+   * state rather than a screen that looks broken (§34).
+   */
+  awaitingPlacement: boolean;
+  squadNumber: number | null;
   cohort: number | null;
   maxBeltLevel: number | null;
   currentStreak: number;
@@ -881,8 +1080,21 @@ export interface StudentDashboard {
   monthlySolved: number;
   weeklyCompletionPercent: number;
   monthlyCompletionPercent: number;
-  /** Null when no leaderboard snapshot has been computed yet for this period. */
-  currentRank: { period: LeaderboardPeriod; rank: number; total: number } | null;
+  /**
+   * Null when no leaderboard snapshot has been computed yet for this period.
+   *
+   * `rank`/`total` are the student's standing at their own campus; `globalRank`/
+   * `globalTotal` are across every campus. Both are shown, because "#4 of 31" and
+   * "#4 of 162" are different claims and a student who only saw the campus number would
+   * have no idea where they sit in the programme (§14).
+   */
+  currentRank: {
+    period: LeaderboardPeriod;
+    rank: number;
+    total: number;
+    globalRank: number | null;
+    globalTotal: number;
+  } | null;
   recentDays: {
     dayKey: DayKey;
     solvedCount: number;
@@ -892,3 +1104,206 @@ export interface StudentDashboard {
 }
 
 export type LeaderboardPeriod = 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+// ---------------------------------------------------------------------------
+// Baseline tests
+// ---------------------------------------------------------------------------
+//
+// Two projections of every baseline entity exist on purpose: one for mentors and one for
+// students. They are separate types rather than one type with optional fields, because
+// "the student view happens not to include `riskFlags` today" is a property that decays,
+// while "the student type has no such field" is enforced by the compiler (§22, §35).
+
+/** A baseline test as an admin/mentor sees it. */
+export interface BaselineTestSummary {
+  id: string;
+  name: string;
+  dayKey: DayKey;
+  description: string | null;
+  instructions: string | null;
+  /** Mentor-only. Absent from `StudentBaselineTest` entirely. */
+  adminNotes: string | null;
+  campusId: string | null;
+  campusName: string | null;
+  campusCode: string | null;
+  batchId: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  /** `SRM University — Foundation Level`. */
+  audienceLabel: string;
+  durationMinutes: number;
+  opensAt: string | null;
+  closesAt: string | null;
+  status: BaselineTestStatus;
+  problems: BaselineTestProblemSummary[];
+  /** Active students currently eligible for this test. */
+  eligibleStudentCount: number;
+  startedCount: number;
+  completedCount: number;
+  /** Attempts whose signals put them in the review queue. Mentor-only. */
+  reviewRequiredCount: number;
+  createdByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BaselineTestProblemSummary {
+  id: string;
+  position: number;
+  problemId: string;
+  title: string;
+  titleSlug: string;
+  url: string;
+  difficulty: Difficulty;
+  points: number;
+}
+
+/**
+ * A baseline test as a *student* sees it.
+ *
+ * Deliberately missing `adminNotes`, every aggregate about other students, and every
+ * risk field. A student's own risk score is not included either: it is a mentor triage
+ * signal, and showing a student "your work looks suspicious" on the basis of timing
+ * alone would be both unkind and unsupported (§23).
+ */
+export interface StudentBaselineTest {
+  id: string;
+  name: string;
+  dayKey: DayKey;
+  description: string | null;
+  instructions: string | null;
+  durationMinutes: number;
+  opensAt: string | null;
+  closesAt: string | null;
+  status: BaselineTestStatus;
+  problemCount: number;
+  /** Only populated once the student's own attempt has started. */
+  problems: BaselineTestProblemSummary[];
+  attempt: StudentBaselineAttempt | null;
+  /** Whether this student may start it right now, and why not when they may not. */
+  canStart: boolean;
+  blockedReason: string | null;
+}
+
+export interface StudentBaselineAttempt {
+  id: string;
+  status: BaselineAttemptStatus;
+  startedAt: string;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  solvedCount: number;
+  attemptedCount: number;
+  score: number;
+  maxScore: number;
+  results: StudentBaselineProblemResult[];
+}
+
+export interface StudentBaselineProblemResult {
+  testProblemId: string;
+  problemId: string;
+  position: number;
+  title: string;
+  url: string;
+  difficulty: Difficulty;
+  points: number;
+  status: ProblemStatus;
+  solvedAt: string | null;
+}
+
+/** One student's attempt as a mentor sees it — risk fields included. */
+export interface BaselineAttemptSummary {
+  id: string;
+  testId: string;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  campusId: string | null;
+  campusName: string | null;
+  batchId: string | null;
+  batchName: string | null;
+  squadName: string | null;
+  status: BaselineAttemptStatus;
+  startedAt: string;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  solvedCount: number;
+  attemptedCount: number;
+  score: number;
+  maxScore: number;
+  percent: number;
+  timeTakenSeconds: number | null;
+  /** Mentor/admin only — never projected into a student response. */
+  riskFlags: BaselineRiskSignal[];
+  riskScore: number;
+  /** One evidence line per raised signal. Mentor/admin only. */
+  riskEvidence: string[];
+  reviewStatus: BaselineReviewStatus;
+  reviewNote: string | null;
+  reviewedByName: string | null;
+  reviewedAt: string | null;
+  gradedAt: string | null;
+  results: BaselineAttemptProblemResult[];
+}
+
+export interface BaselineAttemptProblemResult {
+  testProblemId: string;
+  problemId: string;
+  position: number;
+  title: string;
+  difficulty: Difficulty;
+  points: number;
+  awardedPoints: number;
+  status: ProblemStatus;
+  attempts: number;
+  solvedAt: string | null;
+  timeToSolveSeconds: number | null;
+}
+
+/** Per-problem success across everyone who sat a test. */
+export interface BaselineProblemStat {
+  testProblemId: string;
+  position: number;
+  title: string;
+  difficulty: Difficulty;
+  points: number;
+  solvedCount: number;
+  attemptedNotSolvedCount: number;
+  notAttemptedCount: number;
+  /** Solved ÷ eligible, 0–100. */
+  successRatePercent: number;
+  /** Mean seconds-to-solve among those who solved it; null when nobody did. */
+  averageTimeToSolveSeconds: number | null;
+}
+
+/** One campus's or batch's slice of a baseline report. */
+export interface BaselineScopeBreakdown {
+  scopeId: string | null;
+  scopeName: string;
+  eligible: number;
+  started: number;
+  completed: number;
+  notStarted: number;
+  averageScore: number;
+  averagePercent: number;
+}
+
+export interface BaselineTestReport {
+  test: BaselineTestSummary;
+  totalEligible: number;
+  started: number;
+  completed: number;
+  notStarted: number;
+  averageScore: number;
+  medianScore: number;
+  averagePercent: number;
+  /** Mean seconds from start to last accepted submission, among those who solved anything. */
+  averageTimeTakenSeconds: number | null;
+  solvedAll: number;
+  attemptedNotSolved: number;
+  notAttempted: number;
+  problems: BaselineProblemStat[];
+  campusBreakdown: BaselineScopeBreakdown[];
+  batchBreakdown: BaselineScopeBreakdown[];
+  /** Attempts a mentor should look at, most-signalled first. Never sent to students. */
+  reviewQueue: BaselineAttemptSummary[];
+}

@@ -1,3 +1,19 @@
+/**
+ * Assignments — creating, retargeting and resolving a day's problem set for a
+ * **campus + batch** audience.
+ *
+ * The one rule everything here serves: the same calendar date carries several independent
+ * problem sets, and a student is only ever measured against the one aimed at the campus
+ * and batch *they were in that day*. Vels/Foundation, Vels/Intermediate, SRM/Foundation
+ * and SRM/Intermediate can all have different questions on 13 Aug without colliding, and
+ * none of them can leak into another (§9).
+ *
+ * Audience widening follows `selectAssignmentForScope` in `@dsa/shared`, which is the
+ * single definition of the three-tier resolution rule. This service never re-implements
+ * it — a second copy is exactly how the daily tracker and the student portal start
+ * disagreeing about what someone was assigned.
+ */
+
 import {
   BadRequestException,
   Inject,
@@ -7,11 +23,14 @@ import {
 } from '@nestjs/common';
 import {
   CACHE_TTL,
+  describeScope,
   extractProblemSlug,
-  selectAssignmentForBatch,
+  isLegalScope,
+  selectAssignmentForScope,
   type AssignmentAudienceChangeEntry,
   type AssignmentProblem,
   type AssignmentSummary,
+  type AudienceScope,
   type DayKey,
   type Paginated,
 } from '@dsa/shared';
@@ -20,7 +39,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
-import { BatchesService } from '../batches/batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
 import { ProviderProblemNotFoundError } from '../providers/provider.errors';
 import type {
@@ -29,8 +48,29 @@ import type {
   UpdateAssignmentDto,
 } from './dto/assignment.dto';
 
-/** The `target` value meaning "every batch" — an alias for `batchId = null`. */
-const BOTH_TARGET = 'BOTH';
+/** Selector values meaning "do not narrow this half of the audience". */
+const ALL_TARGETS = new Set(['BOTH', 'ALL', '*']);
+
+/**
+ * How many active students a given audience currently covers.
+ *
+ * Built once per response from a single `groupBy`, then queried in memory. The alternative
+ * — a count per assignment row — is a textbook N+1 that costs 20 queries on a 20-row
+ * history page and grows with the roster (§27).
+ */
+class AudienceCounter {
+  constructor(private readonly groups: { campusId: string | null; batchId: string | null; count: number }[]) {}
+
+  countFor(scope: AudienceScope): number {
+    let total = 0;
+    for (const group of this.groups) {
+      if (scope.campusId !== null && group.campusId !== scope.campusId) continue;
+      if (scope.batchId !== null && group.batchId !== scope.batchId) continue;
+      total += group.count;
+    }
+    return total;
+  }
+}
 
 @Injectable()
 export class AssignmentsService {
@@ -40,37 +80,54 @@ export class AssignmentsService {
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
-    private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
     @Inject(SUBMISSION_PROVIDER) private readonly provider: SubmissionProvider,
   ) {}
 
   /**
-   * Create a day's problem set for one or more batches.
+   * Create a day's problem set for one or more campus + batch audiences.
    *
-   * Each batch gets its own `Assignment` row even when the problems are identical.
-   * Sharing one row between batches would make "edit Foundation's Wednesday" silently
-   * edit Intermediate's too, and would leave `DailyStatus.assignmentId` unable to say
-   * which set a student was actually measured against.
+   * Each audience gets its own `Assignment` row even when the problems are identical.
+   * Sharing one row would make "edit SRM Foundation's Wednesday" silently edit Vels', and
+   * would leave `DailyStatus.assignmentId` unable to say which set a student was actually
+   * measured against.
    *
-   * Returns one summary per batch created. All-or-nothing: if any batch already has an
-   * assignment that day, nothing is written, so a partial multi-batch create can never
-   * leave one batch with work and the other without.
+   * Audience semantics, and the reason each is explicit rather than inferred:
+   *
+   *  * campus + batches → one row per batch, each scoped to that campus.
+   *  * campus, no batches → one row for the whole campus.
+   *  * no campus, no batches → **one** row targeting everyone, everywhere.
+   *
+   * That last case is a deliberate change from the pre-campus behaviour, which fanned an
+   * empty batch list out into one row per active batch. With two campuses that fan-out
+   * would have created four or six rows from a form the admin filled in once, none of
+   * which they asked for. "Everyone" is now a single row that says so (§10).
+   *
+   * All-or-nothing: if any audience already has an assignment that day, nothing is
+   * written, so a partial multi-target create can never leave one batch with work and
+   * another without.
    */
   async create(dto: CreateAssignmentDto, userId: string): Promise<AssignmentSummary[]> {
     if (!this.time.isValid(dto.dayKey)) {
       throw new BadRequestException(`"${dto.dayKey}" is not a valid date (expected YYYY-MM-DD)`);
     }
 
-    const batchIds = await this.resolveTargetBatches(dto.batches);
+    const scopes = await this.resolveTargetScopes(dto.campus, dto.batches);
 
     const clashes = await this.prisma.assignment.findMany({
-      where: { dayKey: dto.dayKey, batchId: { in: batchIds } },
-      include: { batch: { select: { name: true } } },
+      where: { dayKey: dto.dayKey, OR: scopes.map((scope) => ({ ...scope })) },
+      include: {
+        batch: { select: { name: true } },
+        campus: { select: { name: true } },
+      },
     });
     if (clashes.length > 0) {
-      const names = clashes.map((c) => c.batch?.name ?? 'all batches').join(', ');
+      const names = clashes
+        .map((clash) => describeScope(clash.campus?.name ?? null, clash.batch?.name ?? null))
+        .join('; ');
       throw new BadRequestException(
-        `An assignment already exists for ${dto.dayKey} for: ${names}. Update it instead of creating a second one.`,
+        `An assignment already exists for ${dto.dayKey} for: ${names}. ` +
+          'Update it instead of creating a second one.',
       );
     }
 
@@ -79,13 +136,15 @@ export class AssignmentsService {
     const problemIds = await this.resolveProblems(dto.problemUrls);
 
     const created = await this.prisma.$transaction(
-      batchIds.map((batchId) =>
+      scopes.map((scope) =>
         this.prisma.assignment.create({
           data: {
             dayKey: dto.dayKey,
-            batchId,
+            campusId: scope.campusId,
+            batchId: scope.batchId,
             // Frozen at creation — see the schema note on `originalBatchId`.
-            originalBatchId: batchId,
+            originalCampusId: scope.campusId,
+            originalBatchId: scope.batchId,
             title: dto.title ?? null,
             topic: dto.topic ?? null,
             notes: dto.notes ?? null,
@@ -101,42 +160,61 @@ export class AssignmentsService {
     );
 
     await this.invalidate(dto.dayKey);
-    return created.map((assignment) => this.toSummary(assignment));
+    const counter = await this.audienceCounter();
+    return created.map((assignment) => this.toSummary(assignment, counter));
   }
 
   /**
-   * Turn the requested batch selectors into ids.
+   * Turn the requested campus and batch selectors into validated audiences.
    *
-   * An empty/omitted list means every *active* batch. Archived batches are excluded
-   * deliberately: assigning new work to a batch nobody is in creates rows that no
-   * student will ever be evaluated against.
+   * Every returned scope is legal by construction: a batch always carries its own
+   * campus, so `{ campusId: null, batchId: <id> }` — the one combination that could
+   * contradict itself — cannot be produced here.
    */
-  private async resolveTargetBatches(selectors?: string[]): Promise<string[]> {
-    if (!selectors || selectors.length === 0) {
-      const active = await this.prisma.batch.findMany({
-        where: { status: 'ACTIVE' },
-        orderBy: { sortOrder: 'asc' },
-        select: { id: true },
-      });
-      if (active.length === 0) {
-        throw new BadRequestException(
-          'There are no active batches to assign to. Create a batch first.',
-        );
-      }
-      return active.map((batch) => batch.id);
+  private async resolveTargetScopes(
+    campusSelector: string | undefined,
+    batchSelectors: string[] | undefined,
+  ): Promise<AudienceScope[]> {
+    const campusRaw = (campusSelector ?? '').trim();
+    const campusId =
+      campusRaw === '' || ALL_TARGETS.has(campusRaw.toUpperCase())
+        ? null
+        : await this.campuses.resolveSelector(campusRaw);
+
+    const batches = (batchSelectors ?? []).filter(
+      (selector) => selector.trim() !== '' && !ALL_TARGETS.has(selector.trim().toUpperCase()),
+    );
+
+    if (batches.length === 0) {
+      // Whole campus, or literally everyone. Both are single rows.
+      return [{ campusId, batchId: null }];
     }
 
-    const ids: string[] = [];
-    for (const selector of selectors) {
-      const resolved = await this.batches.resolveSelector(selector);
-      if (resolved === null) {
+    const scopes: AudienceScope[] = [];
+    for (const selector of batches) {
+      const batch = await this.campuses.findBatch(campusId, selector);
+
+      if (campusId !== null && batch.campusId !== campusId) {
         throw new BadRequestException(
-          `"${selector}" does not name a batch. Omit "batches" entirely to assign to every batch.`,
+          `Batch "${batch.name}" does not belong to the selected campus. ` +
+            'Pick a batch from that campus, or change the campus.',
         );
       }
-      if (!ids.includes(resolved)) ids.push(resolved);
+      if (batch.status !== 'ACTIVE') {
+        // Assigning work to a batch nobody is in creates rows no student is ever
+        // evaluated against — a silent no-op that looks like a successful create.
+        throw new BadRequestException(
+          `Batch "${batch.name}" is archived and cannot receive new assignments.`,
+        );
+      }
+
+      const scope: AudienceScope = { campusId: batch.campusId, batchId: batch.id };
+      if (!isLegalScope(scope)) {
+        throw new BadRequestException(`Batch "${batch.name}" resolved to an invalid audience.`);
+      }
+      if (!scopes.some((existing) => existing.batchId === scope.batchId)) scopes.push(scope);
     }
-    return ids;
+    return scopes;
   }
 
   async update(id: string, dto: UpdateAssignmentDto): Promise<AssignmentSummary> {
@@ -173,20 +251,19 @@ export class AssignmentsService {
     });
 
     await this.invalidate(existing.dayKey);
-    return this.toSummary(assignment);
+    return this.toSummary(assignment, await this.audienceCounter());
   }
 
   /**
-   * "Change Assignment Target" (§9): reconfigure which batch(es) an existing assignment
-   * currently applies to — typically a pre-batch legacy row (`batchId = NULL`) being
-   * scoped to Foundation, Intermediate or explicitly kept as "Both".
+   * "Change Assignment Target" (§9): reconfigure which campus and batch an existing
+   * assignment currently applies to.
    *
    * What this does *not* do is touch a single `DailyStatus` row. Every day already
    * computed against this assignment stays computed against it: `RollupService` freezes
    * `DailyStatus.assignmentId` the first time a day is scored and never swaps it for a
    * different assignment on a later recompute, so retargeting cannot silently rewrite a
-   * result that already exists. `originalBatchId` is never touched either, so the UI can
-   * always show what this assignment *was* alongside what it is now.
+   * result that already exists. `originalCampusId`/`originalBatchId` are never touched
+   * either, so the UI can always show what this assignment *was* alongside what it is now.
    */
   async changeTarget(
     id: string,
@@ -196,34 +273,46 @@ export class AssignmentsService {
     const existing = await this.prisma.assignment.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException(`Assignment ${id} was not found`);
 
-    const target = await this.resolveTarget(dto.target);
+    const target = await this.resolveRetarget(dto);
 
-    if (target === existing.batchId) {
-      const label = await this.describeBatch(target);
-      throw new BadRequestException(`This assignment already targets ${label}.`);
+    if (target.campusId === existing.campusId && target.batchId === existing.batchId) {
+      throw new BadRequestException(
+        `This assignment already targets ${await this.describeAudience(target)}.`,
+      );
     }
 
-    // A partial/composite unique index (`dayKey`, `batchId`) already enforces this at the
-    // database level, but resolving it here gives a mentor-readable error instead of a
-    // raw constraint violation.
+    // The partial/composite unique indexes already enforce this at the database level,
+    // but resolving it here gives a mentor-readable error instead of a raw constraint
+    // violation.
     const clash = await this.prisma.assignment.findFirst({
-      where: { dayKey: existing.dayKey, batchId: target, id: { not: id } },
-      include: { batch: { select: { name: true } } },
+      where: {
+        dayKey: existing.dayKey,
+        campusId: target.campusId,
+        batchId: target.batchId,
+        id: { not: id },
+      },
+      include: { batch: { select: { name: true } }, campus: { select: { name: true } } },
     });
     if (clash) {
       throw new BadRequestException(
-        `${existing.dayKey} already has a separate assignment for ${clash.batch?.name ?? 'all batches'}. ` +
+        `${existing.dayKey} already has a separate assignment for ` +
+          `${describeScope(clash.campus?.name ?? null, clash.batch?.name ?? null)}. ` +
           'Update or delete that one first.',
       );
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      await tx.assignment.update({ where: { id }, data: { batchId: target } });
+      await tx.assignment.update({
+        where: { id },
+        data: { campusId: target.campusId, batchId: target.batchId },
+      });
       await tx.assignmentAudienceChange.create({
         data: {
           assignmentId: id,
+          fromCampusId: existing.campusId,
+          toCampusId: target.campusId,
           fromBatchId: existing.batchId,
-          toBatchId: target,
+          toBatchId: target.batchId,
           reason: dto.reason?.trim() || null,
           changedById: user.id,
           changedByName: user.name,
@@ -237,27 +326,51 @@ export class AssignmentsService {
     await this.invalidate(existing.dayKey);
 
     this.logger.log(
-      `Retargeted assignment ${id} (${existing.dayKey}) from ${existing.batchId ?? 'all batches'} to ${target ?? 'all batches'}`,
+      `Retargeted assignment ${id} (${existing.dayKey}) to ` +
+        `${target.campusId ?? 'all campuses'}/${target.batchId ?? 'all batches'}`,
     );
 
-    return this.toSummary(updated);
+    return this.toSummary(updated, await this.audienceCounter());
   }
 
-  /** `null`/absent means "every batch" (`'both'`/`'all'`); anything else must name a batch. */
-  private async resolveTarget(target: string): Promise<string | null> {
-    const trimmed = target.trim().toUpperCase();
-    if (trimmed === BOTH_TARGET || trimmed === 'ALL') return null;
-    const resolved = await this.batches.resolveSelector(target);
-    if (resolved === null) {
-      throw new BadRequestException(`"${target}" does not name a batch. Use "BOTH" for all batches.`);
+  /**
+   * Resolve a retarget request into a legal audience.
+   *
+   * `target`/`campus` of `BOTH`/`ALL` widens that half. Naming a batch always pins the
+   * campus to that batch's own, so a retarget cannot produce the illegal
+   * "batch without campus" pair even if the caller asks for it.
+   */
+  private async resolveRetarget(dto: ChangeAssignmentTargetDto): Promise<AudienceScope> {
+    const campusRaw = (dto.campus ?? '').trim();
+    const campusId =
+      campusRaw === '' || ALL_TARGETS.has(campusRaw.toUpperCase())
+        ? null
+        : await this.campuses.resolveSelector(campusRaw);
+
+    const targetRaw = (dto.target ?? '').trim();
+    if (targetRaw === '' || ALL_TARGETS.has(targetRaw.toUpperCase())) {
+      return { campusId, batchId: null };
     }
-    return resolved;
+
+    const batch = await this.campuses.findBatch(campusId, targetRaw);
+    if (campusId !== null && batch.campusId !== campusId) {
+      throw new BadRequestException(
+        `Batch "${batch.name}" does not belong to the campus requested.`,
+      );
+    }
+    return { campusId: batch.campusId, batchId: batch.id };
   }
 
-  private async describeBatch(batchId: string | null): Promise<string> {
-    if (batchId === null) return 'all batches';
-    const batch = await this.prisma.batch.findUnique({ where: { id: batchId }, select: { name: true } });
-    return batch?.name ?? 'that batch';
+  private async describeAudience(scope: AudienceScope): Promise<string> {
+    const [campus, batch] = await Promise.all([
+      scope.campusId
+        ? this.prisma.campus.findUnique({ where: { id: scope.campusId }, select: { name: true } })
+        : null,
+      scope.batchId
+        ? this.prisma.batch.findUnique({ where: { id: scope.batchId }, select: { name: true } })
+        : null,
+    ]);
+    return describeScope(campus?.name ?? null, batch?.name ?? null);
   }
 
   /** Every retarget event for an assignment, newest first — the audit trail behind §9. */
@@ -267,6 +380,8 @@ export class AssignmentsService {
       include: {
         fromBatch: { select: { name: true, code: true } },
         toBatch: { select: { name: true, code: true } },
+        fromCampus: { select: { name: true, code: true } },
+        toCampus: { select: { name: true, code: true } },
       },
       orderBy: { changedAt: 'desc' },
     });
@@ -275,6 +390,12 @@ export class AssignmentsService {
       (row): AssignmentAudienceChangeEntry => ({
         id: row.id,
         assignmentId: row.assignmentId,
+        fromCampusId: row.fromCampusId,
+        fromCampusName: row.fromCampus?.name ?? null,
+        fromCampusCode: row.fromCampus?.code ?? null,
+        toCampusId: row.toCampusId,
+        toCampusName: row.toCampus?.name ?? null,
+        toCampusCode: row.toCampus?.code ?? null,
         fromBatchId: row.fromBatchId,
         fromBatchName: row.fromBatch?.name ?? null,
         fromBatchCode: row.fromBatch?.code ?? null,
@@ -297,41 +418,46 @@ export class AssignmentsService {
   }
 
   /**
-   * The assignment that applies to `batchId` on `dayKey`.
+   * The assignment that applies to one campus + batch on `dayKey`.
    *
-   * Falls back to a batch-less row when the batch has none of its own — those are the
-   * pre-batch assignments that applied to everybody, and they keep applying to everybody
-   * (see `selectAssignmentForBatch`). A *different* batch's assignment is never returned.
-   *
-   * `batchId === null` means "no batch filter": the caller gets the batch-less row if one
-   * exists, and otherwise nothing, because there is no single answer for a day where two
-   * batches have different sets — use `findAllByDay` for that.
+   * Widens through the three tiers defined by `selectAssignmentForScope`, so a student
+   * whose batch has nothing that day still receives their campus's set, and a
+   * campus-agnostic set still reaches everyone. A *different* campus's or batch's
+   * assignment is never returned — that is the leak §9 forbids.
    */
-  async findByDay(dayKey: DayKey, batchId?: string | null): Promise<AssignmentSummary | null> {
+  async findByDay(dayKey: DayKey, scope: AudienceScope): Promise<AssignmentSummary | null> {
     const assignments = await this.prisma.assignment.findMany({
-      where: {
-        dayKey,
-        ...(batchId ? { OR: [{ batchId }, { batchId: null }] } : { batchId: null }),
-      },
+      where: { dayKey, ...this.applicableWhere(scope) },
       include: this.include(),
     });
 
-    const selected = selectAssignmentForBatch(assignments, batchId ?? null);
-    return selected ? this.toSummary(selected) : null;
+    const selected = selectAssignmentForScope(assignments, scope);
+    return selected ? this.toSummary(selected, await this.audienceCounter()) : null;
   }
 
-  /** Every batch's assignment for a day — what the batch-aware daily tracker renders. */
-  async findAllByDay(dayKey: DayKey): Promise<AssignmentSummary[]> {
+  /**
+   * Every audience's assignment for a day — what the campus-aware daily tracker renders.
+   *
+   * `scope` narrows which audiences are listed but does *not* collapse them: asking for
+   * `campus=SRM` returns SRM/Foundation and SRM/Intermediate as separate rows, because
+   * they are separate problem sets and merging them would misreport both (§11).
+   */
+  async findAllByDay(dayKey: DayKey, scope?: AudienceScope): Promise<AssignmentSummary[]> {
     const assignments = await this.prisma.assignment.findMany({
-      where: { dayKey },
+      where: { dayKey, ...(scope ? this.listWhere(scope) : {}) },
       include: this.include(),
-      orderBy: [{ batch: { sortOrder: 'asc' } }, { createdAt: 'asc' }],
+      orderBy: [
+        { campus: { sortOrder: 'asc' } },
+        { batch: { sortOrder: 'asc' } },
+        { createdAt: 'asc' },
+      ],
     });
-    return assignments.map((assignment) => this.toSummary(assignment));
+    const counter = await this.audienceCounter();
+    return assignments.map((assignment) => this.toSummary(assignment, counter));
   }
 
-  async findToday(batchId?: string | null): Promise<AssignmentSummary | null> {
-    return this.findByDay(this.time.today(), batchId);
+  async findToday(scope: AudienceScope): Promise<AssignmentSummary | null> {
+    return this.findByDay(this.time.today(), scope);
   }
 
   /** A single assignment by id, with the same shape `findByDay`/`findAll` return. */
@@ -340,12 +466,12 @@ export class AssignmentsService {
       where: { id },
       include: this.include(),
     });
-    return assignment ? this.toSummary(assignment) : null;
+    return assignment ? this.toSummary(assignment, await this.audienceCounter()) : null;
   }
 
-  /** Every batch's set for today, in program-local time. */
-  async findAllToday(): Promise<AssignmentSummary[]> {
-    return this.findAllByDay(this.time.today());
+  /** Every audience's set for today, in program-local time. */
+  async findAllToday(scope?: AudienceScope): Promise<AssignmentSummary[]> {
+    return this.findAllByDay(this.time.today(), scope);
   }
 
   async findAll(query: {
@@ -354,13 +480,10 @@ export class AssignmentsService {
     from?: string;
     to?: string;
     search?: string;
-    batchId?: string | null;
+    scope?: AudienceScope;
   }): Promise<Paginated<AssignmentSummary>> {
     const where = {
-      // A batch filter includes that batch's own rows plus the pre-batch rows that
-      // applied to everyone — the same resolution rule the evaluator uses, so the
-      // history list and the results agree about what a batch was given.
-      ...(query.batchId ? { OR: [{ batchId: query.batchId }, { batchId: null }] } : {}),
+      ...(query.scope ? this.listWhere(query.scope) : {}),
       ...(query.from || query.to
         ? { dayKey: { ...(query.from ? { gte: query.from } : {}), ...(query.to ? { lte: query.to } : {}) } }
         : {}),
@@ -378,14 +501,60 @@ export class AssignmentsService {
       this.prisma.assignment.findMany({
         where,
         include: this.include(),
-        orderBy: [{ dayKey: 'desc' }, { batch: { sortOrder: 'asc' } }],
+        orderBy: [
+          { dayKey: 'desc' },
+          { campus: { sortOrder: 'asc' } },
+          { batch: { sortOrder: 'asc' } },
+        ],
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
       }),
       this.prisma.assignment.count({ where }),
     ]);
 
-    return paginate(rows.map((row) => this.toSummary(row)), total, query.page, query.pageSize);
+    const counter = await this.audienceCounter();
+    return paginate(
+      rows.map((row) => this.toSummary(row, counter)),
+      total,
+      query.page,
+      query.pageSize,
+    );
+  }
+
+  /**
+   * `WHERE` matching every assignment that *applies to* one exact audience.
+   *
+   * The SQL half of `selectAssignmentForScope`'s three tiers: narrow the read to the rows
+   * that could possibly win, then let the pure function pick between them. Written as an
+   * OR of exact tuples rather than as `campusId IN (X, NULL)`, because SQL `IN` never
+   * matches NULL and the tier-3 row would silently vanish.
+   */
+  private applicableWhere(scope: AudienceScope) {
+    const clauses: { campusId: string | null; batchId: string | null }[] = [
+      { campusId: null, batchId: null },
+    ];
+    if (scope.campusId !== null) {
+      clauses.push({ campusId: scope.campusId, batchId: null });
+      if (scope.batchId !== null) {
+        clauses.push({ campusId: scope.campusId, batchId: scope.batchId });
+      }
+    }
+    return { OR: clauses };
+  }
+
+  /**
+   * `WHERE` for *listing* under a filter, which is broader than `applicableWhere`.
+   *
+   * Filtering to a campus should show everything that campus received — including its
+   * other batches' rows — rather than only what one batch would have been evaluated
+   * against. The two differ precisely when a campus is named without a batch.
+   */
+  private listWhere(scope: AudienceScope) {
+    if (scope.campusId === null) return {};
+    if (scope.batchId === null) {
+      return { OR: [{ campusId: scope.campusId }, { campusId: null, batchId: null }] };
+    }
+    return { OR: this.applicableWhere(scope).OR };
   }
 
   /**
@@ -401,6 +570,27 @@ export class AssignmentsService {
       );
     }
     return this.fetchMetadata(slug);
+  }
+
+  /**
+   * How many active students each audience would reach — resolved once per response.
+   *
+   * One grouped query over the whole active roster, then counted in memory per row. See
+   * `AudienceCounter` for why this is not a count per assignment.
+   */
+  private async audienceCounter(): Promise<AudienceCounter> {
+    const groups = await this.prisma.student.groupBy({
+      by: ['campusId', 'batchId'],
+      where: { status: 'ACTIVE' },
+      _count: { _all: true },
+    });
+    return new AudienceCounter(
+      groups.map((group) => ({
+        campusId: group.campusId,
+        batchId: group.batchId,
+        count: group._count._all,
+      })),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -483,7 +673,9 @@ export class AssignmentsService {
       problems: { include: { problem: true }, orderBy: { position: 'asc' as const } },
       createdBy: { select: { name: true } },
       batch: { select: { name: true, code: true } },
+      campus: { select: { name: true, code: true } },
       originalBatch: { select: { name: true, code: true } },
+      originalCampus: { select: { name: true, code: true } },
       // Only the latest change is needed to answer "has this been retargeted, and when";
       // the full trail is fetched separately via `audienceHistory` when a mentor asks.
       audienceChanges: { orderBy: { changedAt: 'desc' as const }, take: 1 },
@@ -498,43 +690,64 @@ export class AssignmentsService {
     ]);
   }
 
-  private toSummary(assignment: {
-    id: string;
-    dayKey: string;
-    batchId: string | null;
-    batch?: { name: string; code: string } | null;
-    originalBatchId: string | null;
-    originalBatch?: { name: string; code: string } | null;
-    audienceChanges?: { changedAt: Date }[];
-    title: string | null;
-    topic: string | null;
-    notes: string | null;
-    difficulty: string | null;
-    createdAt: Date;
-    createdBy?: { name: string } | null;
-    problems: {
+  private toSummary(
+    assignment: {
       id: string;
-      position: number;
-      problem: {
+      dayKey: string;
+      campusId: string | null;
+      campus?: { name: string; code: string } | null;
+      batchId: string | null;
+      batch?: { name: string; code: string } | null;
+      originalCampusId: string | null;
+      originalCampus?: { name: string; code: string } | null;
+      originalBatchId: string | null;
+      originalBatch?: { name: string; code: string } | null;
+      audienceChanges?: { changedAt: Date }[];
+      title: string | null;
+      topic: string | null;
+      notes: string | null;
+      difficulty: string | null;
+      createdAt: Date;
+      createdBy?: { name: string } | null;
+      problems: {
         id: string;
-        title: string;
-        titleSlug: string;
-        url: string;
-        difficulty: string;
-        questionFrontendId: string | null;
-        acceptanceRate: number | null;
-        topicTags: string[];
-        companyTags: string[];
-        isPaidOnly: boolean;
-      };
-    }[];
-  }): AssignmentSummary {
+        position: number;
+        problem: {
+          id: string;
+          title: string;
+          titleSlug: string;
+          url: string;
+          difficulty: string;
+          questionFrontendId: string | null;
+          acceptanceRate: number | null;
+          topicTags: string[];
+          companyTags: string[];
+          isPaidOnly: boolean;
+        };
+      }[];
+    },
+    counter: AudienceCounter,
+  ): AssignmentSummary {
     return {
       id: assignment.id,
       dayKey: assignment.dayKey,
+      campusId: assignment.campusId,
+      campusName: assignment.campus?.name ?? null,
+      campusCode: assignment.campus?.code ?? null,
       batchId: assignment.batchId,
       batchName: assignment.batch?.name ?? null,
       batchCode: assignment.batch?.code ?? null,
+      audienceLabel: describeScope(
+        assignment.campus?.name ?? null,
+        assignment.batch?.name ?? null,
+      ),
+      studentCount: counter.countFor({
+        campusId: assignment.campusId,
+        batchId: assignment.batchId,
+      }),
+      originalCampusId: assignment.originalCampusId,
+      originalCampusName: assignment.originalCampus?.name ?? null,
+      originalCampusCode: assignment.originalCampus?.code ?? null,
       originalBatchId: assignment.originalBatchId,
       originalBatchName: assignment.originalBatch?.name ?? null,
       originalBatchCode: assignment.originalBatch?.code ?? null,
