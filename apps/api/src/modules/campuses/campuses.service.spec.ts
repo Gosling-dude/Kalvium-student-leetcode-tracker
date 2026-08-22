@@ -35,16 +35,16 @@ const SRM_A = {
   campusId: SRM.id,
   status: 'ACTIVE',
 };
-const SRM_PENDING = {
+const SRM_B = {
   id: 'cccccccc-3333-4333-8333-cccccccccccc',
-  code: 'PENDING',
-  name: 'Placement Pending',
+  code: 'B',
+  name: 'Intermediate Level',
   campusId: SRM.id,
   status: 'ACTIVE',
 };
 
 const CAMPUSES = [VELS, SRM];
-const BATCHES = [VELS_A, SRM_A, SRM_PENDING];
+const BATCHES = [VELS_A, SRM_A, SRM_B];
 
 function makeService() {
   const prisma = {
@@ -149,13 +149,28 @@ describe('resolveScope', () => {
     expect(srm.batchId).toBe(SRM_A.id);
   });
 
-  it('accepts the placement-pending aliases', async () => {
+  /**
+   * "Not assigned" is a third state, not a batch. It resolves to a flag rather than an
+   * id, because `batchId: null` already means "every batch" and the two must not collide.
+   */
+  it('resolves "none" to the unassigned flag, never to a batch id', async () => {
     const { service } = makeService();
-    for (const alias of ['PENDING', 'pending_placement', 'unassigned']) {
-      expect((await service.resolveScope({ campus: 'SRM', batch: alias })).batchId).toBe(
-        SRM_PENDING.id,
-      );
-    }
+    const scope = await service.resolveScope({ campus: 'SRM', batch: 'none' });
+    expect(scope).toMatchObject({ campusId: SRM.id, batchId: null, onlyUnassigned: true });
+  });
+
+  it('does not set the unassigned flag for a real batch or for "all"', async () => {
+    const { service } = makeService();
+    expect((await service.resolveScope({ campus: 'SRM', batch: 'A' })).onlyUnassigned).toBe(false);
+    expect((await service.resolveScope({ campus: 'SRM' })).onlyUnassigned).toBe(false);
+    expect((await service.resolveScope({})).onlyUnassigned).toBe(false);
+  });
+
+  it('no longer recognises a placement-pending batch code', async () => {
+    // The batch is gone; a stale link asking for it must fail loudly rather than
+    // silently resolving to some other batch.
+    const { service } = makeService();
+    await expect(service.resolveScope({ campus: 'SRM', batch: 'PENDING' })).rejects.toThrow();
   });
 
   it('rejects a batch that belongs to another campus', async () => {
@@ -249,15 +264,16 @@ describe('transferStudent', () => {
     );
   });
 
-  it('lands the student in placement-pending when no batch is named', async () => {
-    // Honest: they have not been re-assessed at the new campus, so no level is claimed.
+  it('leaves the student unassigned when no batch is named', async () => {
+    // Honest: they have not been re-assessed at the new campus, so no level is claimed —
+    // and carrying the old campus's level across would state something nobody decided.
     const { service, prisma } = makeService();
     prisma.student.findUnique.mockResolvedValue(student);
 
     await service.transferStudent({ studentId: student.id, toCampusId: SRM.id });
 
     expect(prisma.student.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { campusId: SRM.id, batchId: SRM_PENDING.id } }),
+      expect.objectContaining({ data: { campusId: SRM.id, batchId: null } }),
     );
   });
 

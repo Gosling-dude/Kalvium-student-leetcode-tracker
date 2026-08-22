@@ -8,6 +8,7 @@ import {
   BATCH_CHANGE_SOURCE_LABELS,
   SYNC_STATUS_LABELS,
   isTrustworthySync,
+  UNASSIGNED_BATCH_LABEL,
   type BatchHistoryEntry,
   type CampusHistoryEntry,
 } from '@dsa/shared';
@@ -93,7 +94,7 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
             <span className="text-sm">{data.campusName ?? 'No campus'}</span>
             <BatchChip code={data.batchCode} name={data.batchName} />
             <span className="text-sm">
-              {data.awaitingPlacement ? 'Placement pending' : (data.batchName ?? 'No batch')}
+              {data.batchName ?? UNASSIGNED_BATCH_LABEL}
             </span>
             {data.squadNumber !== null ? (
               <Badge tone="neutral">Squad {data.squadNumber}</Badge>
@@ -467,7 +468,7 @@ function BatchHistorySection({
                 </>
               ) : null}
               <BatchChip code={entry.toBatchCode} name={entry.toBatchName} />
-              <span className="font-medium">{entry.toBatchName ?? 'No batch'}</span>
+              <span className="font-medium">{entry.toBatchName ?? UNASSIGNED_BATCH_LABEL}</span>
             </span>
             {index === 0 && entry.toBatchName === currentBatchName ? (
               <Badge tone="success">Current</Badge>

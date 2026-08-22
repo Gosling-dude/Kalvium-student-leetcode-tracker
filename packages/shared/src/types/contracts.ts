@@ -83,8 +83,8 @@ export interface CampusSummary {
 export interface CampusStats extends CampusSummary {
   activeStudents: number;
   archivedStudents: number;
-  /** Active students at this campus with no batch yet, or in a placement-pending batch. */
-  pendingPlacementStudents: number;
+  /** Active students at this campus who have no batch assigned yet. */
+  unassignedStudents: number;
   /** Mean completion over the requested day, 0–100, across this campus only. */
   averageCompletionPercent: number;
   /** Per-batch breakdown, in display order. */
@@ -189,13 +189,6 @@ export interface StudentSummary {
   batchId: string | null;
   batchName: string | null;
   batchCode: string | null;
-  /**
-   * True when the student is enrolled but not yet placed into a level — they sit in the
-   * campus's placement-pending batch, or in no batch at all. Surfaced explicitly rather
-   * than inferred from a null batch so the UI can say "Placement Pending" instead of
-   * rendering an empty cell that reads like missing data (§7, §15).
-   */
-  awaitingPlacement: boolean;
   /** Squad number from the roster, e.g. 144. Independent of cohort and batch (§6). */
   squadNumber: number | null;
   /** Current cohort (1…6 today). Null when the student has not been assigned one. */
@@ -277,8 +270,8 @@ export interface DashboardCampusBreakdown {
   completionPercent: number;
   attemptedNotSolvedStudents: number;
   notAttemptedStudents: number;
-  /** Active students at this campus not yet placed into a level (§7, §13). */
-  awaitingPlacementStudents: number;
+  /** Active students at this campus with no batch assigned yet. */
+  unassignedStudents: number;
 }
 
 /**
@@ -1060,14 +1053,6 @@ export interface StudentDashboard {
   campusCode: string | null;
   batchName: string | null;
   batchCode: string | null;
-  /**
-   * True while the student is enrolled but not yet placed into a level.
-   *
-   * The portal renders "Placement Pending" from this instead of an empty batch label, and
-   * uses it to explain why no batch-specific assignments are listed yet — an explicit
-   * state rather than a screen that looks broken (§34).
-   */
-  awaitingPlacement: boolean;
   squadNumber: number | null;
   cohort: number | null;
   maxBeltLevel: number | null;

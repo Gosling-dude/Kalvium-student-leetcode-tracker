@@ -208,7 +208,7 @@ export class StudentQueryDto extends PaginationQueryDto {
    * Resolved *within* `campus` when one is given — otherwise a bare `A` names a batch at
    * every campus and could not pick between them.
    */
-  @ApiPropertyOptional({ description: 'Batch id, code (A/B/PENDING) or alias (foundation/intermediate/pending_placement)' })
+  @ApiPropertyOptional({ description: 'Batch id, code (A/B), alias (foundation/intermediate), or "none" for unassigned' })
   @IsOptional()
   @IsString()
   @MaxLength(64)
@@ -223,16 +223,16 @@ export class StudentQueryDto extends PaginationQueryDto {
   squadNumber?: number;
 
   /**
-   * Only students who have not been placed into a level yet.
+   * Only students with no batch assigned yet.
    *
-   * Matches both the campus's placement-pending batch and students with no batch at all,
-   * because a mentor asking "who still needs placing?" means the same thing by both (§13).
+   * A separate flag rather than a `batch` value, because "no batch" is not a batch and
+   * `batch` omitted already means "every batch".
    */
-  @ApiPropertyOptional({ description: 'Only students awaiting placement into a batch' })
+  @ApiPropertyOptional({ description: 'Only students with no batch assigned yet' })
   @IsOptional()
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
-  awaitingPlacement?: boolean;
+  unassigned?: boolean;
 
   @ApiPropertyOptional({ description: 'Cohort number', minimum: 1 })
   @IsOptional()

@@ -1,8 +1,12 @@
 # Batches
 
-Two levels run at each campus — `A` (Foundation Level) and `B` (Intermediate Level), plus
-`PENDING` (Placement Pending) where a campus has students awaiting a diagnostic result.
-Nothing in the schema or the code below it assumes that number. Adding `C` is a row in the
+Two levels run at each campus — `A` (Foundation Level) and `B` (Intermediate Level).
+Nothing in the schema or the code below it assumes that number.
+
+A student who has not yet been placed into a level has **no batch**: `batchId` is null,
+displayed as "Not Assigned". That is a property of the student, not a third batch — a
+placeholder batch would show up in every picker and every assignment target as somewhere
+work could be set. Adding `C` is a row in the
 `batches` table plus nothing else: every filter, report, export and email discovers
 batches from the database.
 

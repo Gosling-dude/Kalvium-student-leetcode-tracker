@@ -27,7 +27,7 @@ const VELS_FOUNDATION = 'batch-vels-a';
 const VELS_INTERMEDIATE = 'batch-vels-b';
 const SRM_FOUNDATION = 'batch-srm-a';
 const SRM_INTERMEDIATE = 'batch-srm-b';
-const SRM_PENDING = 'batch-srm-pending';
+
 
 const PROBLEM_URLS = [
   'https://leetcode.com/problems/maximum-number-of-vowels-in-a-substring-of-given-length/',
@@ -93,7 +93,6 @@ const BATCH_DIRECTORY: Record<
   [VELS_INTERMEDIATE]: { name: 'Intermediate Level', code: 'B', campusId: VELS, status: 'ACTIVE' },
   [SRM_FOUNDATION]: { name: 'Foundation Level', code: 'A', campusId: SRM, status: 'ACTIVE' },
   [SRM_INTERMEDIATE]: { name: 'Intermediate Level', code: 'B', campusId: SRM, status: 'ACTIVE' },
-  [SRM_PENDING]: { name: 'Placement Pending', code: 'PENDING', campusId: SRM, status: 'ACTIVE' },
 };
 
 /** Shorthand for a stored row, so the scenarios below stay readable. */
@@ -273,7 +272,7 @@ function makeService(
       groupBy: vi.fn(async () => [
         { campusId: VELS, batchId: VELS_FOUNDATION, _count: { _all: 15 } },
         { campusId: VELS, batchId: VELS_INTERMEDIATE, _count: { _all: 16 } },
-        { campusId: SRM, batchId: SRM_PENDING, _count: { _all: 92 } },
+        { campusId: SRM, batchId: null, _count: { _all: 92 } },
       ]),
     },
     assignmentAudienceChange: {
@@ -451,10 +450,10 @@ describe('AssignmentsService.create — four independent scopes on one date', ()
   });
 
   it('refuses to assign to an archived batch', async () => {
-    const { service } = makeService({ archivedBatchIds: [SRM_PENDING] });
+    const { service } = makeService({ archivedBatchIds: [SRM_INTERMEDIATE] });
     await expect(
       service.create(
-        { dayKey: '2026-08-13', campus: 'SRM', batches: ['PENDING'], problemUrls: PROBLEM_URLS },
+        { dayKey: '2026-08-13', campus: 'SRM', batches: ['B'], problemUrls: PROBLEM_URLS },
         'user-1',
       ),
     ).rejects.toThrow(/archived/i);
@@ -589,13 +588,27 @@ describe('AssignmentsService.findByDay — resolution never crosses a campus', (
     ).toBe('everyone');
   });
 
-  it('reaches a placement-pending student through the campus-wide row', async () => {
+  /**
+   * A student with no batch still belongs to a campus, so campus-wide work reaches them.
+   * Level-specific work does not — that is asserted separately below.
+   */
+  it('reaches an unassigned student through the campus-wide row', async () => {
     const { service } = makeService({
       existing: [assignmentRow('srm-all', day, SRM, null)],
     });
-    expect((await service.findByDay(day, { campusId: SRM, batchId: SRM_PENDING }))?.id).toBe(
-      'srm-all',
-    );
+    expect((await service.findByDay(day, { campusId: SRM, batchId: null }))?.id).toBe('srm-all');
+  });
+
+  it('never gives an unassigned student a level-specific assignment', async () => {
+    // Work is set for a level. Someone who has not been placed into one has no level's
+    // work to do, and inventing a placement to give them some would be worse than none.
+    const { service } = makeService({
+      existing: [
+        assignmentRow('srm-a', day, SRM, SRM_FOUNDATION),
+        assignmentRow('srm-b', day, SRM, SRM_INTERMEDIATE),
+      ],
+    });
+    expect(await service.findByDay(day, { campusId: SRM, batchId: null })).toBeNull();
   });
 });
 

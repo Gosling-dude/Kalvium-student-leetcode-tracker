@@ -88,8 +88,8 @@ export function BatchManagement() {
               {campus ? (
                 <span className="text-xs text-[var(--color-fg-muted)]">
                   {campus.activeStudents} active
-                  {campus.pendingPlacementStudents > 0
-                    ? ` · ${campus.pendingPlacementStudents} awaiting placement`
+                  {campus.unassignedStudents > 0
+                    ? ` · ${campus.unassignedStudents} not assigned`
                     : ''}
                 </span>
               ) : null}

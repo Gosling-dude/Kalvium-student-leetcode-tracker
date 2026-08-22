@@ -64,6 +64,7 @@ export class LeaderboardController {
       squadId,
       campusId: scope.campusId ?? undefined,
       batchId: scope.batchId ?? undefined,
+      onlyUnassigned: scope.onlyUnassigned,
       limit: limit ? Math.min(Number.parseInt(limit, 10) || 0, 500) : undefined,
     });
   }

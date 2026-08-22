@@ -123,13 +123,23 @@ export type CampusStatus = (typeof CAMPUS_STATUSES)[number];
 export const ALL_CAMPUSES = 'all' as const;
 
 /**
- * Batch code reserved for students who have been enrolled but not yet placed.
+ * How an unassigned batch is written wherever a student's placement is displayed.
  *
- * Placement comes from the initial diagnostic assessment. Until that result exists, a
- * student sits here rather than being guessed into Foundation or Intermediate (§7) — the
- * roster supplies identity, squad and a LeetCode handle, and nothing about belt level.
+ * A student enrolled before their diagnostic assessment has **no batch** — `batchId` is
+ * simply null. That is deliberately not modelled as a batch of its own: a placeholder
+ * batch shows up in every batch picker, every leaderboard scope and every assignment
+ * target, and reads as somewhere a student can be *assigned to* rather than somewhere
+ * they are waiting. Null is the honest representation, and this is only its label.
  */
-export const PENDING_PLACEMENT_BATCH_CODE = 'PENDING';
+export const UNASSIGNED_BATCH_LABEL = 'Not Assigned';
+
+/**
+ * The batch filter value meaning "students with no batch yet".
+ *
+ * A third selector value alongside a batch code and `all`, because "no batch" is not a
+ * batch and cannot be named by one. Resolvers turn it into `batchId IS NULL`.
+ */
+export const UNASSIGNED_BATCH_SELECTOR = 'none';
 
 export const BATCH_CHANGE_SOURCES = ['MANUAL', 'ROSTER_SYNC', 'IMPORT', 'MIGRATION'] as const;
 export type BatchChangeSource = (typeof BATCH_CHANGE_SOURCES)[number];

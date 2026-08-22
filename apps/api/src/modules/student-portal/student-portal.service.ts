@@ -111,9 +111,6 @@ export class StudentPortalService {
       campusCode: profile.campusCode,
       batchName: profile.batchName,
       batchCode: profile.batchCode,
-      // Surfaced so the portal can say "Placement Pending" rather than render a blank
-      // where a level should be — the student is enrolled, not missing data (§15, §34).
-      awaitingPlacement: profile.awaitingPlacement,
       squadNumber: profile.squadNumber,
       cohort: profile.cohort,
       maxBeltLevel: profile.maxBeltLevel,

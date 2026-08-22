@@ -282,9 +282,12 @@ export default function AssignmentsPage() {
 
             {/*
               Target Batch, resolved *within* the chosen campus. Required, and never
-              pre-selected: a mentor must actively pick Foundation, Intermediate,
-              Placement Pending, or explicitly "All batches" before they can create
-              anything (§10).
+              pre-selected: a mentor must actively pick Foundation, Intermediate, or
+              explicitly "All batches" before they can create anything (§10).
+
+              There is no target for students without a batch. Work is set for a level,
+              and someone who has not been placed into one has no level's work to do —
+              a campus-wide assignment still reaches them.
             */}
             {targetCampusId === null ? (
               campusChoiceMade ? (

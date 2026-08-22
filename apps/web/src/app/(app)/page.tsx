@@ -10,7 +10,7 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
-import { SYNC_STATUS_LABELS, type SyncStatus } from '@dsa/shared';
+import { SYNC_STATUS_LABELS, UNASSIGNED_BATCH_LABEL, type SyncStatus } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { formatPercent, timeAgo } from '@/lib/utils';
@@ -175,10 +175,21 @@ export default function DashboardPage() {
                   {formatPercent(campusRow.completionPercent)}
                 </span>
               </div>
+              {/*
+                Each campus's own level split, so "Vels 15/16, SRM 0/0/99" is readable at
+                a glance without opening the directory (§12).
+              */}
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {campusRow.awaitingPlacementStudents > 0 ? (
+                {data.batchBreakdown
+                  .filter((b) => b.campusId === campusRow.campusId && b.batchId !== null)
+                  .map((b) => (
+                    <Badge key={b.batchId} tone="neutral">
+                      {(b.batchName ?? '').replace(/\s*Level$/i, '')}: {b.activeStudents}
+                    </Badge>
+                  ))}
+                {campusRow.unassignedStudents > 0 ? (
                   <Badge tone="warning">
-                    {campusRow.awaitingPlacementStudents} awaiting placement
+                    {UNASSIGNED_BATCH_LABEL}: {campusRow.unassignedStudents}
                   </Badge>
                 ) : null}
                 {campusRow.assignedTotal === 0 ? (
@@ -208,7 +219,7 @@ export default function DashboardPage() {
                   {/* Both halves named. Two cards headed "Foundation Level" — one Vels,
                       one SRM — would be indistinguishable side by side (§32). */}
                   <p className="text-sm font-semibold">
-                    {[batchRow.campusName, batchRow.batchName ?? 'No batch']
+                    {[batchRow.campusName, batchRow.batchName ?? UNASSIGNED_BATCH_LABEL]
                       .filter(Boolean)
                       .join(' — ')}
                   </p>

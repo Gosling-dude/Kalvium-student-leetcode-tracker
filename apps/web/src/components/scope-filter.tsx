@@ -29,14 +29,26 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import type { BatchSummary, CampusSummary } from '@dsa/shared';
+import {
+  UNASSIGNED_BATCH_LABEL,
+  UNASSIGNED_BATCH_SELECTOR,
+  type BatchSummary,
+  type CampusSummary,
+} from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /** `null` means "all"; otherwise a campus `code` (`VELS`, `SRM`, …). */
 export type CampusSelection = string | null;
-/** `null` means "all batches"; otherwise a batch `code` (`A`, `B`, `PENDING`). */
+/**
+ * `null` means "all batches"; otherwise a batch `code` (`A`, `B`), or the reserved
+ * `UNASSIGNED_BATCH_SELECTOR` for students who have no batch yet.
+ *
+ * "Not assigned" is deliberately a selector value rather than a batch: a student awaiting
+ * their diagnostic assessment has no batch, and modelling that as one would put it in
+ * every assignment target and leaderboard scope as somewhere work could be set.
+ */
 export type BatchSelection = string | null;
 
 const CAMPUS_KEY = 'dsa.campusFilter';
@@ -150,9 +162,12 @@ export function useScopeLabel(): string {
   const campusName = campus
     ? (campuses.find((entry) => entry.code === campus)?.name ?? campus)
     : 'All campuses';
-  const batchName = batch
-    ? (batches.find((entry) => entry.code === batch)?.name ?? batch)
-    : 'All batches';
+  const batchName =
+    batch === UNASSIGNED_BATCH_SELECTOR
+      ? UNASSIGNED_BATCH_LABEL
+      : batch
+        ? (batches.find((entry) => entry.code === batch)?.name ?? batch)
+        : 'All batches';
   return `${campusName} — ${batchName}`;
 }
 
@@ -220,10 +235,13 @@ function Segmented({
 export function ScopeFilter({
   className,
   batchOnly = false,
+  unassignedCount,
 }: {
   className?: string;
   /** For surfaces where the campus is already fixed by context (a campus detail page). */
   batchOnly?: boolean;
+  /** Shown against the "Not Assigned" chip when the caller knows the figure. */
+  unassignedCount?: number;
 }) {
   const { campus, batch, setCampus, setBatch, campuses, batches, isLoading } = useScopeFilter();
 
@@ -245,6 +263,13 @@ export function ScopeFilter({
       label: entry.name.replace(/\s*Level$/i, ''),
       count: entry.studentCount,
     })),
+    // Last, and visually just another option — but it filters on the *absence* of a
+    // batch, not on one.
+    {
+      value: UNASSIGNED_BATCH_SELECTOR,
+      label: UNASSIGNED_BATCH_LABEL,
+      count: unassignedCount,
+    },
   ];
 
   return (
@@ -263,7 +288,7 @@ export function ScopeFilter({
         </div>
       ) : null}
 
-      {batches.length > 1 ? (
+      {batches.length > 0 ? (
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
             Batch

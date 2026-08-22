@@ -6,7 +6,6 @@ import {
   heatmapIntensity,
   levelProgress,
   normaliseSquadNumber,
-  PENDING_PLACEMENT_BATCH_CODE,
   type BatchHistoryEntry,
   type CampusHistoryEntry,
   type Paginated,
@@ -679,13 +678,9 @@ export class StudentsService {
           // catch "Squad 1440". Anchoring both ends keeps 144 and 1440 distinct.
           { squad: { name: { in: [`Squad ${query.squadNumber}`, `${query.squadNumber}`] } } }
         : {}),
-      ...(query.awaitingPlacement
-        ? {
-            // "Awaiting placement" is either the campus's PENDING batch or no batch at
-            // all. Both mean the same thing to a mentor and must filter together (§13).
-            OR: [{ batchId: null }, { batch: { code: PENDING_PLACEMENT_BATCH_CODE } }],
-          }
-        : {}),
+      // "Not assigned" is simply the absence of a batch — not a batch of its own, so it
+      // is a `NULL` test rather than a code comparison.
+      ...(query.unassigned ? { batchId: null } : {}),
       ...(query.cohort !== undefined ? { cohort: query.cohort } : {}),
       ...(query.status ? { status: query.status } : {}),
       ...(query.syncStatus ? { syncState: { status: query.syncStatus } } : {}),
@@ -731,10 +726,6 @@ export class StudentsService {
       batchId: student.batchId,
       batchName: student.batch?.name ?? null,
       batchCode: student.batch?.code ?? null,
-      // Surfaced as its own flag rather than left for each caller to infer from a null
-      // batch: "Placement Pending" is a state to display, not missing data (§7, §15).
-      awaitingPlacement:
-        student.batchId === null || student.batch?.code === PENDING_PLACEMENT_BATCH_CODE,
       squadNumber: normaliseSquadNumber(student.squad?.name ?? null),
       cohort: student.cohort,
       maxBeltLevel: student.maxBeltLevel,

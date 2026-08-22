@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Circle, ExternalLink, Trophy } from 'lucide-react';
 
+import { UNASSIGNED_BATCH_LABEL } from '@dsa/shared';
+
 import { api } from '@/lib/api';
 import {
   Badge,
@@ -60,17 +62,17 @@ export default function StudentDashboardPage() {
         </h1>
         {/*
           Campus, level, squad and cohort — the student's whole organisational identity
-          in one line (§15). "Placement Pending" is shown as its own badge rather than
-          left as an absent level, because a blank there reads as a broken page when the
-          truth is simply that the diagnostic has not happened yet (§34).
+          in one line (§15). "Not Assigned" is shown as its own badge rather than left as
+          an absent level, because a blank there reads as a broken page when the truth is
+          simply that the diagnostic has not happened yet.
         */}
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-[var(--color-fg-muted)]">
           {data.campusName ? <Badge tone="neutral">{data.campusName}</Badge> : null}
-          {data.awaitingPlacement ? (
-            <Badge tone="warning">Placement pending</Badge>
-          ) : data.batchName ? (
+          {data.batchName ? (
             <Badge tone="brand">{data.batchName}</Badge>
-          ) : null}
+          ) : (
+            <Badge tone="warning">{UNASSIGNED_BATCH_LABEL}</Badge>
+          )}
           {data.squadNumber !== null ? (
             <Badge tone="neutral">Squad {data.squadNumber}</Badge>
           ) : null}
@@ -80,11 +82,11 @@ export default function StudentDashboardPage() {
           ) : null}
         </div>
 
-        {data.awaitingPlacement ? (
+        {data.batchName === null ? (
           <p className="mt-3 rounded-lg bg-[var(--color-warning-soft)] p-3 text-sm text-[var(--color-warning)]">
-            You are enrolled and awaiting your initial diagnostic assessment. Until it is
-            done you will not see level-specific daily assignments — anything set for your
-            whole campus still applies to you.
+            Your batch has not been assigned yet. Until your initial diagnostic assessment
+            is done you will not see level-specific daily assignments — anything set for
+            your whole campus still applies to you.
           </p>
         ) : null}
 

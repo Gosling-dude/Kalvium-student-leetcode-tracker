@@ -26,8 +26,8 @@ import {
   ALL_CAMPUSES,
   deriveCampusCode,
   normaliseCampusCode,
-  PENDING_PLACEMENT_BATCH_CODE,
   resolveCampusOnDay,
+  UNASSIGNED_BATCH_SELECTOR,
   type AudienceScope,
   type BatchSummary,
   type CampusHistoryEntry,
@@ -58,6 +58,13 @@ export interface ResolvedScope extends AudienceScope {
   campusCode: string | null;
   batchName: string | null;
   batchCode: string | null;
+  /**
+   * The caller asked for students with **no batch**, which is a third state a batch id
+   * cannot express: `batchId: null` already means "every batch". Consumers that support
+   * it filter on `batchId IS NULL`; those that do not ignore it and show everything,
+   * which is the safe direction to be wrong in.
+   */
+  onlyUnassigned: boolean;
 }
 
 @Injectable()
@@ -171,6 +178,22 @@ export class CampusesService {
         campusCode: campus?.code ?? null,
         batchName: null,
         batchCode: null,
+        onlyUnassigned: false,
+      };
+    }
+
+    // "Not assigned" — enrolled, but not yet placed into a level. Not a batch, so it
+    // resolves to a flag rather than to an id.
+    if (rawBatch.toLowerCase() === UNASSIGNED_BATCH_SELECTOR) {
+      const campus = campusId ? await this.campusRef(campusId) : null;
+      return {
+        campusId,
+        batchId: null,
+        campusName: campus?.name ?? null,
+        campusCode: campus?.code ?? null,
+        batchName: null,
+        batchCode: null,
+        onlyUnassigned: true,
       };
     }
 
@@ -195,6 +218,7 @@ export class CampusesService {
       campusCode: campus?.code ?? null,
       batchName: batch.name,
       batchCode: batch.code,
+      onlyUnassigned: false,
     };
   }
 
@@ -263,9 +287,6 @@ export class CampusesService {
     const aliases: Record<string, string> = {
       FOUNDATION: 'A',
       INTERMEDIATE: 'B',
-      PENDING_PLACEMENT: PENDING_PLACEMENT_BATCH_CODE,
-      'PLACEMENT-PENDING': PENDING_PLACEMENT_BATCH_CODE,
-      UNASSIGNED: PENDING_PLACEMENT_BATCH_CODE,
     };
     return aliases[code] ?? code;
   }
@@ -476,18 +497,11 @@ export class CampusesService {
         );
       }
       toBatchId = batch.id;
-    } else {
-      // No batch named: land the student in the destination campus's placement-pending
-      // batch if it has one, rather than in no batch at all. "Pending" is a state a
-      // mentor can act on; a null batch just looks like missing data (§7).
-      const pending = await this.prisma.batch.findUnique({
-        where: {
-          campusId_code: { campusId: input.toCampusId, code: PENDING_PLACEMENT_BATCH_CODE },
-        },
-        select: { id: true, status: true },
-      });
-      toBatchId = pending?.status === 'ACTIVE' ? pending.id : null;
     }
+    // No batch named leaves the student unassigned at the destination, which is the
+    // honest outcome of a transfer with no placement decision: they have arrived, and
+    // which level they belong to at the new campus has not been decided. Inventing one —
+    // or carrying the old campus's level across — would state something nobody determined.
 
     const effectiveFrom = input.effectiveFromDayKey ?? this.time.today();
     const campusChanged = student.campusId !== input.toCampusId;
@@ -593,7 +607,7 @@ export class CampusesService {
   async getStats(dayKey?: DayKey): Promise<CampusStats[]> {
     const day = dayKey ?? this.time.today();
 
-    const [campuses, studentGroups, pendingGroups, statusRows] = await Promise.all([
+    const [campuses, studentGroups, unassignedGroups, statusRows] = await Promise.all([
       this.prisma.campus.findMany({
         where: { status: 'ACTIVE' },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
@@ -603,12 +617,9 @@ export class CampusesService {
         _count: { _all: true },
         where: { status: { in: ['ACTIVE', 'ARCHIVED'] } },
       }),
-      // "Awaiting placement" is either no batch at all or the campus's PENDING batch.
+      // Unassigned means exactly what it says: no batch yet.
       this.prisma.student.findMany({
-        where: {
-          status: 'ACTIVE',
-          OR: [{ batchId: null }, { batch: { code: PENDING_PLACEMENT_BATCH_CODE } }],
-        },
+        where: { status: 'ACTIVE', batchId: null },
         select: { campusId: true },
       }),
       this.prisma.dailyStatus.groupBy({
@@ -631,10 +642,10 @@ export class CampusesService {
       target.set(group.campusId, (target.get(group.campusId) ?? 0) + group._count._all);
     }
 
-    const pendingByCampus = new Map<string, number>();
-    for (const row of pendingGroups) {
+    const unassignedByCampus = new Map<string, number>();
+    for (const row of unassignedGroups) {
       if (!row.campusId) continue;
-      pendingByCampus.set(row.campusId, (pendingByCampus.get(row.campusId) ?? 0) + 1);
+      unassignedByCampus.set(row.campusId, (unassignedByCampus.get(row.campusId) ?? 0) + 1);
     }
 
     const completionByCampus = new Map<string, number>();
@@ -655,7 +666,7 @@ export class CampusesService {
         ...this.toSummary(campus, activeStudents, batches.length),
         activeStudents,
         archivedStudents: archivedByCampus.get(campus.id) ?? 0,
-        pendingPlacementStudents: pendingByCampus.get(campus.id) ?? 0,
+        unassignedStudents: unassignedByCampus.get(campus.id) ?? 0,
         averageCompletionPercent: completionByCampus.get(campus.id) ?? 0,
         batches,
         dayKey: day,

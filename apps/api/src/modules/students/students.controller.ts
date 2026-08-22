@@ -85,6 +85,9 @@ export class StudentsController {
       });
       query.campusId = scope.campusId ?? undefined;
       query.batchId = scope.batchId ?? undefined;
+      // `batch=none` asks for students with no batch — a third state that a batch id
+      // cannot carry, since an absent id already means "every batch".
+      if (scope.onlyUnassigned) query.unassigned = true;
     }
     return this.students.findAll(query);
   }

@@ -22,8 +22,9 @@
  *    `/problemset/`, the bare homepage — imports as `null` and lands in the
  *    "Profile needs verification" list. It is never coerced into something that parses.
  *  * **No placement is invented.** The roster carries no belt level and no diagnostic
- *    result, so every student lands in the campus's Placement Pending batch. Foundation
- *    and Intermediate are assigned later, from real assessment data (§7).
+ *    result, so every student lands with **no batch at all** — `batchId` is null, shown
+ *    as "Not Assigned". Foundation and Intermediate are assigned later, by an admin,
+ *    from real assessment data. Cohort and belt are left null for the same reason.
  *  * **Idempotent.** Matching on the normalised email means a second run reports every
  *    student as unchanged and writes nothing.
  *  * **Dry run first.** `--dry-run` produces the full reconciliation report and writes
@@ -36,7 +37,8 @@
  *   --campus=X   Campus code to import into (required).
  *   --file=X     CSV path (required). Columns: name, email, squad, leetcode.
  *   --dry-run    Report what *would* happen. Writes nothing.
- *   --batch=X    Land students in this batch code instead of Placement Pending.
+ *   --batch=X    Place students into this batch code instead of leaving them unassigned.
+ *                Only use it when a real placement decision has already been made.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -52,8 +54,6 @@ import {
 } from '@dsa/shared';
 
 const prisma = new PrismaClient();
-
-const PENDING_PLACEMENT_CODE = 'PENDING';
 
 /** Header aliases, lowercased and stripped of separators — the intake sheet's wording. */
 const COLUMNS = {
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
   const dryRun = process.argv.includes('--dry-run');
   const campusCode = (arg('campus') ?? '').trim().toUpperCase();
   const file = arg('file');
-  const batchCode = (arg('batch') ?? PENDING_PLACEMENT_CODE).trim().toUpperCase();
+  const batchCode = (arg('batch') ?? '').trim().toUpperCase();
 
   if (!campusCode) throw new Error('Pass --campus=<code>, e.g. --campus=SRM.');
   if (!file) throw new Error('Pass --file=<path to the roster CSV>.');
@@ -213,13 +213,18 @@ async function main(): Promise<void> {
     );
   }
 
-  // Placement Pending is the honest landing place: the intake supplies identity, squad
-  // and a handle, and says nothing about belt level. Inventing Foundation or Intermediate
-  // here would put a number in front of a mentor that no assessment produced (§7).
-  const batch = await prisma.batch.findUnique({
-    where: { campusId_code: { campusId: campus.id, code: batchCode } },
-  });
-  if (!batch) {
+  // No batch is the honest landing place: the intake supplies identity, squad and a
+  // handle, and says nothing about belt level. Inventing Foundation or Intermediate here
+  // would put a placement in front of a mentor that no assessment produced.
+  //
+  // `--batch=` exists for the case where a placement decision *has* already been made and
+  // the roster is being loaded after the fact.
+  const batch = batchCode
+    ? await prisma.batch.findUnique({
+        where: { campusId_code: { campusId: campus.id, code: batchCode } },
+      })
+    : null;
+  if (batchCode && !batch) {
     throw new Error(
       `${campus.name} has no batch with code "${batchCode}". ` +
         'Create it first rather than letting an import invent a batch.',
@@ -228,7 +233,7 @@ async function main(): Promise<void> {
 
   console.log(`\nCampus roster import${dryRun ? ' (DRY RUN — nothing will be written)' : ''}`);
   console.log(`  Campus: ${campus.code} — ${campus.name}`);
-  console.log(`  Batch:  ${batch.code} — ${batch.name}`);
+  console.log(`  Batch:  ${batch ? `${batch.code} — ${batch.name}` : 'Not Assigned (no batch)'}`);
   console.log(`  File:   ${file}\n`);
 
   const rows = readRoster(file);
@@ -363,7 +368,7 @@ async function main(): Promise<void> {
             email: student.email,
             leetcodeUsername: usableHandle,
             campusId: campus.id,
-            batchId: batch.id,
+            batchId: batch?.id ?? null,
             squadId,
             status: 'ACTIVE',
             // Never-synced is not "solved nothing" — the distinction is what stops a
@@ -377,12 +382,17 @@ async function main(): Promise<void> {
                 reason: `${campus.name} intake roster`,
               },
             },
+            // Recorded even when there is no batch: "enrolled on this day, unplaced" is
+            // a fact worth keeping, and it gives the historical resolver an answer for
+            // every day from enrolment onward instead of a gap.
             batchHistory: {
               create: {
-                toBatchId: batch.id,
+                toBatchId: batch?.id ?? null,
                 effectiveFromDayKey: today,
                 source: 'IMPORT',
-                reason: 'Awaiting the initial diagnostic assessment',
+                reason: batch
+                  ? 'Placed from roster import'
+                  : 'Enrolled; batch assigned after the diagnostic assessment',
               },
             },
           },
@@ -427,15 +437,24 @@ async function main(): Promise<void> {
   }
 
   const total = await prisma.student.count({ where: { campusId: campus.id, status: 'ACTIVE' } });
-  const pending = await prisma.student.count({
-    where: { campusId: campus.id, status: 'ACTIVE', batchId: batch.id },
+  const unassigned = await prisma.student.count({
+    where: { campusId: campus.id, status: 'ACTIVE', batchId: null },
   });
   const needsVerification = await prisma.student.count({
     where: { campusId: campus.id, status: 'ACTIVE', leetcodeUsername: null },
   });
+  const byBatch = await prisma.batch.findMany({
+    where: { campusId: campus.id },
+    select: {
+      name: true,
+      _count: { select: { students: { where: { status: 'ACTIVE' } } } },
+    },
+    orderBy: { sortOrder: 'asc' },
+  });
 
   console.log(`\n  ${campus.code} now has ${total} active student(s):`);
-  console.log(`    In ${batch.name}: ${pending}`);
+  for (const b of byBatch) console.log(`    ${b.name}: ${b._count.students}`);
+  console.log(`    Not Assigned: ${unassigned}`);
   console.log(`    LeetCode profile needs verification: ${needsVerification}`);
   console.log('\nImport complete. Run a sync to pull LeetCode history.');
 }

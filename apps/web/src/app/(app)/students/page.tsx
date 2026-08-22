@@ -7,6 +7,7 @@ import { Download, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   SYNC_STATUS_LABELS,
+  UNASSIGNED_BATCH_LABEL,
   isTrustworthySync,
   type ImportResult,
   type StudentSummary,
@@ -47,16 +48,15 @@ export default function StudentsPage() {
   const [transferring, setTransferring] = useState<StudentSummary | null>(null);
 
   const { campus, batch, campuses, batches } = useScopeFilter();
-  /** Squad number and placement-pending are directory-only filters (§13). */
+  /** Squad number is a directory-only filter (§13). */
   const [squadNumber, setSquadNumber] = useState('');
-  const [awaitingPlacement, setAwaitingPlacement] = useState(false);
 
   const filters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
 
   const students = useQuery({
     queryKey: [
       'students',
-      { page, search, squadId, syncStatus, campus, batch, cohort, archiveScope, squadNumber, awaitingPlacement },
+      { page, search, squadId, syncStatus, campus, batch, cohort, archiveScope, squadNumber },
     ],
     queryFn: () =>
       api.students({
@@ -70,7 +70,6 @@ export default function StudentsPage() {
         batch: batch ?? undefined,
         cohort: cohort || undefined,
         squadNumber: squadNumber || undefined,
-        ...(awaitingPlacement ? { awaitingPlacement: 'true' } : {}),
         ...(archiveScope === 'all'
           ? { includeArchived: 'true' }
           : archiveScope === 'ARCHIVED'
@@ -252,23 +251,6 @@ export default function StudentsPage() {
             Archived students are hidden by default — they have left the programme. They
             remain reachable here because their history is intact and still worth reading.
           */}
-          {/*
-            "Placement pending" is the SRM intake's default state and the query a mentor
-            runs most often in the first weeks: who still needs a diagnostic result (§13)?
-          */}
-          <label className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm">
-            <input
-              type="checkbox"
-              checked={awaitingPlacement}
-              onChange={(event) => {
-                setAwaitingPlacement(event.target.checked);
-                setPage(1);
-              }}
-              className="size-3.5 accent-[var(--color-brand)]"
-            />
-            Placement pending
-          </label>
-
           <select
             value={archiveScope}
             onChange={(event) => {
@@ -385,9 +367,10 @@ export default function StudentsPage() {
                         />
                         {/* An explicit state, not an empty cell: these students are
                             enrolled and waiting for a diagnostic result, which is a very
-                            different thing from missing data (§7, §13). */}
-                        {student.awaitingPlacement && student.status !== 'ARCHIVED' ? (
-                          <Badge tone="warning">Placement pending</Badge>
+                            different thing from missing data. It is a property of the
+                            student, not a batch they belong to. */}
+                        {student.batchId === null && student.status !== 'ARCHIVED' ? (
+                          <Badge tone="warning">{UNASSIGNED_BATCH_LABEL}</Badge>
                         ) : null}
                         {student.status === 'ARCHIVED' ? (
                           <Badge tone="neutral">Archived</Badge>

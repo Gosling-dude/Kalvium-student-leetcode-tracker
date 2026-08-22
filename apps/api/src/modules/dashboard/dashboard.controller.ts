@@ -42,6 +42,7 @@ export class DashboardController {
     return this.dashboard.getStats(dayKey, {
       campusId: scope.campusId,
       batchId: scope.batchId,
+      onlyUnassigned: scope.onlyUnassigned,
     });
   }
 
@@ -64,6 +65,7 @@ export class DashboardController {
       squadId,
       campusId: scope.campusId,
       batchId: scope.batchId,
+      onlyUnassigned: scope.onlyUnassigned,
     });
   }
 }

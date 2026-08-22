@@ -2,7 +2,11 @@
 
 /**
  * "Move Abishek R V from Foundation to Intermediate?" — the confirmation step for a
- * batch move (§6).
+ * batch move (§6), and the first *assignment* of a batch to a student who has none.
+ *
+ * Both are the same operation on the same column, and deliberately share one dialog: a
+ * student awaiting their diagnostic assessment has no batch, so giving them one is a move
+ * from nothing rather than a different kind of act. Only the wording changes.
  *
  * The dialog states plainly what is about to change *and* what is not, because the
  * question a mentor actually has before clicking is "does this wipe their history?".
@@ -12,7 +16,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import type { BatchSummary, StudentSummary } from '@dsa/shared';
+import { UNASSIGNED_BATCH_LABEL, type BatchSummary, type StudentSummary } from '@dsa/shared';
 
 import { api } from '@/lib/api';
 import { Button, Modal } from '@/components/ui';
@@ -69,13 +73,13 @@ export function MoveBatchDialog({
         reset();
         onClose();
       }}
-      title="Move student to another batch"
+      title={student.batchId === null ? 'Assign a batch' : 'Move student to another batch'}
     >
       <div className="space-y-4 p-5">
         <div className="rounded-lg bg-[var(--color-surface-sunken)] p-3 text-sm">
           <p className="font-medium">{student.name}</p>
           <p className="text-[var(--color-fg-muted)]">
-            Current batch: {student.batchName ?? 'None'}
+            Current batch: {student.batchName ?? UNASSIGNED_BATCH_LABEL}
           </p>
         </div>
 
@@ -118,13 +122,15 @@ export function MoveBatchDialog({
         {target ? (
           <div className="rounded-lg border border-[var(--color-border)] p-3 text-sm">
             <p className="font-medium">
-              Move {student.name} from {student.batchName ?? 'no batch'} to {target.name}?
+              {student.batchId === null
+                ? `Assign ${student.name} to ${target.name}?`
+                : `Move ${student.name} from ${student.batchName} to ${target.name}?`}
             </p>
             <p className="mt-1 text-[var(--color-fg-muted)]">
               From today onwards they are assessed against {target.name}&rsquo;s questions.
               Their past assignments, results, streak, leaderboard history and LeetCode data
               are all kept exactly as they are, and earlier days stay recorded under{' '}
-              {student.batchName ?? 'their previous batch'}.
+              {student.batchName ?? UNASSIGNED_BATCH_LABEL}.
             </p>
           </div>
         ) : null}
@@ -144,7 +150,7 @@ export function MoveBatchDialog({
             loading={move.isPending}
             onClick={() => move.mutate()}
           >
-            Move student
+            {student.batchId === null ? 'Assign batch' : 'Move student'}
           </Button>
         </div>
       </div>

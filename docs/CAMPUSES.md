@@ -137,16 +137,26 @@ addresses and handles, and this repository is public.
 ### Placement
 
 An intake roster carries identity, squad and a handle. It says nothing about belt level or
-diagnostic results, so every imported student lands in the campus's **Placement Pending**
-batch. Foundation and Intermediate are assigned later, from real assessment data. Nothing
-in the system invents a level.
+diagnostic results, so every imported student lands with **no batch at all** — `batchId`
+is null, displayed as "Not Assigned". Cohort and belt are left null for the same reason.
+Foundation and Intermediate are assigned later, by an admin, from real assessment data.
+Nothing in the system invents a level.
 
-Placement-pending students still receive campus-wide assignments — a whole-campus row
-applies to every batch, including this one — but not batch-specific ones.
+"Not assigned" is deliberately *not* modelled as a batch. A placeholder batch appears in
+every batch picker, every assignment target and every leaderboard scope, reading as
+somewhere a student can be placed and work can be set — which is exactly what it is not.
+It is a property of the student: they have no batch yet.
+
+Unassigned students still receive campus-wide assignments, because a whole-campus row
+applies to everyone at that campus. They do not receive Foundation or Intermediate work:
+that is set for a level, and they have not been placed into one.
+
+Assigning a batch later is an ordinary batch move from nothing — the same operation, the
+same `StudentBatchHistory` row, the same audit trail.
 
 ## Adding a third campus
 
-1. `POST /campuses { name, code }`. Its standard batches are created with it.
+1. `POST /campuses { name, code }`. Foundation and Intermediate are created with it.
 2. Import its roster with `db:import:roster`.
 3. Nothing else. Every filter, leaderboard, report and picker reads campuses from the
    database, and no campus name or code is hard-coded anywhere in the application.

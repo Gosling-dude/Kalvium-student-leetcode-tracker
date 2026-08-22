@@ -11,8 +11,6 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { PENDING_PLACEMENT_BATCH_CODE } from '@dsa/shared';
-
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CampusesService } from './campuses.service';
@@ -26,7 +24,13 @@ import {
   UpdateCampusDto,
 } from './dto/campus.dto';
 
-/** The batches every new campus starts with. Levels first, placement-pending last. */
+/**
+ * The batches every new campus starts with — the two levels, and nothing else.
+ *
+ * There is deliberately no batch for "not placed yet". A student awaiting their
+ * diagnostic assessment simply has no batch, because a placeholder batch would appear in
+ * every picker and every assignment target as somewhere work could be set.
+ */
 const DEFAULT_BATCHES = [
   { name: 'Foundation Level', code: 'A', description: 'Batch A — Foundation Level', sortOrder: 1 },
   {
@@ -34,13 +38,6 @@ const DEFAULT_BATCHES = [
     code: 'B',
     description: 'Batch B — Intermediate Level',
     sortOrder: 2,
-  },
-  {
-    name: 'Placement Pending',
-    code: PENDING_PLACEMENT_BATCH_CODE,
-    description:
-      'Awaiting the initial diagnostic assessment. No belt level has been determined yet.',
-    sortOrder: 99,
   },
 ] as const;
 

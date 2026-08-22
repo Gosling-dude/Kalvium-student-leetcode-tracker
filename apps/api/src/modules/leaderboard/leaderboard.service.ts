@@ -13,6 +13,13 @@
  *  * **Campus + batch** is re-numbered in memory from the campus's snapshot rows, using
  *    the same `rankEntries` tie rules. Storing a third materialised rank would mean
  *    recomputing it on every batch move for no benefit at these sizes.
+ *
+ * **Students with no batch are included**, in the global and campus boards alike. That is
+ * the existing rule rather than a new one: a `LeaderboardEntry` is written for every
+ * active student the rollup scores, and scoring has never required a batch. A student
+ * awaiting their diagnostic assessment can still solve problems, and excluding them would
+ * make the "global" board quietly not global. They simply have no batch-scoped board to
+ * appear in until one is assigned, and rank wherever their score puts them.
  */
 
 import { Injectable } from '@nestjs/common';
@@ -47,6 +54,8 @@ export class LeaderboardService {
       squadId?: string;
       campusId?: string | null;
       batchId?: string | null;
+      /** Narrow to students who had no batch when the snapshot was taken. */
+      onlyUnassigned?: boolean;
       limit?: number;
     } = {},
   ): Promise<LeaderboardRow[]> {
@@ -54,12 +63,16 @@ export class LeaderboardService {
     const periodKey = this.periodKey(period, day);
     const cacheKey = `leaderboard:${period}:${periodKey}:${options.squadId ?? 'all'}:${
       options.campusId ?? 'all'
-    }:${options.batchId ?? 'all'}:${options.limit ?? 'all'}`;
+    }:${options.batchId ?? 'all'}:${options.onlyUnassigned ? 'unassigned' : 'any'}:${
+      options.limit ?? 'all'
+    }`;
 
     // Which materialised column orders this request. A global board reads `globalRank`;
     // anything campus-scoped reads the per-campus `rank`. Reading the wrong one is how a
     // campus board ends up starting at #4 because #1–#3 are at the other campus.
-    const scoped = Boolean(options.campusId || options.batchId || options.squadId);
+    const scoped = Boolean(
+      options.campusId || options.batchId || options.squadId || options.onlyUnassigned,
+    );
 
     return this.cache.remember(cacheKey, CACHE_TTL.leaderboard, async () => {
       const entries = await this.prisma.leaderboardEntry.findMany({
@@ -73,6 +86,7 @@ export class LeaderboardService {
           // rewriting settled standings (§12, §17).
           ...(options.campusId ? { campusId: options.campusId } : {}),
           ...(options.batchId ? { batchId: options.batchId } : {}),
+          ...(options.onlyUnassigned ? { batchId: null } : {}),
           student: {
             // Archived students are out of the current programme, so out of current
             // leaderboards (§12). Their past entries stay in the table untouched.
@@ -99,7 +113,9 @@ export class LeaderboardService {
       // ranks come back with gaps (#2, #5, #9…). Re-numbering the subset through the same
       // `rankEntries` used to build the snapshot keeps ties and tiebreakers identical
       // while giving the narrowed board a contiguous 1..n.
-      const needsRenumbering = Boolean(options.batchId || options.squadId);
+      const needsRenumbering = Boolean(
+        options.batchId || options.squadId || options.onlyUnassigned,
+      );
       const renumbered = needsRenumbering
         ? new Map(
             rankEntries(

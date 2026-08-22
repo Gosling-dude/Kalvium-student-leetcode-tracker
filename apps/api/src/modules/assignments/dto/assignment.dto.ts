@@ -57,7 +57,7 @@ export class CreateAssignmentDto {
     type: [String],
     example: ['A'],
     description:
-      'Batch ids, codes (A/B/PENDING) or aliases, resolved within `campus`. ' +
+      'Batch ids, codes (A/B) or aliases, resolved within `campus`. ' +
       'Omit for every batch in that campus.',
   })
   @IsOptional()
@@ -207,8 +207,8 @@ export class ChangeAssignmentTargetDto {
   @ApiProperty({
     example: 'FOUNDATION',
     description:
-      'Batch id, code (A/B/PENDING), alias (foundation/intermediate), or "BOTH" for ' +
-      'every batch in the selected campus.',
+      'Batch id, code (A/B), alias (foundation/intermediate), or "BOTH" for every ' +
+      'batch in the selected campus.',
   })
   @IsString()
   @MaxLength(64)

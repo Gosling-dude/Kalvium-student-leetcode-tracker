@@ -38,8 +38,8 @@ export class CampusFilterDto {
 export class ScopeFilterDto extends CampusFilterDto {
   @ApiPropertyOptional({
     description:
-      'Batch id, code (A/B/PENDING) or alias (foundation/intermediate/pending_placement), ' +
-      'resolved within the selected campus. Omit or "all" for every batch.',
+      'Batch id, code (A/B) or alias (foundation/intermediate), resolved within the ' +
+      'selected campus. Omit or "all" for every batch; "none" for students with no batch.',
     example: 'foundation',
   })
   @IsOptional()
@@ -99,7 +99,7 @@ export class CreateCampusDto {
   sortOrder?: number;
 
   /**
-   * Whether to create the standard Foundation / Intermediate / Placement Pending batches.
+   * Whether to create the standard Foundation / Intermediate batches.
    *
    * Defaults to true because a campus with no batches cannot receive students or
    * assignments, and creating it empty is a trap the first admin falls into once.

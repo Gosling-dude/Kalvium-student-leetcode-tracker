@@ -28,7 +28,6 @@ import {
   deriveBatchCode,
   isRedundantMove,
   normaliseBatchCode,
-  PENDING_PLACEMENT_BATCH_CODE,
   resolveBatchOnDay,
   type BatchHistoryEntry,
   type BatchPlacement,
@@ -54,9 +53,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const CODE_ALIASES: Record<string, string> = {
   FOUNDATION: 'A',
   INTERMEDIATE: 'B',
-  PENDING_PLACEMENT: PENDING_PLACEMENT_BATCH_CODE,
-  'PLACEMENT-PENDING': PENDING_PLACEMENT_BATCH_CODE,
-  UNASSIGNED: PENDING_PLACEMENT_BATCH_CODE,
 };
 
 @Injectable()
@@ -211,22 +207,6 @@ export class BatchesService {
       where: { campusId_code: { campusId, code: resolved } },
       select: { id: true, name: true, code: true, campusId: true },
     });
-  }
-
-  /**
-   * A campus's placement-pending batch, if it has one.
-   *
-   * Where a student sits between enrolment and their diagnostic assessment. Returned as
-   * null rather than created on demand: a campus configured without one is a deliberate
-   * choice, and silently adding a batch to someone's campus during an import is not this
-   * method's business.
-   */
-  async findPendingPlacementBatch(campusId: string): Promise<{ id: string; name: string } | null> {
-    const batch = await this.prisma.batch.findUnique({
-      where: { campusId_code: { campusId, code: PENDING_PLACEMENT_BATCH_CODE } },
-      select: { id: true, name: true, status: true },
-    });
-    return batch && batch.status === 'ACTIVE' ? { id: batch.id, name: batch.name } : null;
   }
 
   // -------------------------------------------------------------------------

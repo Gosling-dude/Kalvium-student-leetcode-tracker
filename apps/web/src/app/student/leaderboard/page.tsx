@@ -40,6 +40,12 @@ export default function StudentLeaderboardPage() {
   const [period, setPeriod] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY'>('WEEKLY');
   const [scope, setScope] = useState<'mine' | 'campus' | 'global'>('campus');
 
+  // A student with no batch yet has no batch board to look at. Offering "My batch" would
+  // show them their campus's board under a label that is not true of them.
+  const me = useQuery({ queryKey: ['student', 'me'], queryFn: api.studentMe });
+  const hasBatch = me.data ? me.data.batchId !== null : true;
+  const scopes = hasBatch ? SCOPES : SCOPES.filter((option) => option.value !== 'mine');
+
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['student', 'leaderboard', period, scope],
     queryFn: () => api.studentLeaderboard(period, scope),
@@ -76,7 +82,7 @@ export default function StudentLeaderboardPage() {
             ))}
           </div>
           <div className="inline-flex rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-0.5">
-            {SCOPES.map((option) => (
+            {scopes.map((option) => (
               <button
                 key={option.value}
                 onClick={() => setScope(option.value)}

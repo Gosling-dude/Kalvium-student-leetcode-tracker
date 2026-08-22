@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import {
   CACHE_TTL,
   SYNC_STATUS_LABELS,
-  PENDING_PLACEMENT_BATCH_CODE,
   completionPercentage,
   isTrustworthySync,
   selectAssignmentForScope,
@@ -37,6 +36,8 @@ import { AssignmentsService } from '../assignments/assignments.service';
 export interface DashboardFilter {
   campusId?: string | null;
   batchId?: string | null;
+  /** Narrow to students with no batch assigned. See `ResolvedScope.onlyUnassigned`. */
+  onlyUnassigned?: boolean;
   squadId?: string;
 }
 
@@ -78,6 +79,7 @@ export class DashboardService {
             status: 'ACTIVE',
             ...(campusId ? { campusId } : {}),
             ...(batchId ? { batchId } : {}),
+            ...(filter.onlyUnassigned ? { batchId: null } : {}),
           },
         }),
         // With-problems, not the lighter `loadStatuses`: the attempted/not-attempted
@@ -300,6 +302,7 @@ export class DashboardService {
       dayKey,
       ...(filter.campusId ? { campusId: filter.campusId } : {}),
       ...(filter.batchId ? { batchId: filter.batchId } : {}),
+      ...(filter.onlyUnassigned ? { batchId: null } : {}),
       student: {
         status: 'ACTIVE' as const,
         ...(filter.squadId ? { squadId: filter.squadId } : {}),
@@ -425,16 +428,18 @@ export class DashboardService {
       if (!byCampus.has(campus.id)) byCampus.set(campus.id, []);
     }
 
-    const pending = await this.prisma.student.groupBy({
-      by: ['campusId'],
-      where: {
-        status: 'ACTIVE',
-        ...(filterCampusId ? { campusId: filterCampusId } : {}),
-        OR: [{ batchId: null }, { batch: { code: PENDING_PLACEMENT_BATCH_CODE } }],
-      },
-      _count: { _all: true },
-    });
-    const pendingByCampus = new Map(pending.map((row) => [row.campusId, row._count._all]));
+    // Unassigned is the absence of a batch, not a batch of its own — and it is counted
+    // from *the day's own rows*, exactly like `activeStudents` beside it.
+    //
+    // Counting it from the student table instead would make the two numbers on one card
+    // disagree: a student imported today has no status row yet, so the card would read
+    // "92 active, 98 unassigned". Worse, on a historical day it would report today's
+    // roster against a past day's activity, which is the historical rewrite §21 forbids.
+    const unassignedByCampus = new Map<string | null, number>();
+    for (const status of statuses) {
+      if (status.batchId !== null) continue;
+      unassignedByCampus.set(status.campusId, (unassignedByCampus.get(status.campusId) ?? 0) + 1);
+    }
 
     const byId = new Map(campuses.map((campus) => [campus.id, campus]));
     const order = new Map(campuses.map((campus, index) => [campus.id, index]));
@@ -458,7 +463,7 @@ export class DashboardService {
           completionPercent: completionPercentage(solvedTotal, assignedTotal),
           attemptedNotSolvedStudents: attemptCounts.studentsAttemptedCount,
           notAttemptedStudents: attemptCounts.studentsNotAttemptedCount,
-          awaitingPlacementStudents: pendingByCampus.get(campusId) ?? 0,
+          unassignedStudents: unassignedByCampus.get(campusId) ?? 0,
         } satisfies DashboardCampusBreakdown;
       })
       .sort((a, b) => (order.get(a.campusId ?? '') ?? 999) - (order.get(b.campusId ?? '') ?? 999));
