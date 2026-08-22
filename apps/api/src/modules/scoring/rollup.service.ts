@@ -21,7 +21,7 @@ import {
   isCurrentStudent,
   isPerfectDay,
   rankEntries,
-  selectAssignmentForBatch,
+  selectAssignmentForScope,
   rankSquads,
   resolveFrozenField,
   type AssignedProblemRef,
@@ -41,6 +41,7 @@ import { ProgramTimeService } from '../../common/services/program-time.service';
 import { ScoringConfigService } from './scoring-config.service';
 import { StudentMetricsService } from './student-metrics.service';
 import { BatchesService } from '../batches/batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 
 /** How far back streak computation looks. Beyond this, a streak is not meaningfully "current". */
 const STREAK_HISTORY_DAYS = 400;
@@ -72,6 +73,7 @@ export class RollupService {
     private readonly scoringConfig: ScoringConfigService,
     private readonly metrics: StudentMetricsService,
     private readonly batches: BatchesService,
+    private readonly campuses: CampusesService,
   ) {}
 
   /**
@@ -94,9 +96,10 @@ export class RollupService {
   ): Promise<{ students: number; assigned: number }> {
     const config = await this.scoringConfig.getActive();
 
-    // Every batch's set for the day, plus any pre-batch (batch-less) row. Which one
-    // applies to a given student is decided per student below, from the batch they were
-    // in *that day* — never from the batch they are in now.
+    // Every audience's set for the day — each campus + batch combination, plus any
+    // campus-wide and everyone rows. Which one applies to a given student is decided per
+    // student below, from the campus *and* batch they were in **that day** — never from
+    // the ones they are in now (§17).
     const assignments = await this.prisma.assignment.findMany({
       where: { dayKey },
       include: { problems: { include: { problem: true }, orderBy: { position: 'asc' } } },
@@ -108,21 +111,25 @@ export class RollupService {
         id: true,
         leetcodeUsername: true,
         createdAt: true,
+        campusId: true,
         batchId: true,
         syncState: { select: { status: true } },
       },
     });
 
-    // The historical placement of every student on this day, resolved in one query.
-    const historicalBatch = await this.batches.batchOnDayForStudents(
-      students.map((student) => student.id),
-      dayKey,
-    );
+    // The historical placement of every student on this day, resolved in two queries —
+    // one per dimension, both batched across the whole roster. A per-student lookup here
+    // would turn one day's recompute into hundreds of round trips (§27).
+    const studentIds = students.map((student) => student.id);
+    const [historicalBatch, historicalCampus] = await Promise.all([
+      this.batches.batchOnDayForStudents(studentIds, dayKey),
+      this.campuses.campusOnDayForStudents(studentIds, dayKey),
+    ]);
 
     // Which assignment each student was already evaluated against for this exact day, if
     // this day has been computed before. Once a `DailyStatus` names an assignment, a later
     // recompute keeps using that same row — even if an admin has since retargeted its
-    // batch (§9) — rather than re-resolving via `selectAssignmentForBatch` and picking a
+    // batch (§9) — rather than re-resolving via `selectAssignmentForScope` and picking a
     // different (or no) assignment out from under an already-scored day.
     //
     // Skipped entirely under `force`: the whole point of a forced recompute is to let a
@@ -180,16 +187,19 @@ export class RollupService {
       // then genuinely had none — their current batch is not a substitute, because using
       // it would re-file a closed day under a batch they joined later (§7).
       const batchIdOnDay = historicalBatch.get(student.id) ?? null;
+      const campusIdOnDay = historicalCampus.get(student.id) ?? null;
+      const scopeOnDay = { campusId: campusIdOnDay, batchId: batchIdOnDay };
 
-      // Only this student's batch's set is a candidate, plus the pre-batch row that
-      // applied to everyone. Another batch's problems are never considered — unless this
-      // day was already scored against a specific assignment, in which case that frozen
-      // choice wins outright (see `frozenAssignmentByStudent` above).
+      // Only sets aimed at this student's campus and batch are candidates, widening
+      // through the campus-wide and everyone tiers. Another campus's or batch's problems
+      // are never considered — unless this day was already scored against a specific
+      // assignment, in which case that frozen choice wins outright (see
+      // `frozenAssignmentByStudent` above).
       const frozenAssignmentId = frozenAssignmentByStudent.get(student.id);
       const assignment = frozenAssignmentId
         ? (assignments.find((a) => a.id === frozenAssignmentId) ??
-            selectAssignmentForBatch(assignments, batchIdOnDay))
-        : selectAssignmentForBatch(assignments, batchIdOnDay);
+            selectAssignmentForScope(assignments, scopeOnDay))
+        : selectAssignmentForScope(assignments, scopeOnDay);
 
       // A day with no assignment for this student's batch still gets a row, with
       // assignedCount 0. Those days are neutral for streaks and must not be confused
@@ -237,6 +247,7 @@ export class RollupService {
         studentId: student.id,
         dayKey,
         assignmentId: assignment?.id ?? null,
+        campusId: campusIdOnDay,
         batchId: batchIdOnDay,
         assignedCount,
         solvedCount,
@@ -360,6 +371,7 @@ export class RollupService {
             currentStreak: true,
             squadId: true,
             batchId: true,
+            campusId: true,
             status: true,
           },
         },
@@ -383,6 +395,7 @@ export class RollupService {
         completionMinute: number | null;
         squadId: string | null;
         batchId: string | null;
+        campusId: string | null;
       }
     >();
 
@@ -397,6 +410,7 @@ export class RollupService {
         completionMinute: null,
         squadId: row.student.squadId,
         batchId: null,
+        campusId: null,
       };
 
       entry.score += row.score;
@@ -417,12 +431,20 @@ export class RollupService {
         entry.batchId = row.batchId;
       }
 
+      // Campus is snapshotted the same way and for the same reason: a student who
+      // transferred mid-period is ranked under the campus they finished it at, and
+      // re-ranking that period later must not move them to their newest campus.
+      if (row.campusId !== null && (entry.campusId === null || row.dayKey === to)) {
+        entry.campusId = row.campusId;
+      }
+
       byStudent.set(row.studentId, entry);
     }
 
     const rankable: (RankableEntry & {
       squadId: string | null;
       batchId: string | null;
+      campusId: string | null;
       assignedCount: number;
     })[] = [...byStudent].map(([id, entry]) => ({
       id,
@@ -435,10 +457,32 @@ export class RollupService {
         entry.assigned > 0 ? Math.round((entry.solved / entry.assigned) * 10000) / 100 : 0,
       squadId: entry.squadId,
       batchId: entry.batchId,
+      campusId: entry.campusId,
       assignedCount: entry.assigned,
     }));
 
+    // Two independent rankings, computed from the same underlying scores.
+    //
+    // `globalRank` ranks every active student together, across every campus. `rank` ranks
+    // each student within their own campus. Neither is derived from the other: a global
+    // standing cannot be reconstructed by interleaving per-campus positions, and a campus
+    // standing cannot be read off a global list without re-numbering it (§14). Computing
+    // both here — from `rankEntries`, so ties and tiebreakers follow one definition — is
+    // what lets a Vels student and an SRM student sit at #1 and #2 globally while each
+    // also leads their own campus.
     const ranked = rankEntries(rankable);
+    const globalRankById = new Map(ranked.map((row) => [row.entry.id, row.rank]));
+
+    const campusRankById = new Map<string, number>();
+    const byCampus = new Map<string | null, typeof rankable>();
+    for (const entry of rankable) {
+      const list = byCampus.get(entry.campusId) ?? [];
+      list.push(entry);
+      byCampus.set(entry.campusId, list);
+    }
+    for (const [, entries] of byCampus) {
+      for (const row of rankEntries(entries)) campusRankById.set(row.entry.id, row.rank);
+    }
 
     // Previous ranks power the "moved up 3 places" indicator.
     const previous = await this.prisma.leaderboardEntry.findMany({
@@ -455,7 +499,11 @@ export class RollupService {
           periodKey,
           studentId: row.entry.id,
           batchId: row.entry.batchId,
-          rank: row.rank,
+          campusId: row.entry.campusId,
+          // `rank` is the student's position *within their campus*; `globalRank` is their
+          // position across all of them. See the comment where both are computed.
+          rank: campusRankById.get(row.entry.id) ?? row.rank,
+          globalRank: globalRankById.get(row.entry.id) ?? row.rank,
           previousRank: previousRanks.get(row.entry.id) ?? null,
           score: Math.round(row.entry.score),
           solvedCount: row.entry.solvedCount,
@@ -476,6 +524,7 @@ export class RollupService {
     students: (RankableEntry & {
       squadId: string | null;
       batchId: string | null;
+      campusId: string | null;
       assignedCount: number;
     })[],
   ): Promise<void> {
@@ -549,6 +598,44 @@ export class RollupService {
     }
     await this.cache.flush();
     return { days: days.length };
+  }
+
+  /**
+   * Days whose stored results no longer reflect the assignment they should be scored
+   * against — the set a sync has to recompute beyond its own day.
+   *
+   * The invariant is deliberately general rather than a special case for late-added
+   * assignments: **a day is stale when its assignment has been written more recently than
+   * the day was last computed.** One condition covers every way a day can go out of date:
+   *
+   *  * the assignment was *added* after its own date (the reported bug — an assignment
+   *    dated 20 Aug inserted on 22 Aug was never evaluated, because nothing recomputed
+   *    20 Aug afterwards);
+   *  * its problem list was edited;
+   *  * its audience was retargeted;
+   *  * the day was never computed at all, so there is no `computedAt` to compare against.
+   *
+   * It is also self-clearing: one recompute moves `computedAt` past `updatedAt` and the
+   * day stops being reported, so a sync does not keep redoing settled work.
+   *
+   * `assignment.createdAt` is never used to filter *submissions* — that would discard
+   * genuine work done before the assignment was entered, which is the very thing the
+   * lookback window exists to allow. It is only ever used here, to decide *which days to
+   * recompute*.
+   */
+  async findStaleAssignmentDays(from: DayKey, to: DayKey): Promise<DayKey[]> {
+    const rows = await this.prisma.$queryRaw<{ dayKey: string }[]>`
+      SELECT DISTINCT a."dayKey"
+      FROM "assignments" a
+      WHERE a."dayKey" >= ${from}
+        AND a."dayKey" <= ${to}
+        AND a."updatedAt" > COALESCE(
+          (SELECT MAX(d."computedAt") FROM "daily_statuses" d WHERE d."dayKey" = a."dayKey"),
+          '-infinity'::timestamp
+        )
+      ORDER BY a."dayKey"
+    `;
+    return rows.map((row) => row.dayKey);
   }
 
   // -------------------------------------------------------------------------
@@ -654,6 +741,7 @@ export class RollupService {
   }
 
   private async persistDailyStatus(input: {
+    campusId?: string | null;
     studentId: string;
     dayKey: DayKey;
     assignmentId: string | null;
@@ -675,7 +763,7 @@ export class RollupService {
   }): Promise<void> {
     const existing = await this.prisma.dailyStatus.findUnique({
       where: { studentId_dayKey: { studentId: input.studentId, dayKey: input.dayKey } },
-      select: { id: true, isOverridden: true, batchId: true, assignmentId: true },
+      select: { id: true, isOverridden: true, batchId: true, campusId: true, assignmentId: true },
     });
 
     // A mentor's manual override is authoritative. Recomputing must never silently
@@ -689,6 +777,13 @@ export class RollupService {
     // 10 Aug under the new batch — `batchOnDayForStudents` already returns the correct
     // historical answer for that case, which is exactly why the freeze is the default.
     const batchId = resolveFrozenField(existing?.batchId, input.batchId, input.force);
+    // Campus follows exactly the same freeze rule, for exactly the same reason: a
+    // transfer recorded on 20 Aug must not re-file 10 Aug under the new campus.
+    const campusId = resolveFrozenField(
+      existing?.campusId,
+      input.campusId ?? null,
+      input.force,
+    );
 
     // Likewise the assignment a day was scored against is written once and then frozen
     // (§9), with the same `force` escape hatch and for the same reason.
@@ -697,6 +792,7 @@ export class RollupService {
     const data = {
       assignmentId,
       batchId,
+      campusId,
       assignedCount: input.assignedCount,
       solvedCount: input.solvedCount,
       score: input.score,

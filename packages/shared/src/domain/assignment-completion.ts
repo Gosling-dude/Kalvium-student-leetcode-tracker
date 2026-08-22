@@ -114,6 +114,28 @@ export function assignmentWindow(
   return { startDayKey: addDays(dayKey, -Math.abs(lookbackDays)), endDayKey: dayKey };
 }
 
+/**
+ * The assignment days a submission made on `submissionDayKey` could contribute to.
+ *
+ * The inverse of `assignmentWindow`, and the reason it exists separately: after a sync
+ * mirrors a submission, *something* has to decide which days' results are now stale. A
+ * submission on 18 Aug can satisfy an assignment dated 18, 19 or 20 Aug, so recomputing
+ * only the day the submission landed on leaves the other two wrong.
+ *
+ * Returned oldest-first and inclusive of `submissionDayKey` itself.
+ */
+export function assignmentDaysAffectedBy(
+  submissionDayKey: DayKey,
+  lookbackDays: number = ASSIGNMENT_LOOKBACK_DAYS,
+): DayKey[] {
+  const span = Math.abs(lookbackDays);
+  const days: DayKey[] = [];
+  for (let offset = 0; offset <= span; offset += 1) {
+    days.push(addDays(submissionDayKey, offset));
+  }
+  return days;
+}
+
 /** True when `submissionDayKey` falls inside the lookback window for `dayKey`. */
 export function isWithinAssignmentWindow(
   submissionDayKey: DayKey,

@@ -12,6 +12,7 @@
 
 import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { assignmentDaysAffectedBy } from '@dsa/shared';
 import type {
   DayKey,
   Paginated,
@@ -27,6 +28,15 @@ import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
 import { RollupService } from '../scoring/rollup.service';
+
+/**
+ * How far back a routine sync will reach when recomputing affected days.
+ *
+ * Wide enough to cover an assignment entered a fortnight late, narrow enough that a sync
+ * can never turn into a full-history rebuild. Older corrections go through the explicit
+ * admin recompute, where the range is stated deliberately.
+ */
+const MAX_RECOMPUTE_LOOKBACK_DAYS = 14;
 import { AuditService } from '../audit/audit.service';
 import { StudentSyncService, type StudentSyncResult } from './student-sync.service';
 import { SyncQueueService, type SyncJobPayload } from './sync.queue';
@@ -56,6 +66,116 @@ export class SyncService implements OnModuleInit {
 
   onModuleInit(): void {
     this.queue.register((payload) => this.execute(payload));
+  }
+
+  /**
+   * Every program day whose stored results this sync could have changed.
+   *
+   * Three sources, unioned and bounded:
+   *
+   *  1. **The job's own day.** Always recomputed, even when nothing new arrived, so a
+   *     sync remains a reliable way to refresh today.
+   *  2. **Days reachable from newly-mirrored submissions.** A submission is not only
+   *     relevant to the day it was made: under the assignment lookback it can also
+   *     satisfy an assignment dated up to `ASSIGNMENT_LOOKBACK_DAYS` later. Recomputing
+   *     only the submission's own day would leave those later assignments wrong.
+   *  3. **Days whose assignment is newer than their last computation** — late-added,
+   *     edited or retargeted assignments. This is the case that caused the bug, and it is
+   *     detected from stored state rather than from what this particular sync happened to
+   *     fetch, so a backfill works even when no new submission arrives at all.
+   *
+   * Bounded to `MAX_RECOMPUTE_LOOKBACK_DAYS` before the job day and never past it: a sync
+   * refreshes recent history, it does not silently rebuild the entire archive. Anything
+   * older is a deliberate admin operation (`POST /admin/recompute`, `POST /sync/backfill`).
+   */
+  private async resolveDaysToRecompute(
+    jobDayKey: DayKey,
+    results: StudentSyncResult[],
+  ): Promise<DayKey[]> {
+    const earliest = this.time.addDays(jobDayKey, -MAX_RECOMPUTE_LOOKBACK_DAYS);
+    const days = new Set<DayKey>([jobDayKey]);
+
+    for (const result of results) {
+      for (const submissionDay of result.affectedDayKeys) {
+        for (const affected of assignmentDaysAffectedBy(submissionDay)) {
+          if (affected >= earliest && affected <= jobDayKey) days.add(affected);
+        }
+      }
+    }
+
+    for (const stale of await this.rollup.findStaleAssignmentDays(earliest, jobDayKey)) {
+      days.add(stale);
+    }
+
+    // Oldest first: streaks read the preceding days' rows, so recomputing in order means
+    // each day sees the corrected version of the one before it rather than a stale one.
+    return [...days].sort();
+  }
+
+  /**
+   * Recalculate one historical program day from submissions already in the mirror.
+   *
+   * The supported answer to "I entered an assignment for a date in the past". It resolves
+   * that day's assignments, their campus + batch audiences and the eligible students, then
+   * re-derives completion from the submissions already stored inside the assignment's
+   * lookback window.
+   *
+   * Three properties, each deliberate:
+   *
+   *  * **It fetches nothing.** No provider call, so it cannot create, move or rewrite a
+   *    submission. The submission mirror is read-only here (§9).
+   *  * **It never reaches backwards.** Days before `dayKey` are genuinely unrelated to it
+   *    and are left exactly as they are.
+   *  * **It is idempotent.** Running it twice produces the same answer, so it is safe to
+   *    re-run after a later sync brings in a straggling submission.
+   *
+   * It does recompute `dayKey` **through today**, and that is not a violation of "touch
+   * only the day asked for". A day's `streakAtDay` is a function of the days before it:
+   * correcting 20 Aug from "solved nothing" to "solved everything" changes what 21 and
+   * 22 Aug's streaks should say. Those days are dependents, not bystanders, and leaving
+   * them would trade one visibly-wrong number for two quietly-wrong ones.
+   *
+   * The range is bounded by how far back the caller reached, so backfilling a two-day-old
+   * assignment recomputes three days.
+   */
+  async backfillDay(dayKey: DayKey): Promise<{
+    dayKey: DayKey;
+    students: number;
+    assigned: number;
+    daysRecomputed: number;
+  }> {
+    if (!this.time.isValid(dayKey)) {
+      throw new NotFoundException(`"${dayKey}" is not a valid date (expected YYYY-MM-DD)`);
+    }
+
+    const today = this.time.today();
+    if (dayKey > today) {
+      throw new NotFoundException(
+        `${dayKey} is in the future. A backfill corrects a day that has already happened.`,
+      );
+    }
+
+    // Oldest first, so each day's streak is computed against the corrected version of the
+    // day before it rather than the stale one.
+    const days = this.time.range(dayKey, today);
+
+    const result = await this.rollup.recomputeDay(dayKey);
+    for (const day of days.slice(1)) {
+      await this.rollup.recomputeDay(day);
+    }
+
+    await this.rollup.recomputeStudentAggregates();
+    for (const day of days) {
+      await this.rollup.rebuildLeaderboards(day);
+    }
+    await this.cache.flush();
+
+    this.logger.log(
+      `Backfilled ${dayKey}: ${result.students} student(s), ${result.assigned} with an ` +
+        `assignment; recomputed ${days.length} day(s) through ${today} for streak continuity`,
+    );
+
+    return { dayKey, ...result, daysRecomputed: days.length };
   }
 
   /** Create a job row and hand it to the queue. Returns immediately. */
@@ -198,11 +318,28 @@ export class SyncService implements OnModuleInit {
         },
       );
 
-      // Derived state is rebuilt once, after all submissions have landed.
+      // Derived state is rebuilt once, after all submissions have landed — for every day
+      // this sync could have changed, not only the day the job is labelled with.
+      //
+      // Recomputing `job.dayKey` alone is what made a late-added assignment invisible: an
+      // assignment dated 20 Aug entered on 22 Aug was never evaluated, because a sync run
+      // on the 22nd only ever recomputed the 22nd. See `resolveDaysToRecompute`.
       const dayKey = job.dayKey ?? this.time.today();
-      await this.rollup.recomputeDay(dayKey);
+      const days = await this.resolveDaysToRecompute(dayKey, results);
+
+      if (days.length > 1) {
+        this.logger.log(
+          `Recomputing ${days.length} day(s) affected by this sync: ${days.join(', ')}`,
+        );
+      }
+
+      for (const day of days) {
+        await this.rollup.recomputeDay(day);
+      }
       await this.rollup.recomputeStudentAggregates();
-      await this.rollup.rebuildLeaderboards(dayKey);
+      for (const day of days) {
+        await this.rollup.rebuildLeaderboards(day);
+      }
       await this.cache.flush();
 
       const failed = results.filter((r) => r.status !== 'OK').length;

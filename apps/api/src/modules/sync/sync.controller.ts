@@ -13,6 +13,19 @@ class StartSyncDto {
   @IsOptional() @IsArray() @IsUUID(undefined, { each: true }) studentIds?: string[];
 }
 
+/**
+ * Reprocess one historical program day.
+ *
+ * `dayKey` is the *business* date being corrected, never today. Recomputation reads the
+ * submission mirror that is already stored, so this fetches nothing from LeetCode and
+ * cannot invent, move or overwrite a submission — it only re-derives the results for that
+ * one day from data that is already there.
+ */
+class BackfillDayDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'dayKey must be formatted YYYY-MM-DD' })
+  dayKey!: string;
+}
+
 @ApiTags('Sync')
 @ApiBearerAuth()
 @Controller('sync')
@@ -31,6 +44,28 @@ export class SyncController {
       studentIds: dto.studentIds,
       userId: user.id,
     });
+  }
+
+  /**
+   * Recalculate one past day — the supported answer to "the assignment was added late".
+   *
+   * Deliberately separate from `POST /sync`: a sync talks to LeetCode and refreshes recent
+   * history, while this re-derives one stated day from submissions already mirrored. It
+   * touches no other date, and it is safe to run repeatedly.
+   */
+  @Post('backfill')
+  @Roles('ADMIN', 'MENTOR')
+  @Audit('SYNC_BACKFILL', 'SyncJob')
+  @ApiOperation({
+    summary: 'Recalculate one historical day from already-synced submissions',
+    description:
+      'Use after entering an assignment for a past date. Resolves that date\'s assignments, ' +
+      'their campus and batch audience, the eligible students, and the submissions inside ' +
+      'the assignment lookback window — then rewrites that day\'s results and leaderboards. ' +
+      'No other date is altered and nothing is fetched from LeetCode.',
+  })
+  backfill(@Body() dto: BackfillDayDto) {
+    return this.sync.backfillDay(dto.dayKey);
   }
 
   @Post('retry-failed')

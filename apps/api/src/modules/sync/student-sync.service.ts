@@ -13,7 +13,7 @@
 
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
-import type { SyncStatus } from '@dsa/shared';
+import type { DayKey, SyncStatus } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
@@ -35,6 +35,17 @@ export interface StudentSyncResult {
   username: string;
   status: SyncStatus;
   newSubmissions: number;
+  /**
+   * Program days that newly-mirrored submissions landed on.
+   *
+   * Reported so the sync knows which days' results just went stale. A submission is not
+   * only relevant to the day it was made — under the assignment lookback it can also
+   * satisfy an assignment dated up to two days later — so the caller widens these before
+   * recomputing (see `assignmentDaysAffectedBy`).
+   *
+   * Empty when nothing new was written, which is the common case on a quiet cycle.
+   */
+  affectedDayKeys: DayKey[];
   /** True when the provider window was full, so older submissions may have been missed. */
   truncated: boolean;
   error: string | null;
@@ -65,6 +76,7 @@ export class StudentSyncService {
         username: '(unknown)',
         status: 'PROVIDER_ERROR',
         newSubmissions: 0,
+        affectedDayKeys: [],
         truncated: false,
         error: 'Student no longer exists',
         durationMs: Date.now() - startedAt,
@@ -87,6 +99,7 @@ export class StudentSyncService {
         username: '(none)',
         status: 'NEVER_SYNCED',
         newSubmissions: 0,
+        affectedDayKeys: [],
         truncated: false,
         error: 'No LeetCode username is linked to this student',
         durationMs: Date.now() - startedAt,
@@ -101,7 +114,7 @@ export class StudentSyncService {
         includeNonAccepted: true,
       });
 
-      const written = await this.persistSubmissions(student.id, page.submissions);
+      const { written, dayKeys } = await this.persistSubmissions(student.id, page.submissions);
 
       // Refresh the provider's lifetime stats when they are missing or stale. This is
       // what keeps "Total Solved" honest — see `refreshProfile`. Throttled rather than
@@ -138,6 +151,7 @@ export class StudentSyncService {
         username,
         status: 'OK',
         newSubmissions: written,
+        affectedDayKeys: dayKeys,
         truncated: page.truncated,
         error: null,
         durationMs: Date.now() - startedAt,
@@ -177,6 +191,7 @@ export class StudentSyncService {
         username,
         status,
         newSubmissions: 0,
+        affectedDayKeys: [],
         truncated: false,
         error: message,
         durationMs: Date.now() - startedAt,
@@ -208,8 +223,8 @@ export class StudentSyncService {
       runtime: string | null;
       memory: string | null;
     }[],
-  ): Promise<number> {
-    if (submissions.length === 0) return 0;
+  ): Promise<{ written: number; dayKeys: DayKey[] }> {
+    if (submissions.length === 0) return { written: 0, dayKeys: [] };
 
     const slugs = [...new Set(submissions.map((s) => s.titleSlug.toLowerCase()))];
     const knownProblems = await this.prisma.problem.findMany({
@@ -241,7 +256,12 @@ export class StudentSyncService {
       skipDuplicates: true,
     });
 
-    return result.count;
+    // The days reported are those of every row *offered*, not only the ones that were
+    // new. `createMany` with `skipDuplicates` cannot say which rows it skipped, and
+    // over-reporting here is cheap and safe: recomputing a day that did not change is
+    // idempotent, whereas under-reporting would leave a day silently wrong. Bounded in
+    // practice by the provider's 20-row window.
+    return { written: result.count, dayKeys: [...new Set(rows.map((row) => row.dayKey))] };
   }
 
   /**

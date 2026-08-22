@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ASSIGNMENT_LOOKBACK_DAYS,
+  assignmentDaysAffectedBy,
   assignmentWindow,
   calculateAssignmentCompletion,
   countDistinctSolvedProblems,
@@ -21,6 +22,7 @@ import {
   summarizeBucketAttempts,
   summarizeProblemStatuses,
   type AssignedProblemRef,
+  type CompletionStatus,
   type CompletionSubmission,
 } from './assignment-completion';
 
@@ -448,5 +450,165 @@ describe('TEST 11 — lifetime distinct solved', () => {
         submission('problem-b', 'ACCEPTED', '2026-08-10'),
       ]),
     ).toBe(2);
+  });
+});
+
+
+/**
+ * The late-added assignment scenario, at the level where the rule actually lives.
+ *
+ * Regression tests for a production bug: an assignment dated 20 Aug was entered on
+ * 22 Aug, and the tracker reported every Foundation student as having solved nothing.
+ *
+ * The failure was never in this module — completion already looked back correctly — but
+ * these pin the contract it has to keep, because the obvious "fix" for that bug (filter
+ * submissions to `>= assignment.createdAt`) would break every case below and would look
+ * perfectly reasonable to whoever wrote it.
+ */
+describe('assignment entered after its own date', () => {
+  const DAY = '2026-08-20';
+
+  const problem = (n: number): AssignedProblemRef => ({
+    problemId: `problem-${n}`,
+    titleSlug: `slug-${n}`,
+    position: n,
+  });
+
+  /** Program-local instant, written so the UTC conversion is explicit. */
+  const ist = (day: string, hhmm: string): Date => new Date(`${day}T${hhmm}:00+05:30`);
+
+  const submission = (
+    n: number,
+    day: string,
+    hhmm: string,
+    status: CompletionStatus = 'ACCEPTED',
+  ): CompletionSubmission => ({
+    problemId: `problem-${n}`,
+    titleSlug: `slug-${n}`,
+    status,
+    submittedAt: ist(day, hhmm),
+    dayKey: day,
+    language: 'python3',
+  });
+
+  it('counts a solve made on the assignment day, whenever the assignment was entered', () => {
+    // The reported scenario. Nothing in the inputs mentions when the assignment row was
+    // created, and that is the point: creation time is not an input to completion.
+    const result = calculateAssignmentCompletion(DAY, [problem(1)], [submission(1, DAY, '10:15')]);
+    expect(result.solvedCount).toBe(1);
+    expect(result.problems[0]!.status).toBe('ACCEPTED');
+  });
+
+  it('counts a solve made two days early, before the assignment existed at all', () => {
+    const result = calculateAssignmentCompletion(
+      DAY,
+      [problem(1)],
+      [submission(1, '2026-08-18', '09:00')],
+    );
+    expect(result.solvedCount).toBe(1);
+    expect(result.problems[0]!.solvedOnDayKey).toBe('2026-08-18');
+  });
+
+  it('does not count a solve from outside the lookback window', () => {
+    const result = calculateAssignmentCompletion(
+      DAY,
+      [problem(1)],
+      [submission(1, '2026-08-17', '12:00')],
+    );
+    expect(result.solvedCount).toBe(0);
+    expect(result.problems[0]!.status).toBe('NOT_ATTEMPTED');
+  });
+
+  it('keeps a 23:30 IST solve on its own program day rather than sliding it to the next', () => {
+    // 23:30 IST is 18:00 UTC the same date. A UTC-calendar implementation gets this
+    // right by accident; one that adds a day for the +05:30 offset does not.
+    const late = submission(1, DAY, '23:30');
+    expect(late.submittedAt.toISOString()).toBe('2026-08-20T18:00:00.000Z');
+    expect(calculateAssignmentCompletion(DAY, [problem(1)], [late]).solvedCount).toBe(1);
+  });
+
+  it('reports wrong answers as attempted, never as solved or untouched', () => {
+    const result = calculateAssignmentCompletion(DAY, [problem(1), problem(2)], [
+      submission(1, DAY, '11:00', 'ATTEMPTED_NOT_ACCEPTED'),
+      submission(1, DAY, '11:30', 'ATTEMPTED_NOT_ACCEPTED'),
+    ]);
+
+    const counts = summarizeProblemStatuses(result.problems);
+    expect(counts).toEqual({
+      solvedCount: 0,
+      attemptedNotSolvedCount: 1,
+      notAttemptedCount: 1,
+    });
+    expect(counts.solvedCount + counts.attemptedNotSolvedCount + counts.notAttemptedCount).toBe(
+      result.assignedCount,
+    );
+  });
+
+  it('counts a problem once however many times it was accepted', () => {
+    const result = calculateAssignmentCompletion(DAY, [problem(1)], [
+      submission(1, DAY, '09:00'),
+      submission(1, DAY, '09:05'),
+      submission(1, DAY, '09:10'),
+    ]);
+    expect(result.solvedCount).toBe(1);
+    // The earliest accepted submission wins, so a re-solve cannot move the finish time.
+    expect(result.problems[0]!.solvedAt).toEqual(ist(DAY, '09:00'));
+    expect(result.problems[0]!.attempts).toBe(3);
+  });
+
+  it('ignores a solve for a problem that is not on the assignment', () => {
+    const result = calculateAssignmentCompletion(DAY, [problem(1)], [submission(9, DAY, '09:00')]);
+    expect(result.solvedCount).toBe(0);
+  });
+
+  it('always satisfies solved + attempted + not-attempted = assigned', () => {
+    const result = calculateAssignmentCompletion(
+      DAY,
+      [problem(1), problem(2), problem(3), problem(4)],
+      [
+        submission(1, DAY, '09:00'),
+        submission(2, '2026-08-19', '20:00'),
+        submission(3, DAY, '10:00', 'ATTEMPTED_NOT_ACCEPTED'),
+      ],
+    );
+
+    const counts = summarizeProblemStatuses(result.problems);
+    expect(counts).toEqual({
+      solvedCount: 2,
+      attemptedNotSolvedCount: 1,
+      notAttemptedCount: 1,
+    });
+    expect(counts.solvedCount + counts.attemptedNotSolvedCount + counts.notAttemptedCount).toBe(4);
+  });
+});
+
+/**
+ * `assignmentDaysAffectedBy` — the inverse of the lookback, and the reason the sync now
+ * recomputes more than one day.
+ */
+describe('assignmentDaysAffectedBy', () => {
+  it('spans the assignment day plus the lookback, oldest first', () => {
+    expect(assignmentDaysAffectedBy('2026-08-18')).toEqual([
+      '2026-08-18',
+      '2026-08-19',
+      '2026-08-20',
+    ]);
+  });
+
+  it('is the exact inverse of the completion window', () => {
+    // Whatever this returns must be precisely the set of days that would accept the
+    // submission — if the two ever disagree, a sync recomputes the wrong days.
+    for (const day of assignmentDaysAffectedBy('2026-08-18')) {
+      expect(isWithinAssignmentWindow('2026-08-18', day)).toBe(true);
+    }
+    expect(isWithinAssignmentWindow('2026-08-18', '2026-08-21')).toBe(false);
+  });
+
+  it('crosses a month boundary correctly', () => {
+    expect(assignmentDaysAffectedBy('2026-08-30')).toEqual([
+      '2026-08-30',
+      '2026-08-31',
+      '2026-09-01',
+    ]);
   });
 });
