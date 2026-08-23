@@ -182,7 +182,23 @@ export class RollupService {
       historyByStudent.set(row.studentId, list);
     }
 
+    let scored = 0;
+
     for (const student of students) {
+      // A day before the student enrolled is not a day they scored zero on — it is a day
+      // they were not in the programme. Writing a row for it invents a record: the whole
+      // cohort imported mid-term lands on every earlier day's leaderboard at zero, and
+      // because `campusOnDayForStudents` correctly reports "no campus" for those days,
+      // those rows carry a null `campusId` — which reads as *every* campus, putting a
+      // student on the global board for weeks their campus did not yet exist (§17).
+      //
+      // Enrolment is `createdAt`, the same definition `computeStreaks` already uses below
+      // and the daily report uses for the same reason. Skipping here rather than
+      // filtering the query keeps the historical-placement lookups batched across the
+      // whole roster.
+      const enrolledFromDayKey = this.time.dayKeyOf(student.createdAt);
+      if (enrolledFromDayKey > dayKey) continue;
+
       // The batch that was true on this day. A student with no recorded placement by
       // then genuinely had none — their current batch is not a substitute, because using
       // it would re-file a closed day under a batch they joined later (§7).
@@ -216,9 +232,7 @@ export class RollupService {
       days.push({ dayKey, solvedCount, assignedCount });
       // Assignment days before the student joined are not misses — drop them rather
       // than let them zero out a streak the student never had a chance to earn.
-      const streaks = computeStreaks(days, dayKey, config, {
-        enrolledFromDayKey: this.time.dayKeyOf(student.createdAt),
-      });
+      const streaks = computeStreaks(days, dayKey, config, { enrolledFromDayKey });
 
       const completionMinute = result?.completedAt
         ? this.time.minuteOfDay(result.completedAt)
@@ -263,17 +277,20 @@ export class RollupService {
         problemStatuses: result?.problemStatuses ?? this.emptyStatuses(assignedProblems),
         force: options.force ?? false,
       });
+      scored += 1;
     }
 
     await this.cache.delByPrefix(`dashboard:${dayKey}`);
     await this.cache.delByPrefix(`mentor:${dayKey}`);
 
     const totalAssigned = assignments.reduce((n, a) => n + a.problems.length, 0);
+    const notYetEnrolled = students.length - scored;
     this.logger.log(
-      `Recomputed ${dayKey}: ${students.length} students across ${assignments.length} assignment set(s), ${totalAssigned} problems assigned in total`,
+      `Recomputed ${dayKey}: ${scored} students across ${assignments.length} assignment set(s), ${totalAssigned} problems assigned in total` +
+        (notYetEnrolled > 0 ? ` (${notYetEnrolled} not yet enrolled on this day, skipped)` : ''),
     );
 
-    return { students: students.length, assigned: totalAssigned };
+    return { students: scored, assigned: totalAssigned };
   }
 
   /**
