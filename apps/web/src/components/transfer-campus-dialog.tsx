@@ -161,9 +161,9 @@ export function TransferCampusDialog({
               ))}
             </div>
             <p className="text-xs text-[var(--color-fg-subtle)]">
-              Leave this unset and the student lands in {target?.name ?? 'the campus'}&rsquo;s
-              placement-pending batch — the honest state for someone who has not been
-              re-assessed there yet.
+              Leave this unset and the student arrives at {target?.name ?? 'the campus'} with
+              no batch — the honest state for someone who has not been re-assessed there
+              yet. They can be placed later without another transfer.
             </p>
           </div>
         ) : null}
@@ -189,7 +189,7 @@ export function TransferCampusDialog({
           <div className="rounded-lg border border-[var(--color-border)] p-3 text-sm">
             <p className="font-medium">
               Transfer {student.name} to {target.name}
-              {targetBatch ? ` — ${targetBatch.name}` : ' (placement pending)'}?
+              {targetBatch ? ` — ${targetBatch.name}` : ' (no batch yet)'}?
             </p>
             {/*
               The reassurance this dialog exists for. Past days keep the campus and batch

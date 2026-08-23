@@ -63,8 +63,17 @@ export default function DashboardPage() {
     (Math.max(0, ...data.batchBreakdown.map((b) => b.assignedCount)) ||
       Math.max(0, data.solvedBuckets.length - 1));
 
-  const unreliable = Object.entries(data.unreliableSyncCounts) as [SyncStatus, number][];
-  const unreliableTotal = unreliable.reduce((sum, [, count]) => sum + count, 0);
+  const health = data.syncSummary;
+  const unreliable = Object.entries(health.byStatus) as [SyncStatus, number][];
+  /**
+   * Statuses that mean a read was attempted and failed, kept apart from the roster gap.
+   * `PROFILE_MISSING` and `NEVER_SYNCED` get their own sentences below, because
+   * "add a handle" and "wait for the next run" are different instructions and neither is
+   * "the sync is broken".
+   */
+  const failures = unreliable.filter(
+    ([status]) => status !== 'PROFILE_MISSING' && status !== 'NEVER_SYNCED',
+  );
 
   return (
     <div className="space-y-5">
@@ -77,7 +86,12 @@ export default function DashboardPage() {
         </div>
         <div className="flex items-center gap-3">
           <ScopeFilter />
-          {data.lastSyncStatus === 'COMPLETED_WITH_ERRORS' ? (
+          {/*
+            Only a genuine failed read is an error. A roster with uncollected handles is
+            reported in the summary below, not as a badge saying the sync broke — that
+            badge sat on this page permanently while nothing was actually wrong (§6).
+          */}
+          {data.lastSyncStatus === 'COMPLETED_WITH_ERRORS' && health.failed > 0 ? (
             <Badge tone="warning">
               <AlertTriangle className="size-3" aria-hidden />
               Last sync had errors
@@ -87,27 +101,68 @@ export default function DashboardPage() {
       </header>
 
       {/*
-        Data-quality banner. A zero caused by a bad username is not the same as a
-        student who did nothing, and the headline numbers must not imply otherwise.
+        Sync summary. A zero caused by a bad username is not the same as a student who
+        did nothing, and neither is the same as a student nobody has collected a handle
+        for — so all three are stated, with the count they each apply to.
+
+        This replaces a single "N students' data could not be read" line that summed all
+        of them. With 21 handles still uncollected it read as a system failure across a
+        whole campus, which is the misreading §6 exists to prevent. Every chip links to
+        the students it counts, so the sentence is checkable rather than just asserted.
       */}
-      {unreliableTotal > 0 ? (
-        <Card className="border-[var(--color-warning)] p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <AlertTriangle className="size-4 shrink-0 text-[var(--color-warning)]" aria-hidden />
+      {health.synced < health.activeStudents ? (
+        <Card
+          className={
+            health.failed > 0 ? 'border-[var(--color-warning)] p-4' : 'p-4'
+          }
+        >
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            {health.failed > 0 ? (
+              <AlertTriangle
+                className="size-4 shrink-0 text-[var(--color-warning)]"
+                aria-hidden
+              />
+            ) : (
+              <CheckCircle2 className="size-4 shrink-0 text-[var(--color-success)]" aria-hidden />
+            )}
             <p className="text-sm">
-              <strong className="font-semibold">{unreliableTotal}</strong> student
-              {unreliableTotal === 1 ? "'s" : "s'"} data could not be read this sync, so their
-              figures below are not reliable.
+              <strong className="font-semibold">{health.activeStudents}</strong> active
+              student{health.activeStudents === 1 ? '' : 's'} ·{' '}
+              <strong className="font-semibold">{health.synced}</strong> synced successfully
+              {health.failed > 0 ? (
+                <>
+                  {' '}
+                  · <strong className="font-semibold">{health.failed}</strong> could not be
+                  read
+                </>
+              ) : null}
+              {health.profileMissing > 0 ? (
+                <>
+                  {' '}
+                  · <strong className="font-semibold">{health.profileMissing}</strong> waiting
+                  on a LeetCode profile
+                </>
+              ) : null}
+              {health.awaitingFirstSync > 0 ? (
+                <>
+                  {' '}
+                  · <strong className="font-semibold">{health.awaitingFirstSync}</strong> not
+                  synced yet
+                </>
+              ) : null}
+              .
             </p>
             <div className="flex flex-wrap gap-1.5">
               {unreliable.map(([status, count]) => (
-                <Badge key={status} tone="warning">
-                  {SYNC_STATUS_LABELS[status]}: {count}
-                </Badge>
+                <Link key={status} href={`/students?syncStatus=${status}`}>
+                  <Badge tone={status === 'PROFILE_MISSING' ? 'neutral' : 'warning'}>
+                    {SYNC_STATUS_LABELS[status]}: {count}
+                  </Badge>
+                </Link>
               ))}
             </div>
             <Link
-              href="/students?syncStatus=USER_NOT_FOUND"
+              href={`/students?syncStatus=${failures[0]?.[0] ?? 'PROFILE_MISSING'}`}
               className="ml-auto text-sm font-medium text-[var(--color-brand)] underline-offset-2 hover:underline"
             >
               Review students

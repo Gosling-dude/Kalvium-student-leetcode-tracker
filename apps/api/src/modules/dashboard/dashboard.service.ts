@@ -18,6 +18,7 @@ import {
   type MentorDashboard,
   type MentorProblemOutcome,
   type ProblemStatus,
+  type SyncHealthSummary,
   type SyncStatus,
 } from '@dsa/shared';
 
@@ -71,23 +72,37 @@ export class DashboardService {
     const batchId = filter.batchId ?? null;
     const cacheKey = `dashboard:${day}:stats:${campusId ?? 'all'}:${batchId ?? 'all'}`;
 
+    /** The scope, as a roster predicate — no join to any day's rows. */
+    const rosterScope = {
+      status: 'ACTIVE' as const,
+      ...(campusId ? { campusId } : {}),
+      ...(batchId ? { batchId } : {}),
+      ...(filter.onlyUnassigned ? { batchId: null } : {}),
+    };
+
     return this.cache.remember(cacheKey, CACHE_TTL.dashboard, async () => {
-      const [assignments, totalStudents, statuses, lastJob] = await Promise.all([
+      const [assignments, totalStudents, statuses, syncStates, lastJob] = await Promise.all([
         this.assignments.findAllByDay(day),
-        this.prisma.student.count({
-          where: {
-            status: 'ACTIVE',
-            ...(campusId ? { campusId } : {}),
-            ...(batchId ? { batchId } : {}),
-            ...(filter.onlyUnassigned ? { batchId: null } : {}),
-          },
-        }),
+        this.prisma.student.count({ where: rosterScope }),
         // With-problems, not the lighter `loadStatuses`: the attempted/not-attempted
         // split below needs each student's per-problem outcomes, not just the totals.
         // Both halves of the scope, not just the batch. Dropping `campusId` here made
         // `?campus=VELS` return every campus's rows — the filter looked applied (the
         // headline count changed) while the breakdowns silently showed everyone.
         this.loadStatusesWithProblems(day, { campusId, batchId }),
+        // Sync health is a property of the roster, not of the day.
+        //
+        // Grouped straight off the sync-state table rather than read from the day's
+        // `DailyStatus` rows, so a student imported since the last rollup — who has no row
+        // for today — is still counted. Otherwise the summary would quietly under-report
+        // exactly the newest students, who are the ones most likely to be missing a
+        // handle (§2, §5). One aggregate row per status, not one row per student, so this
+        // stays flat as the roster grows (§21).
+        this.prisma.studentSyncState.groupBy({
+          by: ['status'],
+          where: { student: rosterScope },
+          _count: { _all: true },
+        }),
         this.prisma.syncJob.findFirst({
           where: { status: { in: ['COMPLETED', 'COMPLETED_WITH_ERRORS'] } },
           orderBy: { finishedAt: 'desc' },
@@ -124,12 +139,48 @@ export class DashboardService {
 
       // Count every reason a zero might not be a real zero, so the dashboard can warn
       // rather than quietly overstate how many students did nothing.
+      //
+      // Two separate questions, answered separately. `unreliable` is "whose zero should
+      // I not read as effort?" — every non-OK status qualifies. `syncSummary` is "what
+      // did the sync manage?", where a student with no linked handle is a roster gap and
+      // not a failed read. Collapsing the second into the first is what produced
+      // "22 students' data could not be read this sync" about 21 students the sync had
+      // never once contacted (§5, §6).
       const unreliable: Partial<Record<SyncStatus, number>> = {};
       for (const status of active) {
         const syncStatus = (status.student.syncState?.status ?? 'NEVER_SYNCED') as SyncStatus;
         if (!isTrustworthySync(syncStatus)) {
           unreliable[syncStatus] = (unreliable[syncStatus] ?? 0) + 1;
         }
+      }
+
+      const syncSummary: SyncHealthSummary = {
+        activeStudents: totalStudents,
+        synced: 0,
+        profileMissing: 0,
+        awaitingFirstSync: 0,
+        failed: 0,
+        byStatus: {},
+      };
+      let withSyncRow = 0;
+      for (const group of syncStates) {
+        const syncStatus = group.status as SyncStatus;
+        const count = group._count._all;
+        withSyncRow += count;
+        if (!isTrustworthySync(syncStatus)) syncSummary.byStatus[syncStatus] = count;
+        if (syncStatus === 'OK') syncSummary.synced += count;
+        else if (syncStatus === 'PROFILE_MISSING') syncSummary.profileMissing += count;
+        else if (syncStatus === 'NEVER_SYNCED') syncSummary.awaitingFirstSync += count;
+        else syncSummary.failed += count;
+      }
+      // A student imported but not yet synced has no sync-state row at all. They are
+      // awaiting their first sync exactly as a NEVER_SYNCED row is, and counting them
+      // keeps the four figures a partition of `activeStudents` rather than a subset that
+      // silently loses the newest arrivals.
+      const noSyncRow = Math.max(0, totalStudents - withSyncRow);
+      if (noSyncRow > 0) {
+        syncSummary.awaitingFirstSync += noSyncRow;
+        syncSummary.byStatus.NEVER_SYNCED = (syncSummary.byStatus.NEVER_SYNCED ?? 0) + noSyncRow;
       }
 
       const champion = [...active].sort(
@@ -181,6 +232,7 @@ export class DashboardService {
         lastSyncAt: lastJob?.finishedAt?.toISOString() ?? null,
         lastSyncStatus: (lastJob?.status as DashboardStats['lastSyncStatus']) ?? null,
         unreliableSyncCounts: unreliable,
+        syncSummary,
       } satisfies DashboardStats;
     });
   }

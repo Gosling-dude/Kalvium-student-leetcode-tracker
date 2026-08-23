@@ -12,7 +12,7 @@
 
 import { Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
-import { assignmentDaysAffectedBy } from '@dsa/shared';
+import { assignmentDaysAffectedBy, isSyncFailure } from '@dsa/shared';
 import type {
   DayKey,
   Paginated,
@@ -309,9 +309,15 @@ export class SyncService implements OnModuleInit {
             where: { id: job.id },
             data: {
               processedStudents: { increment: 1 },
+              // Three outcomes, not two. A student with no linked handle was never
+              // requested from the provider, so counting them as failed is a claim about
+              // a read that never happened — and it is what marked every run as
+              // COMPLETED_WITH_ERRORS while 21 handles were still uncollected (§6).
               ...(result.status === 'OK'
                 ? { succeededStudents: { increment: 1 } }
-                : { failedStudents: { increment: 1 } }),
+                : isSyncFailure(result.status)
+                  ? { failedStudents: { increment: 1 } }
+                  : { skippedStudents: { increment: 1 } }),
               newSubmissions: { increment: result.newSubmissions },
             },
           });
@@ -342,7 +348,8 @@ export class SyncService implements OnModuleInit {
       }
       await this.cache.flush();
 
-      const failed = results.filter((r) => r.status !== 'OK').length;
+      const failed = results.filter((r) => isSyncFailure(r.status)).length;
+      const skipped = results.filter((r) => r.status !== 'OK' && !isSyncFailure(r.status)).length;
       const finishedAt = new Date();
 
       await this.prisma.syncJob.update({
@@ -356,13 +363,15 @@ export class SyncService implements OnModuleInit {
       });
 
       this.logger.log(
-        `Sync ${job.id} finished: ${results.length - failed}/${results.length} succeeded, ` +
+        `Sync ${job.id} finished: ${results.length - failed - skipped}/${results.length} succeeded, ` +
+          `${failed} failed, ${skipped} skipped (no linked profile), ` +
           `${results.reduce((n, r) => n + r.newSubmissions, 0)} new submissions`,
       );
 
       await this.audit.log('INFO', 'SyncService', `Sync ${job.id} completed`, {
-        succeeded: results.length - failed,
+        succeeded: results.length - failed - skipped,
         failed,
+        skipped,
       });
     } catch (error) {
       const finishedAt = new Date();
@@ -498,6 +507,9 @@ export class SyncService implements OnModuleInit {
   }
 
   private summariseFailures(results: StudentSyncResult[]): Record<string, unknown> {
+    // Every non-OK outcome is counted, so the breakdown still accounts for the whole
+    // roster — but only genuine failures are sampled as errors. A student with no linked
+    // handle belongs in `skipped`, not in a list of things that went wrong.
     const byStatus: Record<string, number> = {};
     for (const result of results) {
       if (result.status === 'OK') continue;
@@ -505,9 +517,11 @@ export class SyncService implements OnModuleInit {
     }
     return {
       byStatus,
+      failed: results.filter((r) => isSyncFailure(r.status)).length,
+      skipped: results.filter((r) => r.status !== 'OK' && !isSyncFailure(r.status)).length,
       truncatedWindows: results.filter((r) => r.truncated).length,
       samples: results
-        .filter((r) => r.status !== 'OK')
+        .filter((r) => isSyncFailure(r.status))
         .slice(0, 20)
         .map((r) => ({ username: r.username, status: r.status, error: r.error })),
     };
@@ -523,6 +537,7 @@ export class SyncService implements OnModuleInit {
     processedStudents: number;
     succeededStudents: number;
     failedStudents: number;
+    skippedStudents: number;
     newSubmissions: number;
     startedAt: Date | null;
     finishedAt: Date | null;
@@ -540,6 +555,7 @@ export class SyncService implements OnModuleInit {
       processedStudents: job.processedStudents,
       succeededStudents: job.succeededStudents,
       failedStudents: job.failedStudents,
+      skippedStudents: job.skippedStudents,
       newSubmissions: job.newSubmissions,
       progressPercent:
         job.totalStudents > 0

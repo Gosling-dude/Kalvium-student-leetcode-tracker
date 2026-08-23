@@ -87,17 +87,18 @@ export class StudentSyncService {
 
     // No linked LeetCode account: there is nothing to fetch, and calling the provider
     // with an empty handle would return "user not found" — a misleading error about a
-    // student whose data is simply not connected yet (§2). Reported as NEVER_SYNCED,
-    // which the dashboard already renders as "this zero is not reliable".
+    // student whose data is simply not connected yet (§2). Reported as PROFILE_MISSING
+    // rather than NEVER_SYNCED so the run can count it as skipped instead of failed:
+    // nothing was requested for this student, so nothing failed (§5, §6).
     if (!username) {
       await this.updateSyncState(student.id, {
-        status: 'NEVER_SYNCED',
+        status: 'PROFILE_MISSING',
         lastError: 'No LeetCode username is linked to this student',
       });
       return {
         studentId,
         username: '(none)',
-        status: 'NEVER_SYNCED',
+        status: 'PROFILE_MISSING',
         newSubmissions: 0,
         affectedDayKeys: [],
         truncated: false,

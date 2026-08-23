@@ -1,16 +1,20 @@
 'use client';
 
 import Link from 'next/link';
-import { useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Download, Upload } from 'lucide-react';
+import { Download, Upload, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   SYNC_STATUS_LABELS,
   UNASSIGNED_BATCH_LABEL,
+  UNASSIGNED_BATCH_SELECTOR,
+  isSyncFailure,
   isTrustworthySync,
   type ImportResult,
   type StudentSummary,
+  type SyncStatus,
 } from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
@@ -18,6 +22,7 @@ import { timeAgo, todayKey } from '@/lib/utils';
 import { ScopeChips, ScopeFilter, useScopeFilter } from '@/components/scope-filter';
 import { MoveBatchDialog } from '@/components/move-batch-dialog';
 import { TransferCampusDialog } from '@/components/transfer-campus-dialog';
+import { LeetCodeProfileDialog } from '@/components/leetcode-profile-dialog';
 import {
   Badge,
   Button,
@@ -35,21 +40,52 @@ import {
 export default function StudentsPage() {
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
+  const searchParams = useSearchParams();
 
+  /**
+   * Filters are seeded from the query string.
+   *
+   * Without this, `/students?syncStatus=USER_NOT_FOUND` — the dashboard's own "Review
+   * students" link, and the batch card's `?campus=…&batch=…` link — landed on an
+   * unfiltered directory: the page read every filter from `useState('')` and never looked
+   * at the URL. Reading it once at mount also makes a narrowed view shareable, which is
+   * how a mentor sends "these 21 need a handle" to someone else.
+   */
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState('');
-  const [squadId, setSquadId] = useState('');
-  const [syncStatus, setSyncStatus] = useState('');
-  const [cohort, setCohort] = useState('');
+  const [search, setSearch] = useState(() => searchParams.get('search') ?? '');
+  const [squadId, setSquadId] = useState(() => searchParams.get('squadId') ?? '');
+  const [syncStatus, setSyncStatus] = useState(() => searchParams.get('syncStatus') ?? '');
+  const [cohort, setCohort] = useState(() => searchParams.get('cohort') ?? '');
   /** '' = current students only (the default), 'all' = plus archived, 'ARCHIVED' = only. */
-  const [archiveScope, setArchiveScope] = useState('');
+  const [archiveScope, setArchiveScope] = useState(() => searchParams.get('archiveScope') ?? '');
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [moving, setMoving] = useState<StudentSummary | null>(null);
   const [transferring, setTransferring] = useState<StudentSummary | null>(null);
+  const [editingProfile, setEditingProfile] = useState<StudentSummary | null>(null);
 
-  const { campus, batch, campuses, batches } = useScopeFilter();
+  const { campus, batch, setCampus, setBatch, campuses, batches } = useScopeFilter();
   /** Squad number is a directory-only filter (§13). */
-  const [squadNumber, setSquadNumber] = useState('');
+  const [squadNumber, setSquadNumber] = useState(() => searchParams.get('squadNumber') ?? '');
+
+  /**
+   * Campus and batch live in the shared scope filter rather than in this page, so a URL
+   * that names them has to hand them over — otherwise `?campus=SRM` would set the request
+   * but leave the campus chips reading "All", and the two would disagree on screen.
+   */
+  const urlCampus = searchParams.get('campus');
+  const urlBatch = searchParams.get('batch');
+  useEffect(() => {
+    if (urlCampus && urlCampus !== campus) {
+      setCampus(urlCampus);
+      // `setCampus` clears the batch, so a URL naming both must re-apply it afterwards.
+      if (urlBatch) setBatch(urlBatch);
+    } else if (urlBatch && urlBatch !== batch) {
+      setBatch(urlBatch);
+    }
+    // Deliberately mount-only: after this, the chips are the source of truth and
+    // re-running on every change would fight the user's clicks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const filters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
 
@@ -93,6 +129,68 @@ export default function StudentsPage() {
       .map((row) => [row.studentId, { solved: row.solvedCount, assigned: row.assignedCount }]),
   );
 
+  /**
+   * How many students the campus selection alone contains, before the filter row narrows
+   * it further. Read from the campus the scope filter already loaded, so it costs nothing.
+   */
+  const scopeTotal = campus
+    ? (campuses.find((entry) => entry.code === campus)?.studentCount ?? null)
+    : campuses.reduce((sum, entry) => sum + entry.studentCount, 0) || null;
+  const scopeLabel = campus ?? 'all campuses';
+
+  /**
+   * The filters *inside* the table that narrow beyond the campus selection.
+   *
+   * Tracked so the header can say "21 of 99 at SRM" rather than a bare "21 students"
+   * sitting next to a campus chip that reads "SRM 99". That pairing is what the bug
+   * report describes as misleading: the directory was correct, but nothing on screen
+   * explained why 78 students were not in the list.
+   */
+  const narrowingFilters = [
+    search ? { key: 'search', label: `Search: “${search}”`, clear: () => setSearch('') } : null,
+    squadId
+      ? {
+          key: 'squadId',
+          label: `Squad: ${filters.data?.squads.find((s) => s.id === squadId)?.name ?? squadId}`,
+          clear: () => setSquadId(''),
+        }
+      : null,
+    squadNumber
+      ? { key: 'squadNumber', label: `Squad ${squadNumber}`, clear: () => setSquadNumber('') }
+      : null,
+    cohort ? { key: 'cohort', label: `Cohort ${cohort}`, clear: () => setCohort('') } : null,
+    syncStatus
+      ? {
+          key: 'syncStatus',
+          label: `Sync: ${SYNC_STATUS_LABELS[syncStatus as SyncStatus] ?? syncStatus}`,
+          clear: () => setSyncStatus(''),
+        }
+      : null,
+    archiveScope
+      ? {
+          key: 'archiveScope',
+          label: archiveScope === 'all' ? 'Including archived' : 'Archived only',
+          clear: () => setArchiveScope(''),
+        }
+      : null,
+    batch
+      ? {
+          key: 'batch',
+          label: `Batch: ${
+            batch === UNASSIGNED_BATCH_SELECTOR
+              ? UNASSIGNED_BATCH_LABEL
+              : (batches.find((entry) => entry.code === batch)?.name ?? batch)
+          }`,
+          clear: () => setBatch(null),
+        }
+      : null,
+  ].filter((entry): entry is { key: string; label: string; clear: () => void } => entry !== null);
+
+  const clearAllFilters = () => {
+    for (const filter of narrowingFilters) filter.clear();
+    setPage(1);
+  };
+
   /** Cohorts present in the roster, so the filter never offers an empty option. */
   const cohortOptions = [
     ...new Set(
@@ -123,7 +221,20 @@ export default function StudentsPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Students</h1>
           <p className="text-sm text-[var(--color-fg-muted)]">
-            {students.data?.total ?? 0} students
+            {narrowingFilters.length > 0 && scopeTotal !== null ? (
+              <>
+                <strong className="font-semibold text-[var(--color-fg)]">
+                  {students.data?.total ?? 0}
+                </strong>{' '}
+                of {scopeTotal} at {scopeLabel} — filtered
+              </>
+            ) : (
+              <>
+                {students.data?.total ?? 0} student
+                {students.data?.total === 1 ? '' : 's'}
+                {campus ? ` at ${campus}` : ''}
+              </>
+            )}
           </p>
         </div>
 
@@ -313,6 +424,40 @@ export default function StudentsPage() {
           </select>
         </div>
 
+        {/*
+          Every filter currently narrowing the list, each individually removable.
+
+          A select sitting three controls along is easy to miss, and the cost of missing
+          it is reading "21 students" as "78 students are gone". Naming the active filters
+          on their own line — with the count they produced right above — makes the
+          narrowing a stated fact rather than something to be inferred.
+        */}
+        {narrowingFilters.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface-sunken)] px-3 py-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
+              Filtered by
+            </span>
+            {narrowingFilters.map((filter) => (
+              <button
+                key={filter.key}
+                type="button"
+                onClick={() => {
+                  filter.clear();
+                  setPage(1);
+                }}
+                className="inline-flex items-center gap-1 rounded-md bg-[var(--color-surface)] px-2 py-1 text-xs font-medium ring-1 ring-[var(--color-border)] transition hover:text-[var(--color-brand)]"
+              >
+                {filter.label}
+                <X className="size-3" aria-hidden />
+                <span className="sr-only">Remove this filter</span>
+              </button>
+            ))}
+            <Button variant="ghost" className="ml-auto px-2 py-1 text-xs" onClick={clearAllFilters}>
+              Clear filters
+            </Button>
+          </div>
+        ) : null}
+
         {students.isLoading ? (
           <TableSkeleton rows={10} cols={6} />
         ) : students.error ? (
@@ -394,8 +539,18 @@ export default function StudentsPage() {
                         >
                           {student.leetcodeUsername}
                         </a>
-                      ) : (
+                      ) : student.status === 'ARCHIVED' ? (
                         <span className="text-xs text-[var(--color-fg-subtle)]">Not linked</span>
+                      ) : (
+                        // The gap is also the way to close it. Showing "Not linked" as
+                        // dead text is what left 21 students permanently unactionable (§7).
+                        <button
+                          type="button"
+                          onClick={() => setEditingProfile(student)}
+                          className="text-xs text-[var(--color-brand)] underline-offset-2 hover:underline"
+                        >
+                          Not linked — add
+                        </button>
                       )}
                     </Td>
                     <Td>
@@ -414,7 +569,17 @@ export default function StudentsPage() {
                           {timeAgo(student.lastSyncedAt)}
                         </span>
                       ) : (
-                        <Badge tone="danger">{SYNC_STATUS_LABELS[student.syncStatus]}</Badge>
+                        // Red is reserved for a read that actually failed. A student
+                        // nobody has collected a handle for, or one the sync has not
+                        // reached yet, is a to-do rather than a fault — colouring 21 rows
+                        // danger-red is the table-level version of the banner that made a
+                        // whole campus look broken (§5, §6).
+                        <Badge
+                          tone={isSyncFailure(student.syncStatus) ? 'danger' : 'neutral'}
+                          className="whitespace-nowrap"
+                        >
+                          {SYNC_STATUS_LABELS[student.syncStatus]}
+                        </Badge>
                       )}
                     </Td>
                     <Td className="text-right">
@@ -422,6 +587,13 @@ export default function StudentsPage() {
                         <span className="text-xs text-[var(--color-fg-subtle)]">—</span>
                       ) : (
                         <span className="inline-flex gap-1">
+                          <Button
+                            variant="ghost"
+                            className="px-2 py-1 text-xs"
+                            onClick={() => setEditingProfile(student)}
+                          >
+                            {student.leetcodeUsername ? 'Edit LeetCode' : 'Add LeetCode'}
+                          </Button>
                           <Button
                             variant="ghost"
                             className="px-2 py-1 text-xs"
@@ -480,6 +652,12 @@ export default function StudentsPage() {
         campuses={campuses}
         open={transferring !== null}
         onClose={() => setTransferring(null)}
+      />
+
+      <LeetCodeProfileDialog
+        student={editingProfile}
+        open={editingProfile !== null}
+        onClose={() => setEditingProfile(null)}
       />
     </div>
   );

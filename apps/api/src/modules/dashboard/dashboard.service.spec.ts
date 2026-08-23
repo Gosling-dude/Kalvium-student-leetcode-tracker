@@ -134,7 +134,14 @@ function assignmentSummary(overrides: {
 /** Captures the `where` each `dailyStatus.findMany` ran with, for the scoping tests. */
 const capturedWheres: Record<string, unknown>[] = [];
 
-function makeService(dailyStatusRows: unknown[], assignments: unknown[] = []) {
+/** Captures the `where` each `studentSyncState.groupBy` ran with, for the scoping tests. */
+const capturedSyncWheres: Record<string, unknown>[] = [];
+
+function makeService(
+  dailyStatusRows: unknown[],
+  assignments: unknown[] = [],
+  options: { syncStateGroups?: { status: string; _count: { _all: number } }[]; activeStudents?: number } = {},
+) {
   const prisma = {
     dailyStatus: {
       findMany: async ({ where }: { where?: Record<string, unknown> } = {}) => {
@@ -143,10 +150,18 @@ function makeService(dailyStatusRows: unknown[], assignments: unknown[] = []) {
       },
     },
     student: {
-      count: async () => dailyStatusRows.length,
-      // Backs the campus breakdown's placement-pending count. These fixtures carry no
-      // campus, so there is nothing awaiting placement to report.
+      count: async () => options.activeStudents ?? dailyStatusRows.length,
+      // Backs the campus breakdown's unassigned count. These fixtures carry no campus,
+      // so there is nothing unassigned to report.
       groupBy: async () => [],
+    },
+    // Backs the sync-health summary, which is read from the roster rather than from the
+    // day's rows — see `getStats`.
+    studentSyncState: {
+      groupBy: async ({ where }: { where?: Record<string, unknown> } = {}) => {
+        if (where) capturedSyncWheres.push(where);
+        return options.syncStateGroups ?? [];
+      },
     },
     syncJob: { findFirst: async () => null },
     leaderboardEntry: { findMany: async () => [] },
@@ -492,5 +507,104 @@ describe('DashboardService — the campus filter reaches the query', () => {
       expect(where).not.toHaveProperty('campusId');
       expect(where).not.toHaveProperty('batchId');
     }
+  });
+});
+
+/**
+ * The dashboard's sync summary.
+ *
+ * The defect these cover: with 21 students who had no LeetCode handle, the dashboard read
+ * "22 students' data could not be read this sync" and wore a permanent "Last sync had
+ * errors" badge. 21 of those 22 had never been requested from the provider at all. The
+ * summary has to separate a roster gap from a failed read, and it has to account for
+ * every active student while doing it — including students the last rollup never saw.
+ */
+describe('DashboardService.getStats — sync health', () => {
+  beforeEach(() => {
+    capturedSyncWheres.length = 0;
+  });
+
+  it('separates a missing profile from a failed read', async () => {
+    const service = makeService([], [], {
+      activeStudents: 130,
+      syncStateGroups: [
+        { status: 'OK', _count: { _all: 108 } },
+        { status: 'PROFILE_MISSING', _count: { _all: 21 } },
+        { status: 'USER_NOT_FOUND', _count: { _all: 1 } },
+      ],
+    });
+
+    const stats = await service.getStats('2026-08-10', {});
+
+    expect(stats.syncSummary).toMatchObject({
+      activeStudents: 130,
+      synced: 108,
+      profileMissing: 21,
+      awaitingFirstSync: 0,
+      // The single number that means "something broke" — 1, not 22.
+      failed: 1,
+    });
+  });
+
+  it('partitions the roster, so no active student is uncounted', async () => {
+    const service = makeService([], [], {
+      activeStudents: 130,
+      syncStateGroups: [
+        { status: 'OK', _count: { _all: 108 } },
+        { status: 'PROFILE_MISSING', _count: { _all: 21 } },
+        { status: 'USER_NOT_FOUND', _count: { _all: 1 } },
+      ],
+    });
+
+    const { syncSummary: s } = await service.getStats('2026-08-10', {});
+    expect(s.synced + s.profileMissing + s.awaitingFirstSync + s.failed).toBe(s.activeStudents);
+  });
+
+  it('counts a student with no sync row at all as awaiting their first sync', async () => {
+    // The state between import and first sync. Previously invisible to the summary, which
+    // is how the newest students — the ones most likely to need attention — went missing.
+    const service = makeService([], [], {
+      activeStudents: 10,
+      syncStateGroups: [{ status: 'OK', _count: { _all: 7 } }],
+    });
+
+    const { syncSummary: s } = await service.getStats('2026-08-10', {});
+    expect(s.awaitingFirstSync).toBe(3);
+    expect(s.synced + s.profileMissing + s.awaitingFirstSync + s.failed).toBe(10);
+  });
+
+  it('reads the roster, not the day — a student with no daily status is still counted', async () => {
+    // No `dailyStatus` rows at all, yet the summary still describes 130 students. Reading
+    // this from the day's rows is what would drop everyone imported since the last rollup.
+    const service = makeService([], [], {
+      activeStudents: 130,
+      syncStateGroups: [{ status: 'OK', _count: { _all: 130 } }],
+    });
+
+    const stats = await service.getStats('2026-08-10', {});
+    expect(stats.activeStudents).toBe(0);
+    expect(stats.syncSummary.activeStudents).toBe(130);
+    expect(stats.syncSummary.synced).toBe(130);
+  });
+
+  it('scopes the summary to the campus in view', async () => {
+    const service = makeService([], [], { activeStudents: 99, syncStateGroups: [] });
+    await service.getStats('2026-08-10', { campusId: 'campus-srm' });
+
+    expect(capturedSyncWheres.length).toBeGreaterThan(0);
+    for (const where of capturedSyncWheres) {
+      expect(where).toMatchObject({ student: { status: 'ACTIVE', campusId: 'campus-srm' } });
+    }
+  });
+
+  it('reports nothing under byStatus when every student synced cleanly', async () => {
+    const service = makeService([], [], {
+      activeStudents: 31,
+      syncStateGroups: [{ status: 'OK', _count: { _all: 31 } }],
+    });
+
+    const { syncSummary } = await service.getStats('2026-08-10', {});
+    expect(syncSummary.byStatus).toEqual({});
+    expect(syncSummary.failed).toBe(0);
   });
 });

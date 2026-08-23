@@ -45,6 +45,18 @@ export type ProblemStatus = (typeof PROBLEM_STATUSES)[number];
  */
 export const SYNC_STATUSES = [
   'OK',
+  /**
+   * On the roster, but no LeetCode handle has been collected yet. The sync does not
+   * attempt these students at all — there is no account to read.
+   *
+   * Kept apart from `NEVER_SYNCED` because the two ask for opposite responses. This one
+   * is a roster gap an admin fixes by entering a handle; `NEVER_SYNCED` is a student who
+   * *has* a handle the sync has simply not reached yet, which fixes itself on the next
+   * run. Collapsing them into one code is what let 21 students with no handle be reported
+   * as "data could not be read this sync", which is a claim about the provider that was
+   * never true of them.
+   */
+  'PROFILE_MISSING',
   'NEVER_SYNCED',
   'USER_NOT_FOUND',
   'PROFILE_PRIVATE',
@@ -249,6 +261,7 @@ export type ExportFormat = (typeof EXPORT_FORMATS)[number];
 /** Human-readable copy for a sync status, surfaced directly in the "Solved 0" table. */
 export const SYNC_STATUS_LABELS: Record<SyncStatus, string> = {
   OK: 'Synced',
+  PROFILE_MISSING: 'No LeetCode profile linked',
   NEVER_SYNCED: 'Never synced',
   USER_NOT_FOUND: 'LeetCode username not found',
   PROFILE_PRIVATE: 'Profile is private',
@@ -265,4 +278,28 @@ export const SYNC_STATUS_LABELS: Record<SyncStatus, string> = {
  */
 export function isTrustworthySync(status: SyncStatus): boolean {
   return status === 'OK';
+}
+
+/**
+ * Whether the sync actually called the provider for this student.
+ *
+ * `PROFILE_MISSING` is the one status that reports on the *roster* rather than on the
+ * provider: nothing was requested, so nothing failed. Sync accounting uses this to keep
+ * "we could not read this student's data" a statement about students we tried to read —
+ * without it, a roster with 21 uncollected handles marks every single sync run as
+ * "completed with errors" and the whole campus reads as broken (§6).
+ */
+export function wasSyncAttempted(status: SyncStatus): boolean {
+  return status !== 'PROFILE_MISSING' && status !== 'NEVER_SYNCED';
+}
+
+/**
+ * Whether this status is a genuine failure to read a student the sync did try to read.
+ *
+ * Deliberately not the negation of `isTrustworthySync`: an untrustworthy zero and a
+ * failed read are different questions, and the dashboard needs to answer both
+ * separately — a student with no handle has an untrustworthy zero *and* no failure.
+ */
+export function isSyncFailure(status: SyncStatus): boolean {
+  return wasSyncAttempted(status) && status !== 'OK';
 }

@@ -7,6 +7,7 @@ import { ArrowLeft, ExternalLink } from 'lucide-react';
 import {
   BATCH_CHANGE_SOURCE_LABELS,
   SYNC_STATUS_LABELS,
+  isSyncFailure,
   isTrustworthySync,
   UNASSIGNED_BATCH_LABEL,
   type BatchHistoryEntry,
@@ -126,7 +127,9 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
               </span>
             )}
             {untrusted ? (
-              <Badge tone="danger">{SYNC_STATUS_LABELS[data.syncStatus]}</Badge>
+              <Badge tone={isSyncFailure(data.syncStatus) ? 'danger' : 'neutral'}>
+                {SYNC_STATUS_LABELS[data.syncStatus]}
+              </Badge>
             ) : (
               <span className="text-xs text-[var(--color-fg-subtle)]">
                 synced {timeAgo(data.lastSyncedAt)}
@@ -148,7 +151,19 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
         </Card>
       </header>
 
-      {untrusted ? (
+      {/*
+        Two different situations, two different sentences. "Could not be read" is a claim
+        about a request that was made and failed; for a student with no handle no request
+        was ever made, and telling an admin to "check the username is correct" when there
+        is no username is advice they cannot act on (§5, §7).
+      */}
+      {data.syncStatus === 'PROFILE_MISSING' ? (
+        <Card className="p-4 text-sm">
+          No LeetCode account is linked to this student yet, so there is nothing to sync.
+          The figures below are zero because no data has been collected — not because no
+          work was done. Add a handle from the Students list to start tracking them.
+        </Card>
+      ) : untrusted ? (
         <Card className="border-[var(--color-warning)] p-4 text-sm">
           This student&apos;s LeetCode data could not be read
           {`: ${SYNC_STATUS_LABELS[data.syncStatus].toLowerCase()}`}. The figures below are

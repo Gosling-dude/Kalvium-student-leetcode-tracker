@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Download, CheckCircle2 } from 'lucide-react'
 import { toast } from 'sonner';
 import {
   SYNC_STATUS_LABELS,
+  isSyncFailure,
   isTrustworthySync,
   type MentorBatchSection,
   type MentorBucket,
@@ -285,7 +286,11 @@ function BucketTable({ bucket, assignedCount }: { bucket: MentorBucket; assigned
                         <span className="text-xs text-[var(--color-fg-subtle)]">No handle linked</span>
                       )}
                       {untrusted ? (
-                        <Badge tone="danger" className="ml-2">
+                        // Danger only for a read that failed; a roster gap is a to-do.
+                        <Badge
+                          tone={isSyncFailure(student.syncStatus) ? 'danger' : 'neutral'}
+                          className="ml-2 whitespace-nowrap"
+                        >
                           {SYNC_STATUS_LABELS[student.syncStatus]}
                         </Badge>
                       ) : null}

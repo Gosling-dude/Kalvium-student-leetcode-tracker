@@ -105,6 +105,10 @@ enum BatchChangeSource {
 /// nothing" from "we could not read this profile" — a distinction mentors need.
 enum SyncStatus {
   OK
+  /// On the roster, but no LeetCode handle has been collected yet — the sync never
+  /// attempts these students. Distinct from NEVER_SYNCED, which is a student who has a
+  /// handle the sync has not reached yet. See the note in `@dsa/shared`.
+  PROFILE_MISSING
   NEVER_SYNCED
   USER_NOT_FOUND
   PROFILE_PRIVATE
@@ -490,8 +494,8 @@ model Student {
   /// collected their handle. The alternative — inventing a placeholder handle — would
   /// make them permanently indistinguishable from a student whose handle is simply
   /// wrong, and the sync would keep reporting a "user not found" that is not true.
-  /// Students with no handle are skipped by the sync and shown as never-synced, which
-  /// is exactly what they are.
+  /// Students with no handle are skipped by the sync and shown as PROFILE_MISSING —
+  /// a roster gap an admin closes by entering a handle, not a failed read.
   ///
   /// Postgres treats NULLs as distinct, so the unique index still permits many students
   /// without a handle while forbidding two students sharing one.
@@ -1172,6 +1176,10 @@ model SyncJob {
   processedStudents Int @default(0)
   succeededStudents Int @default(0)
   failedStudents    Int @default(0)
+  /// Students the run deliberately did not attempt, because no LeetCode handle is
+  /// linked to them. Counted apart from `failedStudents` so a roster gap never marks a
+  /// healthy run as COMPLETED_WITH_ERRORS.
+  skippedStudents   Int @default(0)
   newSubmissions    Int @default(0)
 
   startedAt   DateTime?

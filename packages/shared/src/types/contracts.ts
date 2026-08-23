@@ -303,6 +303,30 @@ export interface DashboardBatchBreakdown {
   notAttemptedStudents: number;
 }
 
+/**
+ * How the last sync went, for the students currently in scope.
+ *
+ * `synced + profileMissing + awaitingFirstSync + failed === activeStudents`, so the four
+ * are a partition rather than four overlapping ways of counting the same students. That
+ * property is the point: it lets the dashboard say "130 active · 108 synced · 21 need a
+ * profile · 1 failed" instead of a single alarming total that mixed a roster gap with a
+ * provider outage.
+ */
+export interface SyncHealthSummary {
+  /** Active students in scope — the denominator every other count is part of. */
+  activeStudents: number;
+  /** Read successfully: their figures are real. */
+  synced: number;
+  /** No LeetCode handle on the roster yet. Never attempted, so never a failure (§7). */
+  profileMissing: number;
+  /** Has a handle, but the sync has not reached them yet. Resolves itself on the next run. */
+  awaitingFirstSync: number;
+  /** Genuinely attempted and could not be read — the only count that means "something broke". */
+  failed: number;
+  /** Every non-OK reason with its own count, for the detail chips. */
+  byStatus: Partial<Record<SyncStatus, number>>;
+}
+
 export interface DashboardStats {
   dayKey: DayKey;
   /** The campus filter applied; `null` when showing every campus. */
@@ -337,6 +361,16 @@ export interface DashboardStats {
   lastSyncStatus: SyncJobStatus | null;
   /** Students whose data could not be trusted this sync, by reason. */
   unreliableSyncCounts: Partial<Record<SyncStatus, number>>;
+  /**
+   * What the last sync actually managed, for the students in scope.
+   *
+   * Replaces reading a single "N students could not be read" figure off
+   * `unreliableSyncCounts`, which counted a student with no linked handle as a failed
+   * read and made an entire healthy campus look broken (§6). The four counts partition
+   * `activeStudents` exactly, so the UI can state the whole picture without arithmetic
+   * of its own.
+   */
+  syncSummary: SyncHealthSummary;
 }
 
 export interface AssignmentProblem {
@@ -592,6 +626,11 @@ export interface SyncJobSummary {
   processedStudents: number;
   succeededStudents: number;
   failedStudents: number;
+  /**
+   * Students the run deliberately did not attempt, because no LeetCode handle is linked
+   * to them. Apart from `failedStudents`: nothing was requested, so nothing failed.
+   */
+  skippedStudents: number;
   newSubmissions: number;
   progressPercent: number;
   startedAt: string | null;

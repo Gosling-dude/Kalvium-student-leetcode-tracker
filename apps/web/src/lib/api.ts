@@ -352,7 +352,8 @@ export const api = {
   analytics: (from?: string, to?: string, campus?: string, batch?: string) =>
     apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to, campus, batch })}`),
 
-  startSync: (body: { mode?: string; dayKey?: string } = {}) =>
+  /** `studentIds` narrows the run to those students — used to re-sync one row on demand. */
+  startSync: (body: { mode?: string; dayKey?: string; studentIds?: string[] } = {}) =>
     apiFetch<SyncJobSummary>('/sync', { method: 'POST', body }),
 
   retryFailedSync: () => apiFetch<SyncJobSummary>('/sync/retry-failed', { method: 'POST' }),
