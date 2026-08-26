@@ -74,6 +74,27 @@ export interface IntegrityReport {
     baselineTests: number;
     submissions: number;
   };
+  /**
+   * Per baseline test: what participation records say, next to what the submission mirror
+   * actually holds for the same problems. The two disagreeing is the whole bug this
+   * section exists to make visible — a test can read "0 solved" across the cohort purely
+   * because nobody clicked Start, while the mirror holds hundreds of accepted solutions
+   * for those exact problems.
+   */
+  baseline: {
+    testId: string;
+    name: string;
+    dayKey: string;
+    problems: number;
+    eligibleStudents: number;
+    attempts: number;
+    /** Distinct eligible students with an accepted submission for at least one problem. */
+    studentsWithAnyAcceptedSolution: number;
+    /** Accepted submissions held for this test's problems, by eligible students. */
+    acceptedSubmissions: number;
+    perProblem: { titleSlug: string; title: string; solvedByStudents: number }[];
+  }[];
+
   email: {
     pendingApproval: number;
     sentLast7Days: number;
@@ -134,6 +155,7 @@ export class IntegrityService {
     const byStatus: Record<string, number> = {};
     for (const row of syncStates) byStatus[row.status] = row._count._all;
 
+    const baseline = await this.baselineSummary();
     const email = this.config.email;
     const findings = await this.findings({
       fromConfigured: Boolean(email.fromEmail),
@@ -167,6 +189,7 @@ export class IntegrityService {
         baselineTests,
         submissions,
       },
+      baseline,
       email: {
         pendingApproval,
         sentLast7Days: sentRecently,
@@ -176,6 +199,75 @@ export class IntegrityService {
       },
       findings,
     };
+  }
+
+  /**
+   * What each baseline test's participation records claim, beside what the submission
+   * mirror holds for the same problems.
+   *
+   * Read-only and deliberately not filtered by any test window: the point is to show the
+   * solutions a window-scoped view would hide.
+   */
+  private async baselineSummary(): Promise<IntegrityReport['baseline']> {
+    const tests = await this.prisma.baselineTest.findMany({
+      orderBy: { dayKey: 'desc' },
+      take: 10,
+      include: { problems: { include: { problem: true }, orderBy: { position: 'asc' } } },
+    });
+
+    const summaries: IntegrityReport['baseline'] = [];
+
+    for (const test of tests) {
+      const eligible = await this.prisma.student.findMany({
+        where: {
+          status: 'ACTIVE',
+          ...(test.campusId ? { campusId: test.campusId } : {}),
+          ...(test.batchId ? { batchId: test.batchId } : {}),
+        },
+        select: { id: true },
+      });
+      const studentIds = eligible.map((student) => student.id);
+      const slugs = test.problems.map((problem) => problem.problem.titleSlug);
+
+      const [attempts, accepted] = await Promise.all([
+        this.prisma.baselineTestAttempt.count({ where: { testId: test.id } }),
+        studentIds.length > 0 && slugs.length > 0
+          ? this.prisma.submission.findMany({
+              where: {
+                studentId: { in: studentIds },
+                titleSlug: { in: slugs },
+                status: 'ACCEPTED',
+              },
+              select: { studentId: true, titleSlug: true },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const byProblem = new Map<string, Set<string>>();
+      for (const row of accepted) {
+        const set = byProblem.get(row.titleSlug) ?? new Set<string>();
+        set.add(row.studentId);
+        byProblem.set(row.titleSlug, set);
+      }
+
+      summaries.push({
+        testId: test.id,
+        name: test.name,
+        dayKey: test.dayKey,
+        problems: test.problems.length,
+        eligibleStudents: studentIds.length,
+        attempts,
+        studentsWithAnyAcceptedSolution: new Set(accepted.map((row) => row.studentId)).size,
+        acceptedSubmissions: accepted.length,
+        perProblem: test.problems.map((problem) => ({
+          titleSlug: problem.problem.titleSlug,
+          title: problem.problem.title,
+          solvedByStudents: byProblem.get(problem.problem.titleSlug)?.size ?? 0,
+        })),
+      });
+    }
+
+    return summaries;
   }
 
   private async findings(email: {
