@@ -186,6 +186,20 @@ jobs:
           print(f"Email pending     {report['email']['pendingApproval']}")
           print()
 
+          # Participation records beside what the submission mirror actually holds. These
+          # two disagreeing is a reporting bug, not missing data, and the difference is only
+          # visible when both are printed together.
+          for test in report.get('baseline', []):
+              print(f"Baseline \"{test['name']}\" ({test['dayKey']})")
+              print(f"  eligible {test['eligibleStudents']}  attempts {test['attempts']}  "
+                    f"problems {test['problems']}")
+              print(f"  students holding an accepted solution: {test['studentsWithAnyAcceptedSolution']}"
+                    f"  (accepted submissions: {test['acceptedSubmissions']})")
+              for problem in test['perProblem']:
+                  print(f"    {problem['solvedByStudents']:>4}  {problem['titleSlug']}")
+          if report.get('baseline'):
+              print()
+
           # Data failures block; configuration gaps are surfaced every run but do not fail
           # the build. Mixing them would leave this permanently red over an environment
           # variable nobody can set today — and a check that is always red is one nobody
