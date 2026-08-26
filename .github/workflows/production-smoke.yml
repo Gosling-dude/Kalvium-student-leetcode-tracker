@@ -51,9 +51,9 @@ jobs:
           set -euo pipefail
           base="${BACKEND_URL%/}"
 
-          # A push to main triggers a redeploy, and the free tier both cold-starts (~50s)
-          # and restarts. Poll rather than sleep-and-hope: a fixed wait is either too
-          # short (flaky) or too long (slow) and is never right.
+          # The free tier both cold-starts (~50s) and restarts on deploy. Poll rather than
+          # sleep-and-hope: a fixed wait is either too short (flaky) or too long (slow) and
+          # is never right.
           for i in $(seq 1 40); do
             code=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
               --connect-timeout 20 --max-time 90 "${base}/api/v1/health" || echo "000")
@@ -65,6 +65,38 @@ jobs:
             sleep 15
           done
           echo "::error::Backend did not become healthy."
+          exit 1
+
+      - name: Wait for *this* commit to be the one that is deployed
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+
+          # A healthy /health proves *a* version is running, not that it is the one just
+          # pushed. Without this the whole job races the host's build and reports on the
+          # previous release — which is worse than not running, because it passes.
+          #
+          # The signal is the integrity endpoint answering at all: it ships with the code,
+          # so 401 (present, needs the secret) or 200 means this build is live, while 404
+          # means the host is still serving the old one.
+          #
+          # 10 minutes covers a free-tier build and restart. Timing out here means the
+          # deploy did not happen, which is itself the finding.
+          for i in $(seq 1 40); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              --connect-timeout 20 --max-time 90 \
+              "${base}/api/v1/internal/integrity" || echo "000")
+            if [ "$code" = "401" ] || [ "$code" = "403" ] || [ "$code" = "200" ]; then
+              echo "Deployed build serves /internal/integrity (HTTP ${code} anonymously)."
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP ${code} — still the previous build"
+            sleep 15
+          done
+          echo "::error::The pushed commit was never deployed (integrity endpoint still 404). Check the host's build log."
           exit 1
 
       - name: Protected endpoints must refuse anonymous callers
