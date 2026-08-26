@@ -151,3 +151,30 @@ export function resolveFrozenField<T>(
   if (force) return incomingValue;
   return existingValue ?? incomingValue;
 }
+
+/**
+ * Which day a newly-recorded placement takes effect from.
+ *
+ * "First placement" is decided by `hasPriorPlacements`, not by whether `Student.batchId`
+ * was already non-null — a student can carry a `batchId` that was never actually recorded
+ * as a placement (the classic case: an old import stamped everyone onto a batch before
+ * `StudentBatchHistory` existed, or the spreadsheet importer set the column directly).
+ * Checking history directly is what makes that distinguishable from a genuine
+ * administrative move:
+ *
+ *  - No prior placement on record → back-dated to enrolment. The roster is stating what
+ *    has been true all along, not making a change now.
+ *  - At least one prior placement → effective today. An admin moving someone now is a
+ *    decision about now, and back-dating it would re-file already-closed days.
+ *
+ * Pure so the decision itself is unit-testable without a database. Shared by every writer
+ * of placement history — the roster sync, the spreadsheet import and the backfill — so
+ * they cannot drift apart about what a first placement means.
+ */
+export function resolvePlacementEffectiveDate(input: {
+  hasPriorPlacements: boolean;
+  todayDayKey: DayKey;
+  enrolmentDayKey: DayKey;
+}): DayKey {
+  return input.hasPriorPlacements ? input.todayDayKey : input.enrolmentDayKey;
+}

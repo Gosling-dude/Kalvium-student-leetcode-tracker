@@ -58,6 +58,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { PrismaClient, type Prisma } from '@prisma/client';
+import { resolvePlacementEffectiveDate } from '@dsa/shared';
 
 const prisma = new PrismaClient();
 
@@ -349,29 +350,12 @@ function todayDayKey(): string {
 }
 
 /**
- * When a roster sync moves an existing student to a different batch, which day the move
- * should take effect from.
- *
- * "First placement" is decided by `hasPriorPlacements`, not by whether `Student.batchId`
- * was already non-null — a student can carry a `batchId` that was never actually recorded
- * as a placement (the classic case: an old import stamped everyone onto a placeholder
- * batch like "Batch 2026" before `StudentBatchHistory` existed). Checking history directly
- * is what makes that distinguishable from a genuine administrative move:
- *
- *  - No prior placement on record → back-dated to enrolment. The roster is stating what
- *    has been true all along, not making a change now.
- *  - At least one prior placement → effective today. An admin moving someone now is a
- *    decision about now, and back-dating it would re-file already-closed days.
- *
- * Pure so the decision itself is unit-testable without a database.
+ * Re-exported so this script's own spec keeps importing it from here. The rule itself now
+ * lives in `@dsa/shared` because three writers of placement history need it — this roster
+ * sync, the spreadsheet import, and the backfill — and a second copy would let them drift
+ * apart about what a first placement means.
  */
-export function resolvePlacementEffectiveDate(input: {
-  hasPriorPlacements: boolean;
-  todayDayKey: string;
-  enrolmentDayKey: string;
-}): string {
-  return input.hasPriorPlacements ? input.todayDayKey : input.enrolmentDayKey;
-}
+export { resolvePlacementEffectiveDate };
 
 interface Summary {
   created: string[];

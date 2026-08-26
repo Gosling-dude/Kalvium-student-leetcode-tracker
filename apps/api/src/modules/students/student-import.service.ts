@@ -20,7 +20,14 @@
 
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import ExcelJS from 'exceljs';
-import { IMPORT_COLUMN_ALIASES, type ImportResult, type ImportRowError } from '@dsa/shared';
+import type { Prisma } from '@prisma/client';
+import {
+  IMPORT_COLUMN_ALIASES,
+  normaliseBatchCode,
+  resolvePlacementEffectiveDate,
+  type ImportResult,
+  type ImportRowError,
+} from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
@@ -144,6 +151,21 @@ export class StudentImportService {
             continue;
           }
 
+          // A re-import that changes someone's campus or batch is a placement change, and
+          // it has to leave the same history trail as every other route that moves a
+          // student. Without it `Student.batchId` says one thing and
+          // `StudentBatchHistory` says nothing at all — and every historical query reads
+          // the history, so the student resolves to "no batch on any day", drops out of
+          // batch-targeted assignments and lands on reports with a null batch (§7, §17).
+          const placement = await this.placementWrites({
+            studentId: existing.id,
+            enrolledAt: existing.createdAt,
+            fromCampusId: existing.campusId,
+            toCampusId: campusId,
+            fromBatchId: existing.batchId,
+            toBatchId: batchId,
+          });
+
           await this.prisma.student.update({
             where: { id: existing.id },
             data: {
@@ -152,8 +174,13 @@ export class StudentImportService {
               phone: row.phone,
               leetcodeUsername: row.leetcodeUsername.toLowerCase(),
               campusId,
-              batchId,
-              squadId,
+              // A sheet without a Batch/Squad column says nothing about placement — it
+              // does not say "remove them". Writing the null through would unassign the
+              // whole cohort on any re-import that omits those columns, which is exactly
+              // the kind of silent, roster-wide edit an import must never make.
+              ...(batchId !== null ? { batchId } : {}),
+              ...(squadId !== null ? { squadId } : {}),
+              ...placement,
             },
           });
           updated += 1;
@@ -177,6 +204,24 @@ export class StudentImportService {
                   reason: 'Spreadsheet import',
                 },
               },
+              // The batch needs the same trail as the campus. It was missing here, which
+              // meant every student onboarded by spreadsheet had a `batchId` that no
+              // historical query could see: `batchOnDayForStudents` reads this table and
+              // has no fallback to `Student.batchId` — deliberately, because falling back
+              // would re-file closed days under a batch joined later. The consequence was
+              // that batch-targeted assignments never selected for imported students.
+              ...(batchId
+                ? {
+                    batchHistory: {
+                      create: {
+                        toBatchId: batchId,
+                        effectiveFromDayKey: this.time.today(),
+                        source: 'IMPORT' as const,
+                        reason: 'Initial placement from spreadsheet import',
+                      },
+                    },
+                  }
+                : {}),
               // A student who has never been synced must not be reported as
               // "solved 0" — they have no data yet, which is a different thing.
               syncState: { create: { status: 'NEVER_SYNCED' } },
@@ -207,6 +252,73 @@ export class StudentImportService {
       createdBatches,
       createdSquads,
     };
+  }
+
+  /**
+   * The nested `campusHistory`/`batchHistory` writes a re-import needs, if any.
+   *
+   * Returns `{}` when nothing moved, so an import that only corrects a spelling does not
+   * litter the placement history with no-op rows — the history is read as "where was this
+   * student on day D", and a row that changes nothing still competes for that answer.
+   *
+   * Which day a move takes effect from is `resolvePlacementEffectiveDate`, the same rule
+   * the roster sync uses: a *first* recorded placement is back-dated to enrolment (the
+   * sheet is stating what has been true all along), while a genuine move is effective
+   * today so that already-closed days keep the batch they were completed under (§7).
+   */
+  private async placementWrites(input: {
+    studentId: string;
+    enrolledAt: Date;
+    fromCampusId: string | null;
+    toCampusId: string;
+    fromBatchId: string | null;
+    toBatchId: string | null;
+  }): Promise<Prisma.StudentUncheckedUpdateInput> {
+    const writes: Prisma.StudentUncheckedUpdateInput = {};
+    const todayDayKey = this.time.today();
+    const enrolmentDayKey = this.time.dayKeyOf(input.enrolledAt);
+
+    if (input.fromCampusId !== input.toCampusId) {
+      const priorCampusPlacements = await this.prisma.studentCampusHistory.count({
+        where: { studentId: input.studentId },
+      });
+      writes.campusHistory = {
+        create: {
+          fromCampusId: input.fromCampusId,
+          toCampusId: input.toCampusId,
+          effectiveFromDayKey: resolvePlacementEffectiveDate({
+            hasPriorPlacements: priorCampusPlacements > 0,
+            todayDayKey,
+            enrolmentDayKey,
+          }),
+          source: 'IMPORT',
+          reason: 'Campus changed by spreadsheet import',
+        },
+      };
+    }
+
+    // A sheet with no Batch column leaves `toBatchId` null. That is "the sheet did not
+    // say", not "move this student out of their batch", so it is never treated as a move.
+    if (input.toBatchId !== null && input.fromBatchId !== input.toBatchId) {
+      const priorBatchPlacements = await this.prisma.studentBatchHistory.count({
+        where: { studentId: input.studentId },
+      });
+      writes.batchHistory = {
+        create: {
+          fromBatchId: input.fromBatchId,
+          toBatchId: input.toBatchId,
+          effectiveFromDayKey: resolvePlacementEffectiveDate({
+            hasPriorPlacements: priorBatchPlacements > 0,
+            todayDayKey,
+            enrolmentDayKey,
+          }),
+          source: 'IMPORT',
+          reason: 'Batch changed by spreadsheet import',
+        },
+      };
+    }
+
+    return writes;
   }
 
   /** Build a template workbook so mentors start from the exact expected columns. */
@@ -449,9 +561,19 @@ export class StudentImportService {
     for (const name of names) {
       // Scoped to the campus: an "Intermediate Level" at Vels must not silently absorb
       // an "Intermediate Level" row meant for SRM.
-      const existing = await this.prisma.batch.findUnique({
-        where: { campusId_name: { campusId, name } },
-      });
+      //
+      // Matched on name *or* code, because both identify a batch and a spreadsheet column
+      // headed "Batch" is filled in with whichever one the person typing knows. Matching
+      // on name alone created a second batch literally named "A" next to the existing
+      // batch whose code is "A" — same cohort, two rows, and from then on half the
+      // students are targeted by an assignment and half are not.
+      const existing =
+        (await this.prisma.batch.findUnique({
+          where: { campusId_name: { campusId, name } },
+        })) ??
+        (await this.prisma.batch.findUnique({
+          where: { campusId_code: { campusId, code: normaliseBatchCode(name) } },
+        }));
       if (existing) {
         batchIds.set(name.toLowerCase(), existing.id);
       } else {
