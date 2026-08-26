@@ -8,6 +8,7 @@ import { EmailReportsModule } from '../email-reports/email-reports.module';
 import { BatchesModule } from '../batches/batches.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CronTasksService } from './cron-tasks.service';
+import { IntegrityService } from './integrity.service';
 import { InternalController } from './internal.controller';
 
 /**
@@ -26,7 +27,7 @@ import { InternalController } from './internal.controller';
     BatchesModule,
   ],
   controllers: [InternalController],
-  providers: [CronTasksService],
-  exports: [CronTasksService],
+  providers: [CronTasksService, IntegrityService],
+  exports: [CronTasksService, IntegrityService],
 })
 export class InternalModule {}

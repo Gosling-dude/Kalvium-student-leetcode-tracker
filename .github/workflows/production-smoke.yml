@@ -1,0 +1,150 @@
+name: Production Smoke Test
+
+# Verifies the *deployed* system, not the build.
+#
+# "The deploy succeeded" and "the data is correct" are different claims, and a build log
+# can only ever demonstrate the first. This asserts on the second: that the API is up and
+# reachable, that protected endpoints actually refuse anonymous callers, and that the live
+# database satisfies the integrity invariants a release is responsible for keeping true
+# (every student has a placement a report can see, no mentor logs in to an empty system,
+# no scored day claims problems from an assignment that no longer exists).
+#
+# Runs after every push to main — a deploy that breaks one of these should be visible
+# without anyone thinking to look — and on demand from the Actions tab.
+#
+# It reads production and writes nothing. The only credential it needs is CRON_SECRET,
+# the same secret the sync and rollup workflows already use.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: production-smoke
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Verify the deployed system
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate required secrets
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -z "${BACKEND_URL:-}" ] && { echo "::error::BACKEND_URL secret is not set"; missing=1; }
+          [ -z "${CRON_SECRET:-}" ] && { echo "::error::CRON_SECRET secret is not set"; missing=1; }
+          [ "$missing" -eq 1 ] && exit 1
+          echo "Secrets present."
+
+      - name: Wait for the deployment to come up
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+
+          # A push to main triggers a redeploy, and the free tier both cold-starts (~50s)
+          # and restarts. Poll rather than sleep-and-hope: a fixed wait is either too
+          # short (flaky) or too long (slow) and is never right.
+          for i in $(seq 1 40); do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' \
+              --connect-timeout 20 --max-time 90 "${base}/api/v1/health" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "Healthy after ${i} attempt(s):"; cat /tmp/health.json; echo
+              exit 0
+            fi
+            echo "attempt ${i}: HTTP ${code}"
+            sleep 15
+          done
+          echo "::error::Backend did not become healthy."
+          exit 1
+
+      - name: Protected endpoints must refuse anonymous callers
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}/api/v1"
+          failures=0
+
+          # Authorization is enforced server-side or it is not enforced. Hiding a nav item
+          # is not a control, so the check that matters is what an unauthenticated caller
+          # actually receives from the endpoints holding student data.
+          for path in students leaderboard assignments baseline-tests reports/daily admin/mentors internal/integrity; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "${base}/${path}" || echo "000")
+            case "$code" in
+              401|403) echo "  OK   ${path} -> ${code}" ;;
+              *)       echo "::error::${path} returned ${code} to an anonymous caller (expected 401/403)"; failures=$((failures+1)) ;;
+            esac
+          done
+
+          [ "$failures" -eq 0 ] || exit 1
+
+      - name: Live data-integrity report
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+
+          code=$(curl -sS -o /tmp/integrity.json -w '%{http_code}' \
+            --connect-timeout 20 --max-time 120 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${base}/api/v1/internal/integrity" || echo "000")
+
+          if [ "$code" != "200" ]; then
+            echo "::error::integrity endpoint returned ${code}"
+            cat /tmp/integrity.json || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+
+          with open('/tmp/integrity.json') as handle:
+              report = json.load(handle)
+
+          roster, sync, content = report['roster'], report['sync'], report['content']
+
+          print(f"Program day       {report['programDay']}")
+          print(f"Students          {roster['activeStudents']} active of {roster['totalStudents']}")
+          print(f"  with a handle   {roster['studentsWithLeetcodeUsername']}")
+          print(f"Campuses/batches  {roster['campuses']} / {roster['batches']}")
+          print(f"Last good sync    {sync['lastSuccessfulSyncAt']}")
+          print(f"Sync status       {sync['byStatus']}")
+          print(f"Assignments       {content['assignments']} (latest {content['latestAssignmentDay']})")
+          print(f"Baseline tests    {content['baselineTests']}")
+          print(f"Submissions       {content['submissions']}")
+          print(f"Email pending     {report['email']['pendingApproval']}")
+          print()
+
+          failed = [f for f in report['findings'] if f['shouldBeZero'] and f['count'] > 0]
+          for finding in report['findings']:
+              mark = 'FAIL' if finding in failed else 'ok  '
+              print(f"{mark}  {finding['check']} = {finding['count']}")
+              if finding in failed:
+                  print(f"      {finding['detail']}")
+
+          if failed:
+              print()
+              for finding in failed:
+                  print(f"::error::{finding['check']} = {finding['count']} — {finding['detail']}")
+              sys.exit(1)
+
+          # An empty roster is not an integrity violation, but it is never what production
+          # should look like after onboarding, so it is worth surfacing rather than passing
+          # silently on a database that lost its students.
+          if roster['activeStudents'] == 0:
+              print("::warning::No active students in production.")
+
+          print("\nAll integrity checks passed.")
+          PY

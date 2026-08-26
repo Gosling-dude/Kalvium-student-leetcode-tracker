@@ -10,19 +10,41 @@
  * calling Action sees a real success/failure rather than a fire-and-forget 202.
  */
 
-import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 
 import { Public } from '../../common/decorators';
 import { CronSecretGuard } from '../../common/guards/cron-secret.guard';
 import { CronTasksService } from './cron-tasks.service';
+import { IntegrityService } from './integrity.service';
 
 @ApiExcludeController()
 @Public()
 @UseGuards(CronSecretGuard)
 @Controller('internal')
 export class InternalController {
-  constructor(private readonly tasks: CronTasksService) {}
+  constructor(
+    private readonly tasks: CronTasksService,
+    private readonly integrity: IntegrityService,
+  ) {}
+
+  /**
+   * Data-integrity report for the live database.
+   *
+   * The production smoke test asserts on this. "The deploy succeeded" and "the data is
+   * correct" are different claims, and a build log can only ever demonstrate the first —
+   * so the checks that matter after a release (does every student have a placement a
+   * report can see, does any mentor log in to an empty system) are answered here, from
+   * the database itself.
+   *
+   * Read-only, and behind the same `CronSecretGuard` as the cron endpoints: it reports
+   * counts and no student's name, but "how many students are there" is still not public.
+   */
+  @Get('integrity')
+  @HttpCode(200)
+  integrityReport() {
+    return this.integrity.report();
+  }
 
   @Post('sync')
   @HttpCode(200)

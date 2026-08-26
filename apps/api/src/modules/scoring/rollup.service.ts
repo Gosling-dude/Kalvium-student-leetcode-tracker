@@ -635,24 +635,50 @@ export class RollupService {
    * It is also self-clearing: one recompute moves `computedAt` past `updatedAt` and the
    * day stops being reported, so a sync does not keep redoing settled work.
    *
+   * The second query covers the one case the first structurally cannot: a **deleted**
+   * assignment. `DailyStatus.assignmentId` is `SetNull`, so deleting an assignment leaves
+   * rows that still claim `assignedCount = 4` while naming no assignment — 15 students
+   * recorded as having missed four problems on a day that has no assignment at all. That
+   * is a false zero on the report, the leaderboard and the streak. A query that starts
+   * `FROM assignments` can never find those days, because the row it would have to find
+   * them by is the one that was deleted. So they are found from the wreckage instead: a
+   * scored day naming no assignment while claiming problems were assigned is, by
+   * construction, a day whose assignment went away after it was computed — the rollup only
+   * ever writes a non-zero `assignedCount` from an assignment it had in hand.
+   *
+   * Also self-clearing: the recompute finds no assignment, writes `assignedCount = 0`, and
+   * the day stops matching.
+   *
    * `assignment.createdAt` is never used to filter *submissions* — that would discard
    * genuine work done before the assignment was entered, which is the very thing the
    * lookback window exists to allow. It is only ever used here, to decide *which days to
    * recompute*.
    */
   async findStaleAssignmentDays(from: DayKey, to: DayKey): Promise<DayKey[]> {
-    const rows = await this.prisma.$queryRaw<{ dayKey: string }[]>`
-      SELECT DISTINCT a."dayKey"
-      FROM "assignments" a
-      WHERE a."dayKey" >= ${from}
-        AND a."dayKey" <= ${to}
-        AND a."updatedAt" > COALESCE(
-          (SELECT MAX(d."computedAt") FROM "daily_statuses" d WHERE d."dayKey" = a."dayKey"),
-          '-infinity'::timestamp
-        )
-      ORDER BY a."dayKey"
-    `;
-    return rows.map((row) => row.dayKey);
+    const [edited, orphaned] = await Promise.all([
+      this.prisma.$queryRaw<{ dayKey: string }[]>`
+        SELECT DISTINCT a."dayKey"
+        FROM "assignments" a
+        WHERE a."dayKey" >= ${from}
+          AND a."dayKey" <= ${to}
+          AND a."updatedAt" > COALESCE(
+            (SELECT MAX(d."computedAt") FROM "daily_statuses" d WHERE d."dayKey" = a."dayKey"),
+            '-infinity'::timestamp
+          )
+        ORDER BY a."dayKey"
+      `,
+      this.prisma.$queryRaw<{ dayKey: string }[]>`
+        SELECT DISTINCT d."dayKey"
+        FROM "daily_statuses" d
+        WHERE d."dayKey" >= ${from}
+          AND d."dayKey" <= ${to}
+          AND d."assignmentId" IS NULL
+          AND d."assignedCount" > 0
+        ORDER BY d."dayKey"
+      `,
+    ]);
+
+    return [...new Set([...edited, ...orphaned].map((row) => row.dayKey))].sort();
   }
 
   // -------------------------------------------------------------------------

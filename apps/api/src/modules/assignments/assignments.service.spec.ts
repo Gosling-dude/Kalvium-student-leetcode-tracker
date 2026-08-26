@@ -194,6 +194,11 @@ function makeService(
         return clone(row);
       }),
       count: vi.fn(async () => rows.length),
+      delete: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const index = rows.findIndex((row) => row.id === where.id);
+        if (index === -1) throw new Error('not found');
+        return clone(rows.splice(index, 1)[0]!);
+      }),
       create: vi.fn(
         async ({
           data,
@@ -336,14 +341,20 @@ function makeService(
 
   const provider = { fetchProblemMetadata: vi.fn() };
 
+  const rollup = {
+    recomputeDay: vi.fn().mockResolvedValue({ students: 0, assigned: 0 }),
+    rebuildLeaderboards: vi.fn().mockResolvedValue(undefined),
+  };
+
   const service = new AssignmentsService(
     prisma as never,
     cache as never,
     time as never,
     campuses as never,
+    rollup as never,
     provider as never,
   );
-  return { service, prisma, rows, campuses };
+  return { service, prisma, rows, campuses, rollup };
 }
 
 describe('AssignmentsService.create — four independent scopes on one date', () => {
@@ -696,4 +707,53 @@ describe('AssignmentsService.findAllByDay — the history table never merges aud
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+/**
+ * Deleting an assignment has to re-settle the day it belonged to.
+ *
+ * `DailyStatus.assignmentId` is `SetNull`, so the delete alone leaves every student's row
+ * for that day still claiming `assignedCount = 4` while naming no assignment — a whole
+ * batch recorded as having missed four problems on a day that no longer has any. That is a
+ * false zero on the report, the leaderboard and their streaks, and it was found in a real
+ * database: 15 rows on a day with no assignment at all.
+ */
+describe('AssignmentsService.remove', () => {
+  it('recomputes the day it deleted from', async () => {
+    const { service, rows, rollup } = makeService();
+    const created = await service.create(
+      { dayKey: '2026-08-20', campus: 'VELS', batches: ['A'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    const id = Array.isArray(created) ? created[0]!.id : created.id;
+
+    await service.remove(id);
+
+    expect(rows.find((row) => row.id === id)).toBeUndefined();
+    // Clearing the cache was never enough: the stale rows are in the database, not in it.
+    expect(rollup.recomputeDay).toHaveBeenCalledWith('2026-08-20');
+    expect(rollup.rebuildLeaderboards).toHaveBeenCalledWith('2026-08-20');
+  });
+
+  it('recomputes rather than zeroing, because a different assignment may now apply', async () => {
+    // Deleting a batch-targeted set can mean the campus-wide set now reaches those
+    // students. Only a real recompute resolves which assignment applies.
+    const { service, rollup } = makeService();
+    const created = await service.create(
+      { dayKey: '2026-08-20', campus: 'VELS', batches: ['A'], problemUrls: PROBLEM_URLS },
+      'user-1',
+    );
+    const id = Array.isArray(created) ? created[0]!.id : created.id;
+
+    await service.remove(id);
+
+    expect(rollup.recomputeDay).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not touch anything when the assignment does not exist', async () => {
+    const { service, rollup } = makeService();
+
+    await expect(service.remove('00000000-0000-4000-8000-000000000000')).rejects.toThrow();
+    expect(rollup.recomputeDay).not.toHaveBeenCalled();
+  });
 });

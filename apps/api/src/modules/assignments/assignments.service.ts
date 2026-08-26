@@ -40,6 +40,7 @@ import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
 import { CampusesService } from '../campuses/campuses.service';
+import { RollupService } from '../scoring/rollup.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
 import { ProviderProblemNotFoundError } from '../providers/provider.errors';
 import type {
@@ -81,6 +82,7 @@ export class AssignmentsService {
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
     private readonly campuses: CampusesService,
+    private readonly rollup: RollupService,
     @Inject(SUBMISSION_PROVIDER) private readonly provider: SubmissionProvider,
   ) {}
 
@@ -410,10 +412,32 @@ export class AssignmentsService {
     );
   }
 
+  /**
+   * Delete an assignment and re-settle the day it belonged to.
+   *
+   * The recompute is the point, not housekeeping. `DailyStatus.assignmentId` is `SetNull`,
+   * so the delete on its own leaves every student's row for that day still claiming
+   * `assignedCount = 4` while naming no assignment — a whole batch recorded as having
+   * missed four problems on a day that no longer has any, which reads as a false zero on
+   * the report, the leaderboard and their streaks.
+   *
+   * Clearing the cache was never enough, and neither was leaving it to the sync's
+   * stale-day detector: that detector starts `FROM assignments`, so the one row it would
+   * need to notice this by is the row that was just deleted. (It has since grown a second
+   * arm that finds these days from the wreckage, which is what repairs days already
+   * damaged — but an admin who deletes an assignment should see the numbers corrected now,
+   * not at the next sync.)
+   *
+   * Recomputed rather than zeroed, because deleting one assignment can change which
+   * assignment applies: a batch-targeted set removed may mean the campus-wide set now
+   * reaches those students, and only a real recompute resolves that.
+   */
   async remove(id: string): Promise<void> {
     const existing = await this.prisma.assignment.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException(`Assignment ${id} was not found`);
     await this.prisma.assignment.delete({ where: { id } });
+    await this.rollup.recomputeDay(existing.dayKey);
+    await this.rollup.rebuildLeaderboards(existing.dayKey);
     await this.invalidate(existing.dayKey);
   }
 
