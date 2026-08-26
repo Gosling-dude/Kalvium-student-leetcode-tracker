@@ -82,7 +82,14 @@ jobs:
           echo "::error::Backend did not become healthy."
           exit 1
 
-      - name: Wait for *this* commit to be the one that is deployed
+      # Full history, so the deployed commit can be compared against this one rather than
+      # only matched against it. A shallow clone has neither commit's ancestry and every
+      # comparison below degrades to string equality.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for production to be running this commit's code
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -131,6 +138,31 @@ jobs:
               if [ "$deployed" = "$EXPECTED_SHA" ]; then
                 echo "Deployed commit matches ${EXPECTED_SHA}."
                 exit 0
+              fi
+
+              # Identity was too strict. This host deploys the *latest* commit and skips
+              # the ones in between, so a push that lands while a build is already running
+              # is never itself deployed — it is superseded by a build that contains it.
+              # Waiting for its exact SHA then times out on a deploy that did happen and
+              # did include these changes, which is how this check spent a day reporting a
+              # blocked deployment that had in fact shipped.
+              #
+              # What the assertions below actually need is that production is running
+              # *this code*, not this commit id. So: if the deployed commit is one we know
+              # about, and nothing under the shipped source trees differs between it and
+              # HEAD, the running build contains these changes and the run is meaningful.
+              # A docs-only or workflow-only commit therefore passes immediately instead of
+              # waiting ten minutes for a rebuild that would change nothing.
+              if git cat-file -e "${deployed}^{commit}" 2>/dev/null; then
+                if git diff --quiet "$deployed" "$EXPECTED_SHA" -- apps packages; then
+                  echo "Deployed ${deployed:0:7} differs from ${EXPECTED_SHA:0:7} only outside the shipped source."
+                  echo "Production is running this commit's code — asserting against it."
+                  exit 0
+                fi
+                if git merge-base --is-ancestor "$EXPECTED_SHA" "$deployed"; then
+                  echo "Deployed ${deployed:0:7} is a descendant of ${EXPECTED_SHA:0:7} — it contains these changes."
+                  exit 0
+                fi
               fi
               echo "attempt ${i}: deployed ${deployed}, waiting for ${EXPECTED_SHA}"
             else
