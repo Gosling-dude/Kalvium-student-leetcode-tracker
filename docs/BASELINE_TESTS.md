@@ -138,3 +138,46 @@ POST   /student/baseline-tests/:id/submit
 
 The admin controller carries `@Roles('ADMIN', 'MENTOR')` at the class level rather than per
 method, so a route added later is closed until someone deliberately opens it.
+
+## Student-wise leaderboard
+
+`GET /baseline-tests/:id/leaderboard` — every eligible student, ranked competition-style
+("1224": ties share a rank and the next distinct student skips ahead).
+
+Two decisions are worth knowing about because they are load-bearing:
+
+**The board is built from the eligible roster, not from the attempt rows.** A student who
+never opened the test still gets a line, marked absent. Building it from attempts would
+shrink the denominator and make a test half the cohort skipped look like a test everybody
+took — and "who didn't turn up" is usually the more urgent list. The comparator never ranks
+an absent student above one who sat it and scored nothing: both score 0, and on the
+arithmetic alone the name tiebreak would put the absent student first, which reads as
+though they outperformed someone who showed up.
+
+**Rank is computed across the whole cohort before filtering.** Filter to one squad and its
+members keep their standing among everyone rather than being renumbered 1..n. Rank means
+"how many students did better"; it must not change because someone typed in a search box.
+Summary statistics are cohort-wide for the same reason, and the average is taken over the
+students who actually sat the test — an absent student is not a zero, they are not a
+measurement.
+
+`percent` is `solvedCount / totalQuestions`, deliberately *not* the difficulty-weighted
+score. The columns beside it are counts, so a reader computes 3 of 4 and expects 75%; a
+weighted 67% on the same row would disagree with its own numbers. The weighted figure is
+still carried as `score`/`maxScore` for the mentor report, where difficulty is the point.
+
+Supporting endpoints:
+
+* `GET /baseline-tests/:id/students/:studentId` — one student's result with the
+  per-question ✓/✗ breakdown. Uses the same `percent` definition, so the detail view and
+  the board it was opened from cannot disagree.
+* `GET /reports/export/baseline?testId=…&format=CSV` — the board as a file, in board order,
+  absent students included so the export reconciles with the screen it came from.
+
+### Immutability
+
+Historical results never move. An attempt is graded within its own window
+(`[startedAt, min(expiresAt, submittedAt, now)]`), so a student who solves the fourth
+problem nine days after the test closed still shows 3/4 = 75% — even after a re-grade,
+which is the operation that would rewrite history if the window were not frozen. Their
+current ability is a separate number and belongs on a separate screen.

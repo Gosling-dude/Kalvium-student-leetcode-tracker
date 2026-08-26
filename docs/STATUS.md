@@ -3,35 +3,46 @@
 An honest, feature-by-feature account of what is finished, what is thinner than the
 brief asked for, and what has not been exercised.
 
-## Verified on the build machine
+## Verified
 
 | Check | Result |
 |---|---|
-| `packages/shared` build | pass |
-| `packages/shared` unit tests | **103 passed** (5 files) |
-| `apps/api` unit tests | **23 passed** (rate limiter, retry policy, provider contract) |
-| `apps/api` type-check (`src` + `prisma` + `scripts`) | pass |
+| `packages/shared` unit tests | **312 passed** (12 files) |
+| `apps/api` unit tests | **295 passed** (21 files) |
+| `apps/api` integration tests (real Postgres) | **102 passed** (9 files) |
+| Type-check (`shared` + `api` + `web`) | pass |
 | `apps/api` build (`nest build` → `dist/main.js`) | pass |
-| `apps/web` type-check | pass |
-| `apps/web` build | pass — 9 routes |
-| `prisma validate` | pass |
-| Migration SQL generated (`20260804000000_init`) | 575 lines |
-| Live LeetCode provider smoke test | **8/8 checks pass** |
+| `apps/web` build | pass |
+| Live LeetCode provider smoke test | **8/8 checks pass** against leetcode.com |
+| API booted against Postgres, exercised over HTTP | pass |
+| Production: sync, rollup, report generation, integrity | pass |
 
-## Not verified
+The integration suites need a real database (`DATABASE_URL`) because what they verify *is*
+database behaviour — composite uniqueness, cascade rules, frozen historical placement, and
+that a failed sync does not rewrite stored results. They are kept out of `npm test` so the
+unit suite stays fast and database-free; run them with `npm run test:e2e -w @dsa/api`.
 
-**The API has never been booted against a live database, and the migration has not been
-applied.** The local PostgreSQL 18 on this machine uses `scram-sha-256` and no password
-was available, so every database interaction is unexercised: migration apply, seed,
-sync end-to-end, and all query paths.
+## Verified in production
 
-The schema validates and the migration SQL is generated, but "compiles and validates" is
-not "runs". Treat the first `docker compose up` (or `npm run db:migrate && npm run
-db:seed`) as the real acceptance test.
+The system is live and serving a real cohort. Verified against the deployment, not just
+the build:
 
-Also unexercised: the Docker images have not been built (Docker is not installed here),
-and BullMQ's Redis path has not run (Redis is not installed here — the `inline` driver
-exists partly for this reason).
+- **Sync** — the 3-hourly GitHub Action completes against 130 students, ~113 reading
+  successfully, with real submissions mirrored.
+- **Rollup** — the nightly Action recomputes the closed day and prunes expired tokens.
+- **Auth** — protected endpoints refuse anonymous callers; verified across seven of them
+  on every push by the Production Smoke Test workflow.
+- **Data integrity** — `GET /internal/integrity` reports six should-be-zero invariants
+  from the live database, all zero, asserted on every push.
+
+## Known gaps in production
+
+- **The nightly report generates nothing.** `EMAIL_FROM` and `EMAIL_DEFAULT_TO` are not
+  set on the server, so the Daily Report Generation workflow runs and produces no reports.
+  This was previously silent — the endpoint answered HTTP 200 with an empty result and the
+  workflow showed a green tick. It now fails loudly and the integrity check flags it. Fix
+  by setting both variables; nothing else is required to generate and queue a report.
+  *Sending* an approved report additionally needs `EMAIL_PROVIDER` and `EMAIL_API_KEY`.
 
 ## Complete
 
@@ -42,7 +53,7 @@ exists partly for this reason).
 - **Provider abstraction** — interface, typed error taxonomy, token-bucket rate limiter
   with bounded concurrency, exponential backoff with full jitter, LeetCode
   implementation, and a fake that reproduces the real failure modes.
-- **Database schema** — 24 models with the idempotency constraints the sync depends on.
+- **Database schema** — 25 models with the idempotency constraints the sync depends on.
 - **Sync engine** — incremental cursor, bounded concurrency, per-student status and
   reason codes, retry-failed that skips permanently-broken usernames, live progress,
   queue health, cron scheduling in the program timezone, BullMQ + inline drivers.
@@ -57,6 +68,18 @@ exists partly for this reason).
 - **Dashboard & mentor view** — every headline statistic in the brief, the five
   "solved N" tables with missing questions and a real reason for every zero.
 - **Leaderboards** — student and squad, daily/weekly/monthly, badges, rank deltas, ties.
+- **Baseline tests** — a separate assessment feature with its own tables and no handle on
+  scoring or leaderboards, so a baseline score can never reach a streak or a daily rank.
+  Student-wise leaderboard with competition ranking, search, squad and participation
+  filters, per-question breakdown, and CSV/XLSX export. Every eligible student appears,
+  including those who never started. Historical results are immutable: solving a problem
+  after a test closes does not raise the recorded score.
+- **Access control** — mentors are scoped to the campuses they are granted, enforced
+  server-side on the student directory and the campus/batch student routes. "Not yours"
+  and "does not exist" are answered identically so ids cannot be used to enumerate.
+- **Forced password change** — enforced by a global guard rather than the UI, so an account
+  still on its handed-over password can reach the change-password form and nothing else.
+  This is what makes the optional shared `SEED_STUDENT_PASSWORD` safe.
 - **Analytics** — daily/weekly/monthly trends, difficulty and topic breakdowns, squad
   comparison, top improvers, bottom performers, heatmap endpoint. Charts use a palette
   validated for colour-vision deficiency against this app's own light and dark surfaces.
@@ -82,9 +105,9 @@ exists partly for this reason).
   writes and cannot complete inside an HTTP request. Unlike `POST /sync` it has no job
   row, so progress is not trackable — watch the system log for the completion entry.
   Giving it a `SyncJob`-style record is the natural next improvement.
-- **Tests.** The domain core and the provider layer are covered (126 tests). API
-  integration and E2E tests are not written — they need a live database, which was the
-  blocker described above.
+- **Tests.** The domain core, provider layer, services and guards are covered by 607 unit
+  tests, and 102 integration tests run against a real Postgres. What is still absent is
+  browser-level E2E: the frontend has been verified by hand, not by an automated suite.
 - **Company tags.** Verified premium-gated: the public endpoint returns `null`. The
   column exists and stays empty rather than being filled with invented data.
 - **Runtime / memory per submission.** Not exposed by the public endpoints. Nullable
@@ -95,11 +118,14 @@ exists partly for this reason).
 
 ## Recommended first steps
 
-1. Apply the migration and seed: `docker compose up -d`, or set `DATABASE_URL` and run
-   `npm run db:migrate -w @dsa/api && npm run db:seed -w @dsa/api`.
-2. Change the seeded admin password and set both JWT secrets.
-3. Import a small real cohort (5–10 students) and press **Sync**. Check the
-   "Solved 0" table — any `USER_NOT_FOUND` rows are import typos, and finding them early
-   is much cheaper than discovering them in week three.
-4. Confirm `SYNC_CRON` runs at least every few hours. Read the 20-row explanation in the
-   README before changing it.
+The system is already deployed and syncing. The outstanding actions are:
+
+1. **Set `EMAIL_FROM` and `EMAIL_DEFAULT_TO`** on the backend so the nightly report
+   generates. Add `EMAIL_PROVIDER` and `EMAIL_API_KEY` to enable sending an approved one.
+2. **Grant each mentor their campuses** via `PUT /admin/mentors/:id/campuses`. Existing
+   mentors were granted every campus by the migration, so nobody lost access — narrowing
+   them is a deliberate choice.
+3. **Decide on `SEED_STUDENT_PASSWORD`** before provisioning student logins. Leave it unset
+   for per-student random passwords, or set one shared value to read out to a cohort.
+4. Watch the **Production Smoke Test** workflow. It fails on any non-zero data-integrity
+   invariant, so a red run names the problem rather than needing to be investigated.
