@@ -6,6 +6,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  NotFoundException,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -30,6 +31,7 @@ import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decora
 import { StudentImportService } from './student-import.service';
 import { StudentsService } from './students.service';
 import { CampusesService } from '../campuses/campuses.service';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
 import {
   BulkIdsDto,
   BulkUpdateStudentsDto,
@@ -62,7 +64,25 @@ export class StudentsController {
     private readonly students: StudentsService,
     private readonly importer: StudentImportService,
     private readonly campuses: CampusesService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
+
+  /**
+   * Refuse a student who sits outside the caller's campuses.
+   *
+   * `NotFoundException` rather than `ForbiddenException`, and the same message the route
+   * gives for an id that does not exist: a mentor enumerating student ids should not be
+   * able to tell "this student exists at another campus" from "no such student".
+   */
+  private async assertVisible(user: RequestUser, studentId: string): Promise<void> {
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (allowed === null) return;
+
+    const student = await this.students.campusOf(studentId);
+    if (student === undefined || !this.mentorScope.canSeeCampus(student, allowed)) {
+      throw new NotFoundException(`Student ${studentId} was not found`);
+    }
+  }
 
   /**
    * `?campus=` and `?batch=` accept ids, codes (`SRM`, `A`) or aliases (`foundation`),
@@ -75,7 +95,7 @@ export class StudentsController {
    */
   @Get()
   @ApiOperation({ summary: 'Search, filter and paginate students across campuses' })
-  async findAll(@Query() query: StudentQueryDto) {
+  async findAll(@Query() query: StudentQueryDto, @CurrentUser() user: RequestUser) {
     // Mutated rather than spread: `skip`/`take` are getters on `PaginationQueryDto`, and
     // spreading the instance would silently drop them and paginate from row 0 every time.
     if (query.campus || query.batch) {
@@ -89,6 +109,17 @@ export class StudentsController {
       // cannot carry, since an absent id already means "every batch".
       if (scope.onlyUnassigned) query.unassigned = true;
     }
+
+    // The mission's own example: a caller asking for `/students` must not receive the
+    // whole student database. Applied after the `?campus=` filter is resolved, so an
+    // explicit request for a campus the mentor has no grant on comes back empty rather
+    // than as the mentor's own campuses under someone else's heading.
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    const narrowed = this.mentorScope.narrow(query.campusId, allowed);
+    if (narrowed.deny) return this.students.emptyPage(query);
+    query.campusId = narrowed.campusId;
+    query.campusIds = narrowed.campusIds;
+
     return this.students.findAll(query);
   }
 
@@ -112,13 +143,15 @@ export class StudentsController {
 
   @Get(':id')
   @ApiOperation({ summary: 'A single student' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertVisible(user, id);
     return this.students.findOne(id);
   }
 
   @Get(':id/profile')
   @ApiOperation({ summary: 'Full student profile: level, badges, heatmap, history' })
-  profile(@Param('id', ParseUUIDPipe) id: string) {
+  async profile(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertVisible(user, id);
     return this.students.getProfile(id);
   }
 

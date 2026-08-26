@@ -186,6 +186,15 @@ export class StudentQueryDto extends PaginationQueryDto {
   @IsUUID()
   campusId?: string;
 
+  /**
+   * The campuses this caller is allowed to read, set by the controller from their mentor
+   * grants. Deliberately **not** decorated for validation and not documented in Swagger:
+   * it is not an input. `ValidationPipe` runs with `whitelist`, so a client that sends
+   * `campusIds` has it stripped before the controller ever sees the object — a mentor
+   * cannot widen their own scope by adding a query parameter.
+   */
+  campusIds?: string[];
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()

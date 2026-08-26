@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { CampusesService } from './campuses.service';
+import { MentorScopeService } from './mentor-scope.service';
 
 /**
  * The campus *domain* service, with no module dependencies of its own.
@@ -11,7 +12,7 @@ import { CampusesService } from './campuses.service';
  * The HTTP layer lives in `CampusesHttpModule`.
  */
 @Module({
-  providers: [CampusesService],
-  exports: [CampusesService],
+  providers: [CampusesService, MentorScopeService],
+  exports: [CampusesService, MentorScopeService],
 })
 export class CampusesModule {}

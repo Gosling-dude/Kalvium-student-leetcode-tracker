@@ -11,14 +11,18 @@ import {
   HttpCode,
   HttpStatus,
   Module,
+  NotFoundException,
   Param,
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsHexColor,
   IsOptional,
@@ -73,6 +77,14 @@ class RecomputeDto {
    * wrong from the start (a fixed upstream data bug), never for routine recomputation.
    */
   @IsOptional() @IsBoolean() force?: boolean;
+}
+
+/** The complete campus access list for one mentor. */
+class SetMentorCampusesDto {
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsUUID('4', { each: true })
+  campusIds!: string[];
 }
 
 @ApiTags('Admin')
@@ -258,9 +270,60 @@ export class AdminController {
         isActive: true,
         lastLoginAt: true,
         _count: { select: { mentoredSquads: true } },
+        // Which campuses this mentor may read. Shown in the list rather than behind a
+        // second call, because "who can see whom" is the question an admin opens this
+        // screen to answer.
+        mentorCampuses: { select: { campus: { select: { id: true, name: true, code: true } } } },
       },
       orderBy: { name: 'asc' },
     });
+  }
+
+  @Put('mentors/:id/campuses')
+  @Audit('MENTOR_CAMPUSES_SET', 'User')
+  @ApiOperation({
+    summary: 'Set which campuses a mentor may read',
+    description:
+      'Replaces the whole grant list, so the request body is the mentor\'s complete ' +
+      'access after the call — no separate revoke endpoint to forget. An empty list ' +
+      'leaves the mentor able to see no students, which is deliberate: that is the ' +
+      'correct failure direction for an access rule.',
+  })
+  async setMentorCampuses(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetMentorCampusesDto,
+  ) {
+    const mentor = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, role: true },
+    });
+    if (!mentor) throw new NotFoundException(`User ${id} was not found`);
+    if (mentor.role === 'ADMIN') {
+      // Not an error worth failing on, but worth saying plainly: granting campuses to an
+      // admin would imply the list constrains them, and it never does.
+      throw new BadRequestException(
+        'Admins read every campus by definition — campus grants only apply to mentors.',
+      );
+    }
+
+    const campusIds = [...new Set(dto.campusIds)];
+    const existing = await this.prisma.campus.findMany({
+      where: { id: { in: campusIds } },
+      select: { id: true },
+    });
+    if (existing.length !== campusIds.length) {
+      throw new BadRequestException('One or more campuses do not exist.');
+    }
+
+    // Replace as one transaction: a half-applied grant list is a half-applied access rule.
+    await this.prisma.$transaction([
+      this.prisma.mentorCampus.deleteMany({ where: { userId: id } }),
+      this.prisma.mentorCampus.createMany({
+        data: campusIds.map((campusId) => ({ userId: id, campusId })),
+      }),
+    ]);
+
+    return { userId: id, campusIds };
   }
 
   // --- Scoring formula -----------------------------------------------------

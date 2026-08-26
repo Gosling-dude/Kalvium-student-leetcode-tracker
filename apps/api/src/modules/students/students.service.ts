@@ -82,6 +82,32 @@ export class StudentsService {
     );
   }
 
+  /**
+   * Which campus a student sits at, or `undefined` when there is no such student.
+   *
+   * The two are kept apart so the caller can answer both with the *same* response —
+   * "not found" and "not yours" must be indistinguishable, or student ids become an
+   * oracle for which students exist at campuses you cannot see.
+   */
+  async campusOf(id: string): Promise<string | null | undefined> {
+    const student = await this.prisma.student.findUnique({
+      where: { id },
+      select: { campusId: true },
+    });
+    return student === null ? undefined : student.campusId;
+  }
+
+  /**
+   * A well-formed empty page, for a caller whose scope excludes everything they asked for.
+   *
+   * Returned instead of running the query at all: an empty result and a 403 tell a prober
+   * different things, and only one of them is the caller's business. Built with the same
+   * `paginate` helper as a real result so the two can never disagree about the envelope.
+   */
+  emptyPage(query: StudentQueryDto): Paginated<StudentSummary> {
+    return paginate([], 0, query.page, query.pageSize);
+  }
+
   async findOne(id: string): Promise<StudentSummary> {
     const student = await this.prisma.student.findUnique({
       where: { id },
@@ -671,7 +697,15 @@ export class StudentsService {
     return {
       ...archiveScope,
       ...(query.squadId ? { squadId: query.squadId } : {}),
-      ...(query.campusId ? { campusId: query.campusId } : {}),
+      // A single campus when one was asked for and permitted; otherwise the set the
+      // caller may read. `campusIds` is set by the controller from the mentor's grants —
+      // never from client input — so a mentor cannot widen their own scope with a query
+      // parameter.
+      ...(query.campusId
+        ? { campusId: query.campusId }
+        : query.campusIds
+          ? { campusId: { in: query.campusIds } }
+          : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
       ...(query.squadNumber !== undefined
         ? // Squad names are stored as "Squad 144"; matching the number alone would also

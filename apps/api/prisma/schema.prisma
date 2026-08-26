@@ -246,6 +246,7 @@ model User {
 
   student                   Student?                   @relation(fields: [studentId], references: [id], onDelete: SetNull)
   mentoredSquads            Squad[]                    @relation("SquadMentor")
+  mentorCampuses            MentorCampus[]
   assignments               Assignment[]               @relation("AssignmentAuthor")
   notes                     MentorNote[]
   auditLogs                 AuditLog[]
@@ -357,6 +358,7 @@ model Campus {
   batches             Batch[]
   squads              Squad[]
   students            Student[]
+  mentors             MentorCampus[]
   assignments         Assignment[]
   assignmentsOriginal Assignment[]               @relation("AssignmentOriginalCampus")
   dailyStatuses       DailyStatus[]
@@ -372,6 +374,35 @@ model Campus {
   @@index([status])
   @@index([sortOrder])
   @@map("campuses")
+}
+
+/// Which campuses a mentor may see.
+///
+/// Authorization, not presentation. `Squad.mentorId` already records who runs a squad, but
+/// nothing ever read it to decide what a mentor could fetch — every MENTOR could list every
+/// student at every campus. Campus is the level the programme is actually organised at, so
+/// it is the level access is granted at.
+///
+/// A mentor with no rows here sees no students. That is the correct failure direction for
+/// an access rule, and it is why the migration that introduces this table grants every
+/// existing mentor every existing campus: the rule arrives enforcing exactly today's
+/// behaviour, and narrowing it is a deliberate admin action rather than a side effect of a
+/// deploy. ADMIN is never consulted — admins are unrestricted by definition.
+model MentorCampus {
+  id       String @id @default(uuid()) @db.Uuid
+  userId   String @db.Uuid
+  campusId String @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campus Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// One grant per mentor per campus — re-granting is idempotent rather than duplicated.
+  @@unique([userId, campusId])
+  @@index([userId])
+  @@index([campusId])
+  @@map("mentor_campuses")
 }
 
 /// A batch is a first-class organisational unit, not a label on a student, and it is
