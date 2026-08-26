@@ -16,9 +16,10 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Check, Download, Search, X } from 'lucide-react';
+import { toast } from 'sonner';
 import type { BaselineLeaderboardRow } from '@dsa/shared';
 
-import { api } from '@/lib/api';
+import { api, downloadFile } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Badge,
@@ -60,10 +61,28 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
   const [direction, setDirection] = useState<'asc' | 'desc'>('asc');
   const [selected, setSelected] = useState<BaselineLeaderboardRow | null>(null);
 
+  const [exporting, setExporting] = useState(false);
+
   const board = useQuery({
     queryKey: ['baseline-leaderboard', testId, search, squad, status, sort, direction],
     queryFn: () => api.baselineLeaderboard(testId, { search, squad, status, sort, direction }),
   });
+
+  // The squad filter carries into the file, so what you exported is what you were
+  // looking at.
+  const download = async (): Promise<void> => {
+    setExporting(true);
+    try {
+      await downloadFile(
+        `/reports/export/baseline?testId=${testId}&format=CSV${squad ? `&squad=${encodeURIComponent(squad)}` : ''}`,
+        `baseline-${testId}.csv`,
+      );
+    } catch {
+      toast.error('Could not export', { description: 'The download failed. Please try again.' });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const onSort = (key: SortKey): void => {
     if (sort === key) {
@@ -102,15 +121,12 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
         title="Student leaderboard"
         description="Every eligible student, ranked. Absent students are listed too — a board built only from attempts hides how many people skipped the test."
         action={
-          <a
-            href={`${process.env.NEXT_PUBLIC_API_URL ?? ''}/reports/export/baseline?testId=${testId}&format=CSV`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <Button variant="ghost">
-              <Download className="size-3.5" aria-hidden /> CSV
-            </Button>
-          </a>
+          // Fetched with the access token and saved from a blob, not linked. The export
+          // endpoint is authenticated, and a plain <a href> carries no Authorization
+          // header — it would download a 401 body as a .csv file.
+          <Button variant="ghost" onClick={() => void download()} loading={exporting}>
+            <Download className="size-3.5" aria-hidden /> CSV
+          </Button>
         }
       />
 
