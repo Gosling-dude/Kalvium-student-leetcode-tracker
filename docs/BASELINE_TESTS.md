@@ -181,3 +181,57 @@ Historical results never move. An attempt is graded within its own window
 problem nine days after the test closed still shows 3/4 = 75% — even after a re-grade,
 which is the operation that would rewrite history if the window were not frozen. Their
 current ability is a separate number and belongs on a separate screen.
+
+## Performance vs participation
+
+The single most important distinction in this feature, and the one whose absence made an
+entire cohort read 0/4 on problems many of them had solved.
+
+| | Question | Source | Time filter |
+|---|---|---|---|
+| **Performance** | Can this student solve these problems? | submission mirror | **none** |
+| **Participation** | Did they sit the test? | `BaselineTestAttempt` | the attempt window |
+
+`solvedCount` on the leaderboard is performance. `status` is participation. A student can be
+`NOT_STARTED` *and* 3/4 — both true, neither implying the other.
+
+### What went wrong
+
+`solvedCount` was read from `BaselineTestAttempt.solvedCount`, and an attempt row only
+exists once a student presses Start in the portal. On a test nobody opened there were no
+attempts, so every student defaulted to zero:
+
+    eligible 99   attempts 0   problems 4
+    students holding an accepted solution: 14   (40 accepted submissions)
+
+The 60-minute duration was a *second* bug underneath — `gradeAttemptById` filters
+submissions to `[startedAt, min(expiresAt, submittedAt, now)]`, so it would have discarded
+those same solutions the moment attempts existed. Both are fixed; fixing only the visible
+one leaves the other waiting.
+
+### Why this does not break immutability
+
+"Credit solutions written at any time" and "solving Q3 later must not change the recorded
+3/4" look contradictory and are not — they describe different numbers:
+
+* `inWindowSolvedCount` — what the sitting measured. Frozen. Solving a problem afterwards
+  never moves it, and neither does a re-grade.
+* `solvedCount` — what the student can do now. Rises when they solve something later.
+
+Both are on the row, and the student detail shows the two side by side when they differ.
+
+### Ranking
+
+By performance, not attendance: a student who solved three of four and never opened the
+test outranks one who sat it and solved none. What sinks is a student we have **never**
+successfully synced — their 0 is an absence of evidence, so they rank last and render as
+"Not synced" rather than 0%, never coloured as a bad result. Submission presence counts as
+independent proof of measurement, since rows in the mirror could only be written by a read
+that succeeded.
+
+### Where it is enforced
+
+`computeGeneralPerformance` in `@dsa/shared` is the whole rule, pure and unit-tested. The
+service loads submissions for the eligible roster in one query and applies it. The
+production smoke test fails the build if a test's mirror holds accepted solutions while its
+leaderboard reports nobody solving anything — the bug stated as an assertion.

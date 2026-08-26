@@ -37,6 +37,11 @@ the build:
 
 ## Known gaps in production
 
+- **78 new students are prepared but not imported.** Squads 69/70/71/112. Every row is
+  blocked on a missing email address, and the existing roster gives no rule that would
+  derive one safely (three name conventions, two squad formats). No addresses were
+  invented. See `tmp/import/README.md` for the prepared file, the live profile-validation
+  results and the steps.
 - **The nightly report generates nothing.** `EMAIL_FROM` and `EMAIL_DEFAULT_TO` are not
   set on the server, so the Daily Report Generation workflow runs and produces no reports.
   This was previously silent — the endpoint answered HTTP 200 with an empty result and the
