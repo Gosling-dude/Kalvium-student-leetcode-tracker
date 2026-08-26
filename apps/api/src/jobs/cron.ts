@@ -44,7 +44,15 @@ async function main(): Promise<void> {
     } else if (task === 'rollup') {
       await tasks.runNightlyRollup();
     } else {
-      await tasks.runDailyReportGeneration(process.argv[3]);
+      {
+        const result = await tasks.runDailyReportGeneration(process.argv[3]);
+        // Same rule as the HTTP endpoint: a run that generated nothing exits non-zero, so
+        // a scheduler surfaces it instead of recording a success.
+        if (result.skipped !== null) {
+          console.error(`Daily report generation produced nothing: ${result.skipped}`);
+          process.exitCode = 1;
+        }
+      }
     }
   } finally {
     await app.close();

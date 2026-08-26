@@ -14,10 +14,11 @@
  * being a check.
  */
 
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
+import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
 
 export interface IntegrityFinding {
   /** Stable key, so a smoke test asserts on this rather than on prose. */
@@ -55,6 +56,10 @@ export interface IntegrityReport {
   email: {
     pendingApproval: number;
     sentLast7Days: number;
+    /** Whether the nightly automation can actually produce a report. */
+    fromConfigured: boolean;
+    defaultRecipients: number;
+    providerConfigured: boolean;
   };
   findings: IntegrityFinding[];
 }
@@ -64,6 +69,7 @@ export class IntegrityService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
+    @Inject(CONFIG_TOKEN) private readonly config: AppConfig,
   ) {}
 
   async report(): Promise<IntegrityReport> {
@@ -107,7 +113,11 @@ export class IntegrityService {
     const byStatus: Record<string, number> = {};
     for (const row of syncStates) byStatus[row.status] = row._count._all;
 
-    const findings = await this.findings();
+    const email = this.config.email;
+    const findings = await this.findings({
+      fromConfigured: Boolean(email.fromEmail),
+      recipients: email.defaultTo.length,
+    });
 
     return {
       ok: findings.every((finding) => !finding.shouldBeZero || finding.count === 0),
@@ -131,12 +141,21 @@ export class IntegrityService {
         baselineTests,
         submissions,
       },
-      email: { pendingApproval, sentLast7Days: sentRecently },
+      email: {
+        pendingApproval,
+        sentLast7Days: sentRecently,
+        fromConfigured: Boolean(email.fromEmail),
+        defaultRecipients: email.defaultTo.length,
+        providerConfigured: email.provider !== 'none',
+      },
       findings,
     };
   }
 
-  private async findings(): Promise<IntegrityFinding[]> {
+  private async findings(email: {
+    fromConfigured: boolean;
+    recipients: number;
+  }): Promise<IntegrityFinding[]> {
     const [
       batchWithoutHistory,
       campusWithoutHistory,
@@ -172,6 +191,20 @@ export class IntegrityService {
     ]);
 
     return [
+      {
+        // Not a data defect — a configuration one, but it belongs here because it is
+        // invisible everywhere else. The nightly report workflow answered HTTP 200 with an
+        // empty result for days: a green tick over an automation producing nothing. A
+        // status code cannot see that; this can.
+        check: 'daily_report_automation_cannot_run',
+        count: email.fromConfigured && email.recipients > 0 ? 0 : 1,
+        shouldBeZero: true,
+        detail:
+          'EMAIL_FROM and/or EMAIL_DEFAULT_TO are not set on the server, so the nightly ' +
+          'report generates nothing. Set both, then re-run the Daily Report Generation ' +
+          'workflow. (Sending additionally needs EMAIL_PROVIDER and EMAIL_API_KEY; ' +
+          'without them a report is still generated and still waits for approval.)',
+      },
       {
         check: 'students_with_batch_but_no_placement_history',
         count: batchWithoutHistory,

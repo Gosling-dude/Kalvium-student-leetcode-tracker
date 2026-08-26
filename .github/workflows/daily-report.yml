@@ -4,6 +4,11 @@ name: Daily Report Generation
 # it never sends anything. A mentor/admin still has to open Email Reports and click
 # "Approve & Send". See docs/DAILY_EMAIL_REPORTING.md#approval-workflow.
 #
+# The job fails when the run generates nothing. That is not pedantry: this workflow spent
+# days reporting success while producing no reports at all, because the endpoint answered
+# HTTP 200 with an empty list when EMAIL_FROM was unset. A nightly automation that silently
+# does nothing looks exactly like one that works.
+#
 # Scheduled to run after Nightly Rollup (19:00 UTC) so the day's DailyStatus rows are
 # final before the report reads them. 19:20 UTC == 00:50 Asia/Kolkata. Adjust alongside
 # rollup.yml if PROGRAM_TIMEZONE changes.
@@ -79,6 +84,15 @@ jobs:
             fi
             if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
               echo "::error::Unauthorized (${http_code}). Check the CRON_SECRET secret matches the backend."
+              exit 1
+            fi
+            # 503 means the run completed and generated nothing — almost always EMAIL_FROM
+            # / EMAIL_DEFAULT_TO missing on the server. Retrying cannot fix a missing
+            # environment variable, and this is exactly the case that used to answer 200
+            # with an empty result and show a green tick over an automation producing
+            # nothing, every night, unnoticed.
+            if [ "$http_code" = "503" ]; then
+              echo "::error::The report run generated nothing. See the response body above — it names the reason."
               exit 1
             fi
             if [ "$i" -lt "$attempts" ]; then

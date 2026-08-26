@@ -10,7 +10,15 @@
  * calling Action sees a real success/failure rather than a fire-and-forget 202.
  */
 
-import { Body, Controller, Get, HttpCode, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Post,
+  ServiceUnavailableException,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 
 import { Public } from '../../common/decorators';
@@ -71,15 +79,34 @@ export class InternalController {
   @Post('daily-report')
   @HttpCode(200)
   async dailyReport(@Body() body: { dayKey?: string }) {
-    // One report per active batch; an empty result means nothing could be generated.
-    const reports = await this.tasks.runDailyReportGeneration(body?.dayKey);
-    return reports.length > 0
-      ? { ok: true, ran: true, generated: reports.length, emailReports: reports }
-      : {
-          ok: true,
-          ran: false,
-          reason:
-            'No reports were generated — check that EMAIL_FROM / EMAIL_DEFAULT_TO are configured.',
-        };
+    const result = await this.tasks.runDailyReportGeneration(body?.dayKey);
+
+    if (result.skipped === null) {
+      return {
+        ok: true,
+        ran: true,
+        generated: result.generated.length,
+        emailReports: result.generated,
+      };
+    }
+
+    // `ok: false` with a 200 body would be a contradiction the calling workflow has to
+    // parse to notice. A nightly automation that generated nothing has failed, so it
+    // answers like a failure — the Action's retry/alert path is the whole reason this
+    // endpoint reports a real outcome instead of a fire-and-forget 202.
+    const reason =
+      result.skipped === 'EMAIL_NOT_CONFIGURED'
+        ? 'No reports were generated: EMAIL_FROM and/or EMAIL_DEFAULT_TO are not configured on the server.'
+        : 'No reports were generated: every batch failed. See the server log and audit entries.';
+
+    // `message` rather than a custom key, so the reason reaches the client: the exception
+    // filter renders `message` and would otherwise print "Service Unavailable Exception"
+    // over a diagnosis the operator needs.
+    throw new ServiceUnavailableException({
+      ok: false,
+      ran: false,
+      code: result.skipped,
+      message: reason,
+    });
   }
 }

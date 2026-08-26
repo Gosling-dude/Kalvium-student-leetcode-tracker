@@ -19,6 +19,20 @@ import { EmailReportsService } from '../email-reports/email-reports.service';
 import { NotificationsService } from '../notifications/notifications.module';
 import { BatchesService } from '../batches/batches.service';
 
+/**
+ * Why a daily-report run produced nothing, when it produced nothing.
+ *
+ * `null` alongside a non-empty `generated` is the healthy case. The named reasons exist so
+ * the caller can fail loudly: an automation that quietly generates zero reports every
+ * night is indistinguishable from one that is working, unless it says so.
+ */
+export type DailyReportSkipReason = 'EMAIL_NOT_CONFIGURED' | 'GENERATION_FAILED';
+
+export interface DailyReportGenerationResult {
+  generated: EmailReportRecord[];
+  skipped: DailyReportSkipReason | null;
+}
+
 export interface RollupResult {
   dayKey: string;
   prunedTokens: number;
@@ -104,15 +118,19 @@ export class CronTasksService {
    * Runs against *yesterday* by default, same as the rollup, and should be scheduled
    * after it: this is only useful once that day's `DailyStatus` rows are final.
    */
-  async runDailyReportGeneration(dayKey?: DayKey): Promise<EmailReportRecord[]> {
+  async runDailyReportGeneration(dayKey?: DayKey): Promise<DailyReportGenerationResult> {
     const day = dayKey ?? this.time.yesterday();
 
     const { fromEmail, defaultTo, defaultCc } = this.config.email;
     if (!fromEmail || defaultTo.length === 0) {
-      this.logger.warn(
+      // Reported as a distinct outcome rather than an empty list, because the caller has
+      // to be able to fail on it. This ran nightly in production for days, returned
+      // HTTP 200 with an empty result, and showed a green tick over an automation that
+      // was producing nothing — the exact shape of failure that a status code cannot see.
+      this.logger.error(
         `Skipping automated report for ${day}: EMAIL_FROM and/or EMAIL_DEFAULT_TO are not configured.`,
       );
-      return [];
+      return { generated: [], skipped: 'EMAIL_NOT_CONFIGURED' };
     }
 
     // One report per active batch *that has students*, so mentors receive a Foundation
@@ -187,6 +205,11 @@ export class CronTasksService {
       }
     }
 
-    return generated;
+    // Configured, targets resolved, and still nothing came back: every batch's generation
+    // threw. Individually logged above, but the run as a whole did not do its job.
+    return {
+      generated,
+      skipped: generated.length === 0 ? 'GENERATION_FAILED' : null,
+    };
   }
 }

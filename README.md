@@ -185,10 +185,21 @@ build (redeploy Vercel if it changes), and **never set `PORT`** (Render injects 
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | Backend | ✅ | First admin; change the password after first login. |
 | `PROGRAM_TIMEZONE` | Backend | ✅ | e.g. `Asia/Kolkata`. All day boundaries resolve here. |
 | `SWAGGER_ENABLED` | Backend | ➖ | `false` by default in production; `true` to expose `/api/v1/docs`. |
-| `EMAIL_PROVIDER` / `EMAIL_API_KEY` / `EMAIL_FROM` | Backend | ➖ | Enables the daily report email send. See [docs/DAILY_EMAIL_REPORTING.md](docs/DAILY_EMAIL_REPORTING.md). |
+| `EMAIL_FROM` / `EMAIL_DEFAULT_TO` | Backend | ⚠️ | **Required for the nightly report to generate anything at all.** Without both, the Daily Report Generation workflow runs and produces nothing. `EMAIL_DEFAULT_TO` is comma-separated; `EMAIL_DEFAULT_CC` is optional. |
+| `EMAIL_PROVIDER` / `EMAIL_API_KEY` | Backend | ➖ | Needed only to *send* an approved report. Without them reports are still generated and still wait for approval. See [docs/DAILY_EMAIL_REPORTING.md](docs/DAILY_EMAIL_REPORTING.md). |
+| `SEED_STUDENT_PASSWORD` | Backend | ➖ | One shared initial password for newly provisioned student logins. Unset (default) gives each student their own random password. Must satisfy the password policy or the API refuses to boot. Safe only because an unchanged initial password can reach nothing but the change-password form. |
 
 GitHub Actions secrets (Repo → Settings → Secrets and variables → Actions): `BACKEND_URL`
 (the Render base URL, no `/api/v1`) and `CRON_SECRET` (same value as the backend).
+
+**Checking a deployment.** The *Production Smoke Test* workflow runs on every push to
+`main` and can be run on demand. It waits for the pushed commit to actually be the one
+serving traffic (a healthy `/health` only proves *a* version is up), asserts that the
+endpoints holding student data refuse an anonymous caller, and then fails the run on any
+non-zero data-integrity invariant reported by `GET /api/v1/internal/integrity` — students
+carrying a batch no report can see, scored days naming an assignment that no longer exists,
+mentors with no campus grant, and whether the nightly report is configured to produce
+anything. It reads production and writes nothing.
 See [.env.example](.env.example) for the complete local list.
 
 ---
