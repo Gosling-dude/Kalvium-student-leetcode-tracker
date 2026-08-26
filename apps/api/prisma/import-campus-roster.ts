@@ -309,9 +309,10 @@ async function main(): Promise<void> {
       const owner = ownerByHandle.get(handle);
       if (owner && owner.email !== student.email) {
         reconciliation.handleConflicts.push({
-          email: student.email,
+          // A student without an email is still reportable — identified by name instead.
+          email: student.email ?? `(no email) ${student.name}`,
           handle,
-          ownedBy: owner.email,
+          ownedBy: owner.email ?? `(no email) ${owner.name}`,
         });
       }
     }

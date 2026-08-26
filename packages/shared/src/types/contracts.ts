@@ -177,7 +177,8 @@ export interface SquadSummary {
 export interface StudentSummary {
   id: string;
   name: string;
-  email: string;
+  /** Null when the roster has not supplied one yet. */
+  email: string | null;
   phone: string | null;
   /** Null when no LeetCode account has been linked yet — see the schema note. */
   leetcodeUsername: string | null;
@@ -473,7 +474,8 @@ export interface MentorProblemOutcome {
 export interface MentorBucketRow {
   studentId: string;
   name: string;
-  email: string;
+  /** Null when the roster has not supplied one yet. */
+  email: string | null;
   squadName: string | null;
   /** The campus the student was in *on this day*, not their campus now. */
   campusName: string | null;
@@ -779,7 +781,14 @@ export interface ImportResult {
   created: number;
   updated: number;
   skipped: number;
+  /** Rows that could not become a student. Nothing was written for these. */
   errors: ImportRowError[];
+  /**
+   * Rows that *were* imported but need a human to follow up — almost always an unusable
+   * LeetCode profile. Kept apart from `errors` because an invalid profile is not an
+   * invalid person: the student exists and is tracked, their handle just needs chasing.
+   */
+  warnings: ImportRowError[];
   /** Batches and squads auto-created because the sheet referenced them. */
   createdBatches: string[];
   createdSquads: string[];
@@ -836,7 +845,8 @@ export interface BlockerRecord {
 export interface DailyEmailReportStudentRow {
   studentId: string;
   name: string;
-  email: string;
+  /** Null when the roster has not supplied one yet. */
+  email: string | null;
   squadName: string | null;
   /** The batch the student was in on the reported day — historical, not current. */
   batchName: string | null;
@@ -878,7 +888,7 @@ export interface DailyEmailReportActionGroup {
   emoji: string;
   title: string;
   count: number;
-  students: { studentId: string; name: string; email: string }[];
+  students: { studentId: string; name: string; email: string | null }[];
 }
 
 export interface DailyEmailBlockerSummaryEntry {
@@ -1248,7 +1258,8 @@ export interface BaselineAttemptSummary {
   testId: string;
   studentId: string;
   studentName: string;
-  studentEmail: string;
+  /** Null when the roster has not supplied one yet. */
+  studentEmail: string | null;
   campusId: string | null;
   campusName: string | null;
   batchId: string | null;
@@ -1295,7 +1306,8 @@ export interface BaselineLeaderboardRow {
   isTied: boolean;
   studentId: string;
   studentName: string;
-  studentEmail: string;
+  /** Null when the roster has not supplied one yet. */
+  studentEmail: string | null;
   squadName: string | null;
   campusName: string | null;
   batchName: string | null;
@@ -1382,7 +1394,8 @@ export interface BaselineStudentResult {
   dayKey: string;
   studentId: string;
   studentName: string;
-  studentEmail: string;
+  /** Null when the roster has not supplied one yet. */
+  studentEmail: string | null;
   squadName: string | null;
   campusName: string | null;
   batchName: string | null;

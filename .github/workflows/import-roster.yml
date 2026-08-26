@@ -1,0 +1,129 @@
+name: Import Roster
+
+# Imports a student roster into production.
+#
+# The roster is held in the ALLIANCE_ROSTER repository *secret*, never in the repository
+# itself: this repo is public and a roster carries students' names, register numbers and
+# LeetCode handles. GitHub masks secret values in logs, so the data reaches production
+# without ever being committed or printed.
+#
+# Manual only. Defaults to a dry run, which reports exactly what would change and writes
+# nothing — always look at that before setting dry-run to false.
+on:
+  workflow_dispatch:
+    inputs:
+      campusCode:
+        description: 'Campus these students belong to (e.g. SRM, VELS)'
+        required: true
+        type: string
+      dryRun:
+        description: 'Report what would change without writing'
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: import-roster
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    name: Import roster
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate configuration
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ROSTER: ${{ secrets.ALLIANCE_ROSTER }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -z "${BACKEND_URL:-}" ] && { echo "::error::BACKEND_URL is not set"; missing=1; }
+          [ -z "${CRON_SECRET:-}" ] && { echo "::error::CRON_SECRET is not set"; missing=1; }
+          [ -z "${ROSTER:-}" ]      && { echo "::error::ALLIANCE_ROSTER is not set"; missing=1; }
+          [ "$missing" -eq 1 ] && exit 1
+          echo "Configuration present."
+
+      - name: Import
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ROSTER: ${{ secrets.ALLIANCE_ROSTER }}
+          CAMPUS: ${{ inputs.campusCode }}
+          DRY_RUN: ${{ inputs.dryRun }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+
+          # Build the payload in Python rather than the shell: names contain spaces and
+          # punctuation, and hand-rolled JSON quoting is how a roster gets silently mangled.
+          python3 - <<'PY'
+          import csv, io, json, os
+
+          roster = os.environ['ROSTER']
+          rows = []
+          for row in csv.DictReader(io.StringIO(roster)):
+              lower = { (k or '').strip().lower(): (v or '').strip() for k, v in row.items() }
+              name = lower.get('name', '')
+              if not name:
+                  continue
+              rows.append({
+                  'name': name,
+                  'email': lower.get('email', ''),
+                  'squad': lower.get('squad', ''),
+                  'batch': lower.get('batch', ''),
+                  'leetcode': lower.get('leetcode', '') or lower.get('leetcode username', ''),
+                  'registerNumber': lower.get('registernumber', '') or lower.get('register number', ''),
+                  'phone': lower.get('phone', ''),
+              })
+
+          payload = {
+              'campusCode': os.environ['CAMPUS'],
+              'dryRun': os.environ['DRY_RUN'] == 'true',
+              'updateExisting': True,
+              'rows': rows,
+          }
+          with open('/tmp/payload.json', 'w') as handle:
+              json.dump(payload, handle)
+          # Count only — never the rows themselves.
+          print(f"prepared {len(rows)} row(s) for campus {payload['campusCode']}, "
+                f"dryRun={payload['dryRun']}")
+          PY
+
+          code=$(curl -sS -o /tmp/result.json -w '%{http_code}' \
+            --connect-timeout 30 --max-time 600 \
+            -X POST "${base}/api/v1/internal/import-roster" \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H 'Content-Type: application/json' \
+            --data @/tmp/payload.json || echo "000")
+
+          echo "HTTP ${code}"
+          if [ "$code" != "200" ]; then
+            echo "::error::Import failed."
+            # The body can echo a row, so print only the message.
+            python3 -c "import json;d=json.load(open('/tmp/result.json'));print(d.get('message','(no message)'))" || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          r = json.load(open('/tmp/result.json'))
+          print(f"total rows : {r['totalRows']}")
+          print(f"created    : {r['created']}")
+          print(f"updated    : {r['updated']}")
+          print(f"errors     : {len(r.get('errors', []))}")
+          print(f"warnings   : {len(r.get('warnings', []))}")
+          for label, key in (('ERROR', 'errors'), ('WARN', 'warnings')):
+              for item in r.get(key, []):
+                  # Row number and reason only. `data` carries the student's own details.
+                  print(f"  {label} row {item['row']} [{item.get('field')}]: {item['message']}")
+          if r.get('createdSquads'):
+              print(f"squads created: {', '.join(r['createdSquads'])}")
+          if r.get('errors'):
+              raise SystemExit('::error::Some rows could not be imported.')
+          PY

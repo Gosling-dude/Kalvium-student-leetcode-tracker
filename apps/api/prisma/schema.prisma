@@ -515,7 +515,22 @@ model Squad {
 model Student {
   id                  String        @id @default(uuid()) @db.Uuid
   name                String
-  email               String        @unique
+  /// Institutional email, and the identity the importer keys on when it is known.
+  ///
+  /// Nullable because a roster can arrive without it, and a student who exists in the
+  /// programme must exist in the system — an unknown email is a missing *field*, not a
+  /// missing person. It is never invented: the conventions in use are inconsistent
+  /// (`first.last.s.NNN`, `first.initial.sNN`, `last.first.sNN`), so a derived address
+  /// would be wrong often enough to create students who cannot log in and who the later
+  /// correct import duplicates rather than updates.
+  ///
+  /// Still `@unique`: Postgres permits many NULLs under a unique index, so this keeps
+  /// real addresses distinct while letting unknown ones coexist. A student with no email
+  /// simply has no portal login until one is supplied.
+  email               String?       @unique
+  /// Institutional register/roll number, where the roster carries one. A second stable
+  /// identity for import matching when email is not yet known.
+  registerNumber      String?       @unique
   phone               String?
   /// Stored lowercase; LeetCode usernames are case-insensitive for lookup but the
   /// API echoes back the canonical casing, which we keep in `leetcodeDisplayName`.

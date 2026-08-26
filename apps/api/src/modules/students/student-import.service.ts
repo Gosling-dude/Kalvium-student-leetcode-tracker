@@ -36,7 +36,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { BatchesService } from '../batches/batches.service';
 
-interface ParsedRow {
+export interface ParsedRow {
   rowNumber: number;
   name: string;
   email: string;
@@ -45,6 +45,8 @@ interface ParsedRow {
   leetcodeUsername: string;
   /** Exactly what the sheet held, before any handle extraction — used in error messages. */
   rawLeetcode: string | null;
+  /** Institutional register/roll number, when the sheet carries one. */
+  registerNumber: string | null;
   phone: string | null;
 }
 
@@ -66,9 +68,24 @@ export class StudentImportService {
     buffer: Buffer,
     options: { dryRun?: boolean; updateExisting?: boolean; campusId?: string } = {},
   ): Promise<ImportResult> {
+    return this.importRows(await this.parseWorkbook(buffer), options);
+  }
+
+  /**
+   * Import already-parsed rows.
+   *
+   * Split out from `import` so a roster can arrive as something other than a spreadsheet —
+   * the internal roster endpoint takes JSON — without either path growing its own copy of
+   * the validation, de-duplication and placement rules. The workbook parser is now the
+   * only thing `import` adds.
+   */
+  async importRows(
+    rows: ParsedRow[],
+    options: { dryRun?: boolean; updateExisting?: boolean; campusId?: string } = {},
+  ): Promise<ImportResult> {
     const campusId = await this.resolveImportCampus(options.campusId);
-    const rows = await this.parseWorkbook(buffer);
     const errors: ImportRowError[] = [];
+    const warnings: ImportRowError[] = [];
     const valid: ParsedRow[] = [];
 
     // Duplicates *within the sheet* are caught here; duplicates against the database
@@ -77,26 +94,34 @@ export class StudentImportService {
     const seenUsernames = new Map<string, number>();
 
     for (const row of rows) {
-      const rowErrors = this.validateRow(row);
+      const { errors: rowErrors, warnings: rowWarnings } = this.validateRow(row);
+      warnings.push(...rowWarnings);
 
-      const priorEmail = seenEmails.get(row.email);
-      if (priorEmail !== undefined) {
-        rowErrors.push({
-          row: row.rowNumber,
-          field: 'email',
-          message: `Duplicate of row ${priorEmail} in this file`,
-          data: { email: row.email },
-        });
+      // Only a *supplied* value can duplicate. Several rows legitimately share "no email"
+      // and "no handle", and treating those absences as collisions would reject everyone
+      // after the first.
+      if (row.email) {
+        const priorEmail = seenEmails.get(row.email);
+        if (priorEmail !== undefined) {
+          rowErrors.push({
+            row: row.rowNumber,
+            field: 'email',
+            message: `Duplicate of row ${priorEmail} in this file`,
+            data: { email: row.email },
+          });
+        }
       }
 
-      const priorUsername = seenUsernames.get(row.leetcodeUsername.toLowerCase());
-      if (priorUsername !== undefined) {
-        rowErrors.push({
-          row: row.rowNumber,
-          field: 'leetcodeUsername',
-          message: `Duplicate of row ${priorUsername} in this file`,
-          data: { leetcodeUsername: row.leetcodeUsername },
-        });
+      if (row.leetcodeUsername) {
+        const priorUsername = seenUsernames.get(row.leetcodeUsername.toLowerCase());
+        if (priorUsername !== undefined) {
+          rowErrors.push({
+            row: row.rowNumber,
+            field: 'leetcodeUsername',
+            message: `Duplicate of row ${priorUsername} in this file`,
+            data: { leetcodeUsername: row.leetcodeUsername },
+          });
+        }
       }
 
       if (rowErrors.length > 0) {
@@ -104,8 +129,10 @@ export class StudentImportService {
         continue;
       }
 
-      seenEmails.set(row.email, row.rowNumber);
-      seenUsernames.set(row.leetcodeUsername.toLowerCase(), row.rowNumber);
+      if (row.email) seenEmails.set(row.email, row.rowNumber);
+      if (row.leetcodeUsername) {
+        seenUsernames.set(row.leetcodeUsername.toLowerCase(), row.rowNumber);
+      }
       valid.push(row);
     }
 
@@ -116,6 +143,7 @@ export class StudentImportService {
         updated: 0,
         skipped: valid.length,
         errors,
+        warnings,
         createdBatches: [],
         createdSquads: [],
       };
@@ -134,14 +162,21 @@ export class StudentImportService {
       const squadId = row.squad ? (squadIds.get(squadKey) ?? null) : null;
 
       try {
-        const existing = await this.prisma.student.findFirst({
-          where: {
-            OR: [
-              { email: row.email },
-              { leetcodeUsername: row.leetcodeUsername.toLowerCase() },
-            ],
-          },
-        });
+        // Identity, most reliable first. Email when the sheet has one; otherwise the
+        // register number, then the LeetCode handle, then the name *within this campus*.
+        // Without the fallbacks a roster with no emails would create fresh duplicates on
+        // every run, which is the opposite of an idempotent import.
+        const identity: Prisma.StudentWhereInput[] = [];
+        if (row.email) identity.push({ email: row.email });
+        if (row.registerNumber) identity.push({ registerNumber: row.registerNumber });
+        if (row.leetcodeUsername) {
+          identity.push({ leetcodeUsername: row.leetcodeUsername.toLowerCase() });
+        }
+        // Name is only an identity *inside one campus*: two campuses can each have a
+        // "Rahul Sharma" and they are different people.
+        identity.push({ name: row.name, campusId });
+
+        const existing = await this.prisma.student.findFirst({ where: { OR: identity } });
 
         if (existing) {
           if (!options.updateExisting) {
@@ -175,9 +210,14 @@ export class StudentImportService {
             where: { id: existing.id },
             data: {
               name: row.name,
-              email: row.email,
+              // Null rather than '' — an unknown address is absent, and '' would collide
+              // with every other unknown one under the unique index.
+              email: row.email || null,
+              registerNumber: row.registerNumber,
               phone: row.phone,
-              leetcodeUsername: row.leetcodeUsername.toLowerCase(),
+              leetcodeUsername: row.leetcodeUsername
+                ? row.leetcodeUsername.toLowerCase()
+                : null,
               campusId,
               // A sheet without a Batch/Squad column says nothing about placement — it
               // does not say "remove them". Writing the null through would unassign the
@@ -193,9 +233,14 @@ export class StudentImportService {
           await this.prisma.student.create({
             data: {
               name: row.name,
-              email: row.email,
+              // A sheet that omits the email does not say "remove it": only a supplied
+              // value overwrites, exactly as batch and squad behave.
+              ...(row.email ? { email: row.email } : {}),
+              ...(row.registerNumber ? { registerNumber: row.registerNumber } : {}),
               phone: row.phone,
-              leetcodeUsername: row.leetcodeUsername.toLowerCase(),
+              ...(row.leetcodeUsername
+                ? { leetcodeUsername: row.leetcodeUsername.toLowerCase() }
+                : {}),
               campusId,
               batchId,
               squadId,
@@ -245,7 +290,8 @@ export class StudentImportService {
     }
 
     this.logger.log(
-      `Import complete: ${created} created, ${updated} updated, ${skipped} skipped, ${errors.length} errors`,
+      `Import complete: ${created} created, ${updated} updated, ${skipped} skipped, ` +
+        `${errors.length} errors, ${warnings.length} warnings`,
     );
 
     return {
@@ -254,6 +300,7 @@ export class StudentImportService {
       updated,
       skipped,
       errors,
+      warnings,
       createdBatches,
       createdSquads,
     };
@@ -324,6 +371,39 @@ export class StudentImportService {
     }
 
     return writes;
+  }
+
+  /**
+   * Normalise one already-extracted row into the shape the importer validates.
+   *
+   * The spreadsheet parser and the JSON endpoint both land here, so a value means the same
+   * thing however it arrived — the same handle extraction, the same lowercasing, the same
+   * treatment of a blank cell as absent rather than as an empty string.
+   */
+  toParsedRow(
+    raw: {
+      name: string;
+      email: string;
+      squad: string;
+      batch: string;
+      leetcode: string;
+      registerNumber: string;
+      phone: string;
+    },
+    rowNumber: number,
+  ): ParsedRow {
+    const leetcode = raw.leetcode.trim();
+    return {
+      rowNumber,
+      name: raw.name.trim(),
+      email: raw.email.trim().toLowerCase(),
+      batch: raw.batch.trim() || null,
+      squad: raw.squad.trim() || null,
+      leetcodeUsername: leetcode ? this.normaliseUsername(leetcode) : '',
+      rawLeetcode: leetcode || null,
+      registerNumber: raw.registerNumber.trim() || null,
+      phone: raw.phone.trim() || null,
+    };
   }
 
   /** Build a template workbook so mentors start from the exact expected columns. */
@@ -425,6 +505,7 @@ export class StudentImportService {
         squad: read('squad') || null,
         leetcodeUsername: this.normaliseUsername(username),
         rawLeetcode: username || null,
+        registerNumber: read('registerNumber') || null,
         phone: read('phone') || null,
       });
     });
@@ -485,12 +566,14 @@ export class StudentImportService {
    * and a handle recoverable from a pasted page title, and it is unit-tested. One rule,
    * used everywhere, beats two that disagree about the same string.
    *
-   * Returns the raw value when nothing resolves, so `validateRow` reports it against what
-   * the sheet actually said rather than against something this method invented.
+   * Returns **empty** when nothing resolves — not the raw value. A string that is not a
+   * handle is not a handle, and returning the URL made every student sharing
+   * `leetcode.com/profile/` collide with the others as a "duplicate handle", rejecting all
+   * but the first. The original text is kept on `rawLeetcode` so the warning can quote what
+   * the sheet actually said.
    */
   private normaliseUsername(raw: string): string {
-    const resolved = resolveLeetcodeProfile(raw);
-    return resolved.username ?? raw.trim().replace(/^@/, '');
+    return resolveLeetcodeProfile(raw).username ?? '';
   }
 
   /**
@@ -519,16 +602,26 @@ export class StudentImportService {
         };
   }
 
-  private validateRow(row: ParsedRow): ImportRowError[] {
+  /**
+   * Split deliberately: an **error** means the row cannot become a student, a **warning**
+   * means it can and something still needs a human. A bad LeetCode profile is a warning,
+   * because an invalid profile is not an invalid person — dropping those rows would leave
+   * the programme with members the system cannot see.
+   */
+  private validateRow(row: ParsedRow): { errors: ImportRowError[]; warnings: ImportRowError[] } {
     const errors: ImportRowError[] = [];
+    const warnings: ImportRowError[] = [];
     const data = { name: row.name, email: row.email, leetcodeUsername: row.leetcodeUsername };
 
     if (!row.name) {
       errors.push({ row: row.rowNumber, field: 'name', message: 'Name is required', data });
     }
-    if (!row.email) {
-      errors.push({ row: row.rowNumber, field: 'email', message: 'Email is required', data });
-    } else if (!EMAIL_PATTERN.test(row.email)) {
+    // Email is no longer required to *create* a student. A roster can legitimately arrive
+    // without addresses, and refusing those rows means the programme has people it cannot
+    // see — while inventing addresses creates students who can never log in and whom the
+    // later correct import duplicates instead of updating. A student with no email is
+    // imported and reported as EMAIL_REQUIRED; they simply have no portal login yet.
+    if (row.email && !EMAIL_PATTERN.test(row.email)) {
       errors.push({
         row: row.rowNumber,
         field: 'email',
@@ -536,20 +629,39 @@ export class StudentImportService {
         data,
       });
     }
+    // A missing or unusable handle does not reject the student. Invalid profile is not
+    // invalid person: the roster names someone who is in the programme, and dropping them
+    // means the programme has a member the system cannot see. They import and sync as
+    // `PROFILE_MISSING`, which reads as "nobody has collected a handle yet" rather than as
+    // a failure — and the row is still reported so it can be chased.
     if (!row.leetcodeUsername) {
-      errors.push({
-        row: row.rowNumber,
-        field: 'leetcodeUsername',
-        message: 'LeetCode username is required',
-        data,
-      });
+      if (row.rawLeetcode) {
+        const issue = this.profileIssue(row.rawLeetcode);
+        if (issue) {
+          warnings.push({
+            row: row.rowNumber,
+            field: 'leetcodeUsername',
+            message: `${issue.state}: ${issue.message}`,
+            data,
+          });
+        }
+      } else {
+        warnings.push({
+          row: row.rowNumber,
+          field: 'leetcodeUsername',
+          message:
+            'NEEDS_PROFILE_URL: no LeetCode profile supplied. The student is imported and ' +
+            'will sync as PROFILE_MISSING until one is added.',
+          data,
+        });
+      }
     } else if (!USERNAME_PATTERN.test(row.leetcodeUsername)) {
       // Named in the operator's vocabulary rather than as a generic pattern failure: an
       // admin reading "not a valid username" about `leetcode.com/profile/` has to work out
       // what to do, while "this is a generic page, supply the student's own /u/ link" says
       // it. `rawLeetcode` is what the sheet held, before any extraction.
       const issue = this.profileIssue(row.rawLeetcode ?? row.leetcodeUsername);
-      errors.push({
+      warnings.push({
         row: row.rowNumber,
         field: 'leetcodeUsername',
         message: issue
@@ -560,7 +672,7 @@ export class StudentImportService {
       });
     }
 
-    return errors;
+    return { errors, warnings };
   }
 
   /**

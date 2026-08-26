@@ -82,7 +82,7 @@ const HISTORY_LOOKBACK_DAYS = 30;
 interface EligibleStudent {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   squadName: string | null;
   campusId: string | null;
   batchId: string | null;
@@ -1079,7 +1079,7 @@ export class BaselineTestsService {
       result = result.filter(
         (row) =>
           row.studentName.toLowerCase().includes(search) ||
-          row.studentEmail.toLowerCase().includes(search) ||
+          (row.studentEmail?.toLowerCase().includes(search) ?? false) ||
           (row.squadName?.toLowerCase().includes(search) ?? false),
       );
     }
@@ -1800,7 +1800,7 @@ export class BaselineTestsService {
       id: string;
       testId: string;
       studentId: string;
-      student: { id: string; name: string; email: string; squad: { name: string } | null };
+      student: { id: string; name: string; email: string | null; squad: { name: string } | null };
       campusId: string | null;
       campus?: { name: string } | null;
       batchId: string | null;

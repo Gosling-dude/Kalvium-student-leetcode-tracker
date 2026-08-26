@@ -106,7 +106,7 @@ export class ReportsService {
     for (const status of statuses) {
       const entry = byStudent.get(status.studentId) ?? {
         name: status.student.name,
-        email: status.student.email,
+        email: status.student.email ?? '',
         days: new Map<string, number>(),
       };
       entry.days.set(status.dayKey, status.solvedCount);

@@ -72,7 +72,7 @@ async function directoryPage(
   query: DirectoryQuery,
   page: number,
   pageSize: number,
-): Promise<{ items: { email: string }[]; total: number; totalPages: number }> {
+): Promise<{ items: { email: string | null }[]; total: number; totalPages: number }> {
   const where = directoryWhere(query) as never;
   const [items, total] = await Promise.all([
     prisma.student.findMany({
@@ -360,7 +360,9 @@ describe('student directory — pagination reports the whole set, not the page',
     const { totalPages } = await directoryPage({ campusId: srmId }, 1, pageSize);
     for (let page = 1; page <= totalPages; page++) {
       const result = await directoryPage({ campusId: srmId }, page, pageSize);
-      for (const row of result.items) seen.add(row.email);
+      // Identity for this assertion is the email when there is one; a student without
+      // one is still counted, keyed by nothing else that is unique here.
+      for (const row of result.items) seen.add(row.email ?? '');
     }
     expect(seen.size).toBe(SRM_ACTIVE);
   });

@@ -8,6 +8,8 @@ import { EmailReportsModule } from '../email-reports/email-reports.module';
 import { BatchesModule } from '../batches/batches.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
+import { StudentsModule } from '../students/students.module';
+import { CampusesModule } from '../campuses/campuses.module';
 import { CronTasksService } from './cron-tasks.service';
 import { IntegrityService } from './integrity.service';
 import { InternalController } from './internal.controller';
@@ -29,6 +31,10 @@ import { InternalController } from './internal.controller';
     // Read-only: the integrity report checks what the baseline leaderboard actually
     // computes, using the real service rather than a copy of its logic.
     BaselineTestsModule,
+    // The roster import reaches production through this module — see the endpoint's note
+    // on why a public repository cannot carry the data itself.
+    StudentsModule,
+    CampusesModule,
   ],
   controllers: [InternalController],
   providers: [CronTasksService, IntegrityService],

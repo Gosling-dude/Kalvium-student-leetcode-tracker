@@ -28,7 +28,7 @@
  *    student is exactly who this system must keep out (§25).
  */
 
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AuthService } from './auth.service';
@@ -39,7 +39,7 @@ import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
 export interface ProvisionedAccount {
   studentId: string;
   name: string;
-  email: string;
+  email: string;  // Always present: an account cannot exist without one.
   /**
    * The plaintext to hand over, or `null` when the shared `SEED_STUDENT_PASSWORD` was
    * used and the admin already knows it. Present exactly once, in this response, and
@@ -58,7 +58,8 @@ export interface SkippedStudent {
 export interface StudentAccountRow {
   studentId: string;
   name: string;
-  email: string;
+  /** Null when the roster has not supplied one yet — such a student cannot have a login. */
+  email: string | null;
   batchCode: string | null;
   hasAccount: boolean;
   isActive: boolean | null;
@@ -107,6 +108,19 @@ export class StudentAccountsService {
     const skipped: SkippedStudent[] = [];
 
     for (const student of candidates) {
+      // No email, no login. A student can legitimately exist before their address is
+      // known — the roster is allowed to arrive incomplete — so this is a reported skip
+      // with the reason, not an error and not an invented address.
+      if (!student.email) {
+        skipped.push({
+          studentId: student.id,
+          name: student.name,
+          email: '',
+          reason: 'EMAIL_REQUIRED: no email address on the student record yet',
+        });
+        continue;
+      }
+
       // The email might already belong to a *different* login (a mentor who is also,
       // confusingly, on the student roster under the same address) — `email` is globally
       // unique on `User`, so that account is reported rather than silently overwritten
@@ -176,6 +190,12 @@ export class StudentAccountsService {
     if (student.status !== 'ACTIVE') {
       throw new NotFoundException(
         `${student.name} is not an active student — archived students do not get portal accounts`,
+      );
+    }
+    if (!student.email) {
+      throw new BadRequestException(
+        `${student.name} has no email address on record, so there is no account to reset. ` +
+          'Supply their institutional email first.',
       );
     }
 

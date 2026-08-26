@@ -204,7 +204,7 @@ function studentTable(report: DailyEmailReport): string {
             (row) => `
         <tr>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">
-            ${escapeHtml(row.name)}<br/><span style="color:${COLORS.muted}; font-size:12px;">${escapeHtml(row.email)}</span>
+            ${escapeHtml(row.name)}<br/><span style="color:${COLORS.muted}; font-size:12px;">${escapeHtml(row.email ?? '')}</span>
           </td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border}; color:${COLORS.muted};">${escapeHtml(row.squadName ?? '—')}</td>
           <td style="padding:6px; border-bottom:1px solid ${COLORS.border};">${row.assignedCount}</td>

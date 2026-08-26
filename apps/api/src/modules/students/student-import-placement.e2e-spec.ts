@@ -87,8 +87,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await prisma.student.deleteMany({
+    where: {
+      OR: [
+        { registerNumber: { startsWith: 'dup-test-' } },
+        { registerNumber: { in: [`${RUN}-generic`, 'no-email-1', 'repeat-1'] } },
+      ],
+    },
+  });
   await prisma.squad.deleteMany({
-    where: { campusId, OR: [{ name: 'Squad 69' }, { name: 'Alpha Pod' }] },
+    where: { campusId, OR: [{ name: 'Squad 69' }, { name: 'Squad 70' }, { name: 'Alpha Pod' }] },
   });
   const students = await prisma.student.findMany({
     where: { email: { startsWith: RUN } },
@@ -102,6 +110,115 @@ afterAll(async () => {
     await prisma.student.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.$disconnect();
+});
+
+describe('spreadsheet import — an invalid profile is not an invalid person', () => {
+  it('imports a student whose LeetCode link is a generic page', async () => {
+    // The rule that matters most here: dropping the row would leave the programme with a
+    // member the system cannot see. She is imported, and the unusable profile is reported
+    // as a warning to chase rather than an error that discards her.
+    const result = await importer.importRows(
+      [
+        importer.toParsedRow(
+          {
+            name: 'Generic Profile Student',
+            email: '',
+            squad: 'Squad 70',
+            batch: '',
+            leetcode: 'https://leetcode.com/profile/',
+            registerNumber: `${RUN}-generic`,
+            phone: '',
+          },
+          2,
+        ),
+      ],
+      { campusId, updateExisting: true },
+    );
+
+    expect(result.created).toBe(1);
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings[0]?.message).toContain('INVALID_PROFILE');
+
+    const student = await prisma.student.findFirst({
+      where: { registerNumber: `${RUN}-generic` },
+    });
+    expect(student).not.toBeNull();
+    // No handle at all, rather than the URL stored as if it were one.
+    expect(student?.leetcodeUsername).toBeNull();
+  });
+
+  it('does not treat several unusable profiles as duplicates of each other', async () => {
+    // They share the same unusable link. Returning that URL as a "handle" made every row
+    // after the first collide as a duplicate and be rejected.
+    const rows = ['Generic One', 'Generic Two', 'Generic Three'].map((name, i) =>
+      importer.toParsedRow(
+        {
+          name,
+          email: '',
+          squad: 'Squad 70',
+          batch: '',
+          leetcode: 'https://leetcode.com/profile/',
+          registerNumber: `dup-test-${i}`,
+          phone: '',
+        },
+        i + 2,
+      ),
+    );
+
+    const result = await importer.importRows(rows, { campusId, updateExisting: true });
+
+    expect(result.errors).toHaveLength(0);
+    expect(result.created).toBe(3);
+  });
+
+  it('imports a student with no email and does not invent one', async () => {
+    const result = await importer.importRows(
+      [
+        importer.toParsedRow(
+          {
+            name: 'No Email Student',
+            email: '',
+            squad: 'Squad 70',
+            batch: '',
+            leetcode: 'https://leetcode.com/u/no-email-student/',
+            registerNumber: 'no-email-1',
+            phone: '',
+          },
+          2,
+        ),
+      ],
+      { campusId, updateExisting: true },
+    );
+
+    expect(result.created).toBe(1);
+    const student = await prisma.student.findFirst({ where: { registerNumber: 'no-email-1' } });
+    // Null, never a placeholder: a fabricated address is one nobody can log in with and
+    // that the later correct import duplicates instead of updating.
+    expect(student?.email).toBeNull();
+  });
+
+  it('re-importing an emailless roster updates rather than duplicating', async () => {
+    const row = (n: number) =>
+      importer.toParsedRow(
+        {
+          name: 'Repeat Import',
+          email: '',
+          squad: 'Squad 70',
+          batch: '',
+          leetcode: 'https://leetcode.com/u/repeat-import/',
+          registerNumber: 'repeat-1',
+          phone: '',
+        },
+        n,
+      );
+
+    await importer.importRows([row(2)], { campusId, updateExisting: true });
+    const second = await importer.importRows([row(2)], { campusId, updateExisting: true });
+
+    expect(second.created).toBe(0);
+    expect(second.updated).toBe(1);
+    expect(await prisma.student.count({ where: { registerNumber: 'repeat-1' } })).toBe(1);
+  });
 });
 
 describe('spreadsheet import — squad naming', () => {

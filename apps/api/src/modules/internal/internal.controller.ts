@@ -11,6 +11,7 @@
  */
 
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -25,6 +26,8 @@ import { Public } from '../../common/decorators';
 import { CronSecretGuard } from '../../common/guards/cron-secret.guard';
 import { CronTasksService } from './cron-tasks.service';
 import { IntegrityService } from './integrity.service';
+import { StudentImportService } from '../students/student-import.service';
+import { CampusesService } from '../campuses/campuses.service';
 
 @ApiExcludeController()
 @Public()
@@ -34,7 +37,79 @@ export class InternalController {
   constructor(
     private readonly tasks: CronTasksService,
     private readonly integrity: IntegrityService,
+    private readonly importer: StudentImportService,
+    private readonly campuses: CampusesService,
   ) {}
+
+  /**
+   * Import a roster supplied as JSON.
+   *
+   * Exists because the roster cannot travel through the repository: this repository is
+   * public and a roster holds students' names, emails and handles. It is kept in a
+   * repository *secret* and posted here by a workflow, so the data reaches production
+   * without ever being committed.
+   *
+   * Behind `CronSecretGuard` like the other internal endpoints. It reuses
+   * `StudentImportService.importRows`, so it inherits every rule the spreadsheet path has —
+   * validation, in-sheet duplicate detection, placement history, idempotent matching — and
+   * cannot drift from it.
+   *
+   * `dryRun` reports exactly what would change and writes nothing. Always run it first.
+   */
+  @Post('import-roster')
+  @HttpCode(200)
+  async importRoster(
+    @Body()
+    body: {
+      campusCode?: string;
+      dryRun?: boolean;
+      updateExisting?: boolean;
+      rows?: {
+        name?: string;
+        email?: string;
+        squad?: string;
+        batch?: string;
+        leetcode?: string;
+        registerNumber?: string;
+        phone?: string;
+      }[];
+    },
+  ) {
+    const rows = body?.rows ?? [];
+    if (rows.length === 0) {
+      throw new BadRequestException('No rows supplied.');
+    }
+
+    let campusId: string | undefined;
+    if (body.campusCode) {
+      const campus = await this.campuses.findByCode(body.campusCode);
+      if (!campus) throw new BadRequestException(`No campus with code "${body.campusCode}".`);
+      campusId = campus.id;
+    }
+
+    // Row numbers are 1-based and count the header, matching the spreadsheet path so an
+    // error message means the same thing whichever way the roster arrived.
+    const parsed = rows.map((row, index) =>
+      this.importer.toParsedRow(
+        {
+          name: row.name ?? '',
+          email: row.email ?? '',
+          squad: row.squad ?? '',
+          batch: row.batch ?? '',
+          leetcode: row.leetcode ?? '',
+          registerNumber: row.registerNumber ?? '',
+          phone: row.phone ?? '',
+        },
+        index + 2,
+      ),
+    );
+
+    return this.importer.importRows(parsed, {
+      dryRun: body.dryRun ?? false,
+      updateExisting: body.updateExisting ?? true,
+      campusId,
+    });
+  }
 
   /**
    * Data-integrity report for the live database.

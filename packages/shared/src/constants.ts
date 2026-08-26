@@ -118,6 +118,16 @@ export const IMPORT_COLUMN_ALIASES: Record<string, string[]> = {
     'leetcodeprofile',
   ],
   phone: ['phone', 'phonenumber', 'mobile', 'contact', 'contactnumber'],
+  registerNumber: [
+    'registernumber',
+    'register',
+    'registerno',
+    'regno',
+    'rollnumber',
+    'rollno',
+    'roll',
+    'universityregisternumber',
+  ],
 };
 
 export const API_ROUTES = {
