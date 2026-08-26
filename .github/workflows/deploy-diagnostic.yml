@@ -1,0 +1,75 @@
+name: Deployment Diagnostic
+
+# Answers "what is actually serving production, and when was it built" from outside.
+#
+# Exists because the deployment host's build log is not reachable from here: the repository
+# holds no Render API key, CLI credentials or blueprint, so "is the build failing or is it
+# not being triggered" cannot be read directly. What *can* be read is the running process:
+# which commit it reports, when that build was produced, and which platform is answering.
+#
+# Read-only, and manual — nothing schedules it.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: What is serving production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Interrogate the running deployment
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+
+          echo "::group::Response headers (identifies the platform)"
+          # Header names only — values can carry infrastructure detail, and the host name
+          # itself is a secret.
+          curl -sS -D - -o /dev/null --max-time 60 "${base}/api/v1/health" \
+            | grep -iE '^(x-render|server|via|cf-|x-vercel|x-powered)' \
+            | cut -d: -f1 | sort -u || echo "(no platform headers)"
+          echo "::endgroup::"
+
+          echo "::group::What the running build says about itself"
+          curl -sS --max-time 90 -H "Authorization: Bearer ${CRON_SECRET}" \
+            -o /tmp/integrity.json "${base}/api/v1/internal/integrity"
+          python3 - <<'PY'
+          import json, os, subprocess
+          r = json.load(open('/tmp/integrity.json'))
+          deployed = r.get('commit')
+          head = os.environ['HEAD_SHA']
+          print(f"deployed commit : {deployed}")
+          print(f"repo HEAD       : {head}")
+          print(f"match           : {deployed == head}")
+
+          if deployed and deployed != head:
+              # How far behind, and how long the running build has been serving. A build
+              # that is hours old while commits keep landing means deploys stopped, not
+              # that one deploy is slow.
+              try:
+                  behind = subprocess.run(
+                      ['git', 'rev-list', '--count', f'{deployed}..{head}'],
+                      capture_output=True, text=True, check=True).stdout.strip()
+                  print(f"commits behind  : {behind}")
+                  when = subprocess.run(
+                      ['git', 'show', '-s', '--format=%cI', deployed],
+                      capture_output=True, text=True, check=True).stdout.strip()
+                  print(f"that commit made: {when}")
+              except Exception as exc:
+                  print(f"(could not measure: {exc})")
+          PY
+          echo "::endgroup::"
+
+          echo "::group::Is the database reachable from that build"
+          curl -sS --max-time 60 "${base}/api/v1/health/ready" || true
+          echo
+          echo "::endgroup::"
