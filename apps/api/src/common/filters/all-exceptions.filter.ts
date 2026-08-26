@@ -15,6 +15,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import { AuditService } from '../../modules/audit/audit.service';
 import { Prisma } from '@prisma/client';
 import type { Request, Response } from 'express';
 
@@ -38,6 +39,8 @@ export interface ErrorResponseBody {
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
 
+  constructor(private readonly audit: AuditService) {}
+
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
@@ -58,10 +61,27 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // 5xx means we broke; log the whole thing. 4xx is the client's problem and would
     // otherwise fill the logs with noise from ordinary validation failures.
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+      const detail = exception instanceof Error ? exception.stack : String(exception);
       this.logger.error(
         `${request.method} ${request.url} -> ${status}: ${JSON.stringify(message)}`,
-        exception instanceof Error ? exception.stack : String(exception),
+        detail,
       );
+
+      // Also persist it, because stdout is not reachable on every host. The client is
+      // deliberately told only "An unexpected error occurred" — that is right, it must
+      // not leak table names or paths — but that leaves nobody with the real cause
+      // unless the platform's log stream happens to be at hand. A production sync and a
+      // production login both failed with that same opaque sentence and the only way to
+      // learn why was to have the hosting dashboard open. The cause belongs somewhere
+      // the running system can be asked for it.
+      //
+      // Deliberately not awaited: an error path must not become slower, or fail again,
+      // because of its own bookkeeping. `AuditService.log` swallows its own failures.
+      void this.audit.log('ERROR', 'UnhandledException', `${request.method} ${request.url} -> ${status}`, {
+        name: exception instanceof Error ? exception.name : typeof exception,
+        reason: exception instanceof Error ? exception.message : String(exception),
+        stack: typeof detail === 'string' ? detail.slice(0, 4000) : undefined,
+      });
     } else {
       this.logger.debug(`${request.method} ${request.url} -> ${status}`);
     }
