@@ -95,6 +95,32 @@ export class InternalController {
       if (existing) {
         campusId = existing.id;
       } else if (body.campusName) {
+        // A dry run writes nothing — including this. Creating the campus here would leave
+        // a real campus behind after a run whose entire promise is that it changes nothing,
+        // and the operator would have to clean it up before the real import.
+        if (body.dryRun) {
+          return {
+            totalRows: rows.length,
+            created: 0,
+            updated: 0,
+            skipped: 0,
+            errors: [],
+            warnings: [
+              {
+                row: 0,
+                field: 'campusCode',
+                message:
+                  `Campus "${body.campusCode}" does not exist yet and would be created as ` +
+                  `"${body.campusName}" with its standard batches. Rows are not validated ` +
+                  'in this run because there is no campus to validate them against.',
+                data: {},
+              },
+            ],
+            createdBatches: [],
+            createdSquads: [],
+          };
+        }
+
         // Naming it is the confirmation. A roster for an institution the system has never
         // seen is a normal thing to onboard, but filing those students under an existing
         // campus instead would be actively harmful: that campus's reports would include
