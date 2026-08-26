@@ -1204,6 +1204,14 @@ export interface StudentBaselineTest {
   /** Only populated once the student's own attempt has started. */
   problems: BaselineTestProblemSummary[];
   attempt: StudentBaselineAttempt | null;
+  /**
+   * How many of this test's problems the student has solved **at any time**, and out of
+   * how many. Independent of `attempt`: a student who never sat the test still sees what
+   * they can do, and it matches the figure their mentor sees on the leaderboard. Two
+   * screens disagreeing about one student's own score is worse than either being wrong.
+   */
+  generalSolvedCount: number;
+  generalTotalQuestions: number;
   /** Whether this student may start it right now, and why not when they may not. */
   canStart: boolean;
   blockedReason: string | null;

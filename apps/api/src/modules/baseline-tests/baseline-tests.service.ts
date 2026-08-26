@@ -371,9 +371,35 @@ export class BaselineTestsService {
     });
 
     const scope: AudienceScope = { campusId: student.campusId, batchId: student.batchId };
-    return tests
-      .filter((test) => scopeApplies({ campusId: test.campusId, batchId: test.batchId }, scope))
-      .map((test) => this.toStudentTest(test, test.attempts[0] ?? null));
+    const visible = tests.filter((test) =>
+      scopeApplies({ campusId: test.campusId, batchId: test.batchId }, scope),
+    );
+
+    // The same any-time performance the mentor's board shows. Without it a student who
+    // never opened a test sees nothing while their mentor sees 3/4 — two screens
+    // disagreeing about that student's own score, which is worse than either being wrong.
+    // One query covers every visible test rather than one per test.
+    const allSlugs = [
+      ...new Set(
+        visible.flatMap((test) =>
+          test.problems.map((problem) => problem.problem.titleSlug.toLowerCase()),
+        ),
+      ),
+    ];
+    const performance = (await this.generalPerformance(allSlugs, [studentId])).get(studentId) ?? [];
+    const solvedSlugs = new Set(
+      performance.filter((problem) => problem.solved).map((problem) => problem.titleSlug),
+    );
+
+    return visible.map((test) =>
+      this.toStudentTest(
+        test,
+        test.attempts[0] ?? null,
+        test.problems.filter((problem) =>
+          solvedSlugs.has(problem.problem.titleSlug.toLowerCase()),
+        ).length,
+      ),
+    );
   }
 
   async getForStudent(studentId: string, testId: string): Promise<StudentBaselineTest> {
@@ -1671,6 +1697,8 @@ export class BaselineTestsService {
         solvedAt: Date | null;
       }[];
     } | null,
+    /** Problems solved at any time — see `StudentBaselineTest.generalSolvedCount`. */
+    generalSolvedCount = 0,
   ): StudentBaselineTest {
     const now = new Date();
     const open = isTestOpen(
@@ -1738,6 +1766,8 @@ export class BaselineTestsService {
             })),
           }
         : null,
+      generalSolvedCount,
+      generalTotalQuestions: test.problems.length,
       canStart: open && attempt === null,
       blockedReason:
         attempt !== null
