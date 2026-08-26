@@ -96,10 +96,19 @@ jobs:
             if [ "$code" = "200" ]; then
               deployed=$(python3 -c "import json;print(json.load(open('/tmp/probe.json')).get('commit') or '')")
               if [ -z "$deployed" ]; then
-                # No host-injected commit to compare against. Say so rather than looping
-                # for ten minutes and then failing for a reason that is not a real fault:
-                # the integrity assertions below still run, they just cannot prove *which*
-                # build answered them. Set GIT_COMMIT on the host to close this.
+                # No commit to compare against. Two different situations look identical
+                # from here: a build old enough to predate the field, which is mid-deploy
+                # and about to be replaced, and a host that simply injects nothing. So this
+                # waits a while before concluding the second — bailing on the first attempt
+                # would let a still-deploying old build wave the run through.
+                if [ "$i" -lt 8 ]; then
+                  echo "attempt ${i}: no commit reported yet — the previous build may still be serving"
+                  sleep 15
+                  continue
+                fi
+                # Say so rather than looping for ten minutes and failing for something that
+                # is not a real fault: the integrity assertions below still run, they just
+                # cannot prove *which* build answered them.
                 echo "::warning::The deployment reports no commit id, so this run cannot prove it tested the pushed build. Set GIT_COMMIT (or deploy on a host that injects RENDER_GIT_COMMIT)."
                 exit 0
               fi
