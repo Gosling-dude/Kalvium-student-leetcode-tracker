@@ -91,7 +91,10 @@ afterAll(async () => {
     where: {
       OR: [
         { registerNumber: { startsWith: 'dup-test-' } },
-        { registerNumber: { in: [`${RUN}-generic`, 'no-email-1', 'repeat-1'] } },
+        // Every fixture id is RUN-prefixed. A cleanup that deletes by a production-shaped
+        // identifier will eventually delete a real student — this suite already did that
+        // once, removing an imported student whose register number a fixture had borrowed.
+        { registerNumber: { startsWith: RUN } },
       ],
     },
   });
@@ -181,7 +184,7 @@ describe('spreadsheet import — an invalid profile is not an invalid person', (
             squad: 'Squad 70',
             batch: '',
             leetcode: 'https://leetcode.com/u/no-email-student/',
-            registerNumber: 'no-email-1',
+            registerNumber: `${RUN}-no-email`,
             phone: '',
           },
           2,
@@ -191,7 +194,7 @@ describe('spreadsheet import — an invalid profile is not an invalid person', (
     );
 
     expect(result.created).toBe(1);
-    const student = await prisma.student.findFirst({ where: { registerNumber: 'no-email-1' } });
+    const student = await prisma.student.findFirst({ where: { registerNumber: `${RUN}-no-email` } });
     // Null, never a placeholder: a fabricated address is one nobody can log in with and
     // that the later correct import duplicates instead of updating.
     expect(student?.email).toBeNull();
@@ -206,7 +209,7 @@ describe('spreadsheet import — an invalid profile is not an invalid person', (
           squad: 'Squad 70',
           batch: '',
           leetcode: 'https://leetcode.com/u/repeat-import/',
-          registerNumber: 'repeat-1',
+          registerNumber: `${RUN}-repeat`,
           phone: '',
         },
         n,
@@ -217,7 +220,7 @@ describe('spreadsheet import — an invalid profile is not an invalid person', (
 
     expect(second.created).toBe(0);
     expect(second.updated).toBe(1);
-    expect(await prisma.student.count({ where: { registerNumber: 'repeat-1' } })).toBe(1);
+    expect(await prisma.student.count({ where: { registerNumber: `${RUN}-repeat` } })).toBe(1);
   });
 });
 

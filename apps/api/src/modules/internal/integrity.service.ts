@@ -60,8 +60,17 @@ export interface IntegrityReport {
     totalStudents: number;
     activeStudents: number;
     studentsWithLeetcodeUsername: number;
+    /** Active students with no email yet — they exist, but cannot have a portal login. */
+    studentsWithoutEmail: number;
     campuses: number;
     batches: number;
+    /**
+     * Active students per squad. Reported so a roster import can be verified against the
+     * source counts from outside the database — "did squad 69 actually get its 26" is the
+     * question an import is judged on, and it is not answerable from a created/updated
+     * tally alone.
+     */
+    squads: { name: string; campusCode: string | null; activeStudents: number }[];
   };
   sync: {
     byStatus: Record<string, number>;
@@ -139,6 +148,8 @@ export class IntegrityService {
       totalStudents,
       activeStudents,
       withUsername,
+      withoutEmail,
+      squadRows,
       campuses,
       batches,
       syncStates,
@@ -153,6 +164,15 @@ export class IntegrityService {
       this.prisma.student.count(),
       this.prisma.student.count({ where: { status: 'ACTIVE' } }),
       this.prisma.student.count({ where: { status: 'ACTIVE', leetcodeUsername: { not: null } } }),
+      this.prisma.student.count({ where: { status: 'ACTIVE', email: null } }),
+      this.prisma.squad.findMany({
+        select: {
+          name: true,
+          campus: { select: { code: true } },
+          _count: { select: { students: { where: { status: 'ACTIVE' } } } },
+        },
+        orderBy: { name: 'asc' },
+      }),
       this.prisma.campus.count(),
       this.prisma.batch.count(),
       this.prisma.studentSyncState.groupBy({ by: ['status'], _count: { _all: true } }),
@@ -192,8 +212,18 @@ export class IntegrityService {
         totalStudents,
         activeStudents,
         studentsWithLeetcodeUsername: withUsername,
+        studentsWithoutEmail: withoutEmail,
         campuses,
         batches,
+        squads: squadRows
+          .map((squad) => ({
+            name: squad.name,
+            campusCode: squad.campus?.code ?? null,
+            activeStudents: squad._count.students,
+          }))
+          // Empty squads are noise in this listing; a squad that lost its students shows
+          // up as a missing row, which is the same signal.
+          .filter((squad) => squad.activeStudents > 0),
       },
       sync: {
         byStatus,

@@ -178,6 +178,7 @@ jobs:
           print(f"Students          {roster['activeStudents']} active of {roster['totalStudents']}")
           print(f"  with a handle   {roster['studentsWithLeetcodeUsername']}")
           print(f"Campuses/batches  {roster['campuses']} / {roster['batches']}")
+          print(f"  without email   {roster.get('studentsWithoutEmail', 0)}  (no portal login until supplied)")
           print(f"Last good sync    {sync['lastSuccessfulSyncAt']}")
           print(f"Sync status       {sync['byStatus']}")
           print(f"Assignments       {content['assignments']} (latest {content['latestAssignmentDay']})")
@@ -185,6 +186,15 @@ jobs:
           print(f"Submissions       {content['submissions']}")
           print(f"Email pending     {report['email']['pendingApproval']}")
           print()
+
+          # Squad membership, so a roster import is verifiable from outside the database.
+          squads = roster.get('squads') or []
+          if squads:
+              print("Squads (active students):")
+              for squad in squads:
+                  campus = squad.get('campusCode') or '—'
+                  print(f"  {squad['activeStudents']:>4}  {squad['name']}  [{campus}]")
+              print()
 
           # Participation records beside what the submission mirror actually holds. These
           # two disagreeing is a reporting bug, not missing data, and the difference is only
