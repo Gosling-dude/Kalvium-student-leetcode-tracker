@@ -4,31 +4,48 @@
  * This is "Option C" from the brief: an admin creates or resets a student's account and
  * hands them a temporary password out of band (in person, over the program's existing
  * comms channel — never email, since `EMAIL_PROVIDER` may not even be configured). The
- * student is expected to change it on first use; `User.passwordChangedAt` staying null is
- * how the frontend knows to prompt for that.
+ * student is expected to change it on first use, and `User.passwordChangedAt` staying null
+ * is what makes that mandatory rather than a suggestion — `ForcePasswordChangeGuard`
+ * refuses every other route until it is set.
+ *
+ * ## The shared initial password
+ *
+ * `SEED_STUDENT_PASSWORD` makes every newly provisioned account start from one value the
+ * programme can read out to a room, instead of 250 individually-delivered strings. It is
+ * off by default, and it is only defensible *because* of the guard above: an unchanged
+ * initial password reaches a change-password form and nothing else, so knowing the shared
+ * value is not knowing a student's data. Each account still gets its own bcrypt hash and
+ * salt — "shared" describes the plaintext handed out, never anything stored.
  *
  * What this deliberately does NOT do:
- *  - No common/shared password across students.
- *  - No predictable password (email, name, student id) — every password is drawn from a
- *    CSPRNG, never `Math.random`.
+ *  - No predictable password (email, name, student id). When no shared initial password
+ *    is configured every password is drawn from a CSPRNG, never `Math.random`.
  *  - No plaintext password ever written to a table, a log line, or the audit log. It
- *    exists only in the return value of the call that generated it, once.
+ *    exists only in the return value of the call that generated it, once — and when it is
+ *    the shared value, it is not even that: `tempPassword` is returned as null, because
+ *    the admin already knows it and echoing it 250 times only widens where it can leak.
  *  - No account for anyone who is not currently `ACTIVE` on the roster — an archived
  *    student is exactly who this system must keep out (§25).
  */
 
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { AuthService } from './auth.service';
 import { AuditService } from '../audit/audit.service';
 import { generateTempPassword } from './password-generator';
+import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
 
 export interface ProvisionedAccount {
   studentId: string;
   name: string;
   email: string;
-  tempPassword: string;
+  /**
+   * The plaintext to hand over, or `null` when the shared `SEED_STUDENT_PASSWORD` was
+   * used and the admin already knows it. Present exactly once, in this response, and
+   * never persisted or logged.
+   */
+  tempPassword: string | null;
 }
 
 export interface SkippedStudent {
@@ -54,7 +71,23 @@ export class StudentAccountsService {
     private readonly prisma: PrismaService,
     private readonly auth: AuthService,
     private readonly audit: AuditService,
+    @Inject(CONFIG_TOKEN) private readonly config: AppConfig,
   ) {}
+
+  /**
+   * The initial password for a newly provisioned account, and whether it is safe to hand
+   * back to the caller.
+   *
+   * When the programme has configured a shared value the admin already has it, so it is
+   * not echoed in the response: repeating a single still-valid password across 250 rows of
+   * an API payload only multiplies the places it can be captured or pasted.
+   */
+  private initialPassword(): { password: string; disclose: boolean } {
+    const shared = this.config.seed.studentPassword;
+    return shared
+      ? { password: shared, disclose: false }
+      : { password: generateTempPassword(), disclose: true };
+  }
 
   /**
    * Create a login for every currently-ACTIVE student who does not already have one.
@@ -92,15 +125,18 @@ export class StudentAccountsService {
         continue;
       }
 
-      const tempPassword = generateTempPassword();
+      const initial = this.initialPassword();
       await this.prisma.user.create({
         data: {
           email: student.email,
           name: student.name,
           role: 'STUDENT',
-          passwordHash: await this.auth.hashPassword(tempPassword),
+          // Hashed per account: a shared plaintext still produces 250 distinct hashes,
+          // because bcrypt salts each one independently.
+          passwordHash: await this.auth.hashPassword(initial.password),
           studentId: student.id,
-          // Left null on purpose — the frontend reads `mustChangePassword` from this.
+          // Left null on purpose. `ForcePasswordChangeGuard` reads this and refuses every
+          // route but change-password until the student sets their own.
           passwordChangedAt: null,
         },
       });
@@ -108,7 +144,7 @@ export class StudentAccountsService {
         studentId: student.id,
         name: student.name,
         email: student.email,
-        tempPassword,
+        tempPassword: initial.disclose ? initial.password : null,
       });
     }
 
@@ -143,8 +179,8 @@ export class StudentAccountsService {
       );
     }
 
-    const tempPassword = generateTempPassword();
-    const passwordHash = await this.auth.hashPassword(tempPassword);
+    const initial = this.initialPassword();
+    const passwordHash = await this.auth.hashPassword(initial.password);
 
     if (student.user) {
       await this.prisma.user.update({
@@ -174,7 +210,12 @@ export class StudentAccountsService {
       summary: `Reset the portal password for ${student.name} <${student.email}>`,
     });
 
-    return { studentId: student.id, name: student.name, email: student.email, tempPassword };
+    return {
+      studentId: student.id,
+      name: student.name,
+      email: student.email,
+      tempPassword: initial.disclose ? initial.password : null,
+    };
   }
 
   /** Admin visibility into who has a portal login — never a password, only the fact. */

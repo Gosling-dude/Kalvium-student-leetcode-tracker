@@ -32,6 +32,7 @@ import {
 import { api, tokenStore } from '@/lib/api';
 import { cn, initials } from '@/lib/utils';
 import { Button } from './ui';
+import { ForcePasswordChange } from './force-password-change';
 
 const NAV = [
   { href: '/student', label: 'Dashboard', icon: LayoutDashboard },
@@ -65,6 +66,10 @@ export function StudentShell({ children }: { children: ReactNode }) {
     // Not a student at all — send them to the console they actually have.
     if (user && user.role !== 'STUDENT') router.replace('/');
   }, [user, router]);
+
+  // Same rule as the admin/mentor console: an unchanged initial password reaches this
+  // form and nothing else. Enforced server-side; this is the screen that says so.
+  if (user?.mustChangePassword) return <ForcePasswordChange name={user.name} />;
 
   if (!checkedAuth || (user && user.role !== 'STUDENT')) {
     return (

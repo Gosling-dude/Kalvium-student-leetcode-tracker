@@ -560,12 +560,12 @@ export const api = {
 
   provisionStudentAccounts: () =>
     apiFetch<{
-      provisioned: { studentId: string; name: string; email: string; tempPassword: string }[];
+      provisioned: { studentId: string; name: string; email: string; tempPassword: string | null }[];
       skipped: { studentId: string; name: string; email: string; reason: string }[];
     }>('/admin/students/accounts/provision', { method: 'POST' }),
 
   resetStudentPassword: (studentId: string) =>
-    apiFetch<{ studentId: string; name: string; email: string; tempPassword: string }>(
+    apiFetch<{ studentId: string; name: string; email: string; tempPassword: string | null }>(
       `/admin/students/${studentId}/reset-password`,
       { method: 'POST' },
     ),

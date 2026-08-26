@@ -6,6 +6,7 @@ import type { UserRole } from '@dsa/shared';
 export const IS_PUBLIC_KEY = 'isPublic';
 export const ROLES_KEY = 'roles';
 export const AUDIT_KEY = 'audit';
+export const ALLOWS_UNCHANGED_PASSWORD_KEY = 'allowsUnchangedPassword';
 
 /**
  * Marks a route as reachable without authentication.
@@ -19,6 +20,17 @@ export const Public = (): MethodDecorator & ClassDecorator => SetMetadata(IS_PUB
 /** Restricts a route to the listed roles. ADMIN is granted everything implicitly. */
 export const Roles = (...roles: UserRole[]): MethodDecorator & ClassDecorator =>
   SetMetadata(ROLES_KEY, roles);
+
+/**
+ * Marks a route as reachable by a user who has not yet changed their initial password.
+ *
+ * Opt *out*, like `@Public()`: a route nobody remembered to annotate is closed to an
+ * account still on its handed-over password, which is the direction that fails safe. Only
+ * the handful of routes needed to *complete* the change belong here — reading your own
+ * identity, changing the password, refreshing, and logging out.
+ */
+export const AllowsUnchangedPassword = (): MethodDecorator & ClassDecorator =>
+  SetMetadata(ALLOWS_UNCHANGED_PASSWORD_KEY, true);
 
 export interface AuditMetadata {
   action: string;
@@ -37,6 +49,12 @@ export interface RequestUser {
   /** Non-null only for `role: 'STUDENT'` — set from the DB on every request, never from
    *  client input. Every student-portal route derives identity from this, not a param. */
   studentId: string | null;
+  /**
+   * True while the account is still on the password it was handed. Read from the database
+   * on every request rather than carried in the token, so completing the change takes
+   * effect immediately instead of whenever the access token happens to expire.
+   */
+  mustChangePassword: boolean;
 }
 
 /** Injects the authenticated user, or a single property of it. */

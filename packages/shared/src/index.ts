@@ -8,6 +8,7 @@
 
 export * from './domain/time';
 export * from './domain/batch';
+export * from './domain/password-policy';
 export * from './domain/campus';
 export * from './domain/roster-normalisation';
 export * from './domain/baseline';

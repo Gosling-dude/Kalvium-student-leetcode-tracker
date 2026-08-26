@@ -9,6 +9,7 @@ import { ProgramTimeService } from './common/services/program-time.service';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
+import { ForcePasswordChangeGuard } from './common/guards/force-password-change.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 
 import { PrismaModule } from './infra/prisma/prisma.module';
@@ -96,9 +97,11 @@ class CoreModule {}
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
-    // Order matters: authenticate, then authorize, then rate-limit.
+    // Order matters: authenticate, then authorize, then require a real password, then
+    // rate-limit.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: ForcePasswordChangeGuard },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
   ],

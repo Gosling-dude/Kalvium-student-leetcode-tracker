@@ -3,7 +3,13 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 
-import { CurrentUser, Public, Roles, type RequestUser } from '../../common/decorators';
+import {
+  AllowsUnchangedPassword,
+  CurrentUser,
+  Public,
+  Roles,
+  type RequestUser,
+} from '../../common/decorators';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto, LoginDto, RefreshTokenDto } from './dto/auth.dto';
 
@@ -51,8 +57,13 @@ export class AuthController {
   // explicitly, since `RolesGuard` denies students by default on anything undecorated.
   // Each derives identity from the authenticated session only, never a param, so there
   // is nothing here for a student to reach beyond their own account.
+  //
+  // They are also the only routes `ForcePasswordChangeGuard` lets through for an account
+  // still on its handed-over password: without `me` the client cannot tell why it was
+  // blocked, and without `change-password` there would be no way out of the block at all.
 
   @Get('me')
+  @AllowsUnchangedPassword()
   @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @ApiOperation({ summary: 'The currently authenticated user' })
@@ -61,6 +72,7 @@ export class AuthController {
   }
 
   @Post('change-password')
+  @AllowsUnchangedPassword()
   @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
@@ -73,6 +85,7 @@ export class AuthController {
   }
 
   @Post('logout-all')
+  @AllowsUnchangedPassword()
   @Roles('MENTOR', 'VIEWER', 'STUDENT')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)

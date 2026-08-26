@@ -32,6 +32,7 @@ import {
 
 import { api, tokenStore } from '@/lib/api';
 import { cn, initials, timeAgo } from '@/lib/utils';
+import { ForcePasswordChange } from './force-password-change';
 import { Badge, Button } from './ui';
 
 const NAV = [
@@ -110,6 +111,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     },
     onError: (error: Error) => toast.error('Could not start sync', { description: error.message }),
   });
+
+  // Still on the password they were handed. The backend refuses every route but the one
+  // that fixes that, so rendering the console would only paint a page whose every request
+  // is about to 403.
+  if (user?.mustChangePassword) return <ForcePasswordChange name={user.name} />;
 
   if (!checkedAuth || user?.role === 'STUDENT') {
     return (

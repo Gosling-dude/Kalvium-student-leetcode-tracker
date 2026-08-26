@@ -6,7 +6,12 @@
  * when a sync silently writes submissions into the wrong day.
  */
 
-import { DEFAULT_PROGRAM_TIMEZONE, DEFAULT_PROBLEMS_PER_DAY, PROVIDER_LIMITS } from '@dsa/shared';
+import {
+  DEFAULT_PROGRAM_TIMEZONE,
+  DEFAULT_PROBLEMS_PER_DAY,
+  PROVIDER_LIMITS,
+  passwordPolicyViolation,
+} from '@dsa/shared';
 
 export type QueueDriver = 'bullmq' | 'inline';
 
@@ -36,7 +41,25 @@ export interface AppConfig {
     bcryptRounds: number;
   };
 
-  seed: { adminEmail: string; adminPassword: string; adminName: string };
+  seed: {
+    adminEmail: string;
+    adminPassword: string;
+    adminName: string;
+    /**
+     * One shared initial password for newly provisioned student logins.
+     *
+     * `null` — the default — keeps the safer behaviour: every student gets their own
+     * CSPRNG password. Setting it is a deliberate operational trade-off (one password to
+     * read out to a room of 250) and is only safe because an unchanged initial password
+     * cannot actually be used: `ForcePasswordChangeGuard` blocks every route but the one
+     * that changes it, so knowing the shared value gets an attacker to a change-password
+     * form and nowhere else.
+     *
+     * Never stored, never logged, never returned. It is hashed per account like any other
+     * password, with each account getting its own bcrypt salt.
+     */
+    studentPassword: string | null;
+  };
 
   program: {
     /** Every day boundary in the application resolves in this zone. */
@@ -180,6 +203,19 @@ export function loadConfiguration(): AppConfig {
     );
   }
 
+  // One shared initial password for student logins, if the programme has chosen to use
+  // one. Validated here rather than at the point of use: this value is applied to every
+  // student account provisioned from now on, so "it was too weak" has to surface at boot
+  // — when one person can still fix it — not after 250 accounts already carry it.
+  const seedStudentPassword = process.env.SEED_STUDENT_PASSWORD?.trim() || null;
+  if (seedStudentPassword) {
+    const violation = passwordPolicyViolation(seedStudentPassword);
+    if (violation) {
+      // The value itself is never echoed, here or anywhere else.
+      throw new Error(`SEED_STUDENT_PASSWORD does not satisfy the password policy: it ${violation}.`);
+    }
+  }
+
   const driver = (process.env.QUEUE_DRIVER ?? 'bullmq').toLowerCase();
   if (driver !== 'bullmq' && driver !== 'inline') {
     throw new Error(`QUEUE_DRIVER must be "bullmq" or "inline", received "${driver}".`);
@@ -221,6 +257,7 @@ export function loadConfiguration(): AppConfig {
       adminEmail: process.env.SEED_ADMIN_EMAIL ?? 'admin@kalvium.com',
       adminPassword: process.env.SEED_ADMIN_PASSWORD ?? 'ChangeMe!2026',
       adminName: process.env.SEED_ADMIN_NAME ?? 'Program Admin',
+      studentPassword: seedStudentPassword,
     },
 
     program: {

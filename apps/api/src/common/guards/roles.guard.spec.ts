@@ -38,15 +38,16 @@ function makeContext(options: {
   return { guard, context: context as never };
 }
 
-const ADMIN: RequestUser = { id: 'u1', email: 'admin@kalvium.com', name: 'Admin', role: 'ADMIN', studentId: null };
-const MENTOR: RequestUser = { id: 'u2', email: 'mentor@kalvium.com', name: 'Mentor', role: 'MENTOR', studentId: null };
-const VIEWER: RequestUser = { id: 'u3', email: 'viewer@kalvium.com', name: 'Viewer', role: 'VIEWER', studentId: null };
+const ADMIN: RequestUser = { id: 'u1', email: 'admin@kalvium.com', name: 'Admin', role: 'ADMIN', studentId: null, mustChangePassword: false };
+const MENTOR: RequestUser = { id: 'u2', email: 'mentor@kalvium.com', name: 'Mentor', role: 'MENTOR', studentId: null, mustChangePassword: false };
+const VIEWER: RequestUser = { id: 'u3', email: 'viewer@kalvium.com', name: 'Viewer', role: 'VIEWER', studentId: null, mustChangePassword: false };
 const STUDENT: RequestUser = {
   id: 'u4',
   email: 'student@kalvium.community',
   name: 'Student',
   role: 'STUDENT',
   studentId: 's1',
+  mustChangePassword: false,
 };
 
 describe('RolesGuard — public routes', () => {

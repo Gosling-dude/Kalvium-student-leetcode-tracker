@@ -32,7 +32,8 @@ import {
 interface Credential {
   name: string;
   email: string;
-  tempPassword: string;
+  /** Null when a shared SEED_STUDENT_PASSWORD was used — the admin already has it. */
+  tempPassword: string | null;
 }
 
 export function StudentAccountsPanel() {
@@ -167,12 +168,26 @@ function CredentialsModal({ issued, onClose }: { issued: Credential[] | null; on
               <p className="truncate text-xs text-[var(--color-fg-subtle)]">{c.email}</p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <code className="rounded-md bg-[var(--color-surface-sunken)] px-2 py-1 font-mono text-xs">
-                {c.tempPassword}
-              </code>
-              <Button variant="ghost" onClick={() => void copy(c.tempPassword)} aria-label={`Copy password for ${c.name}`}>
-                <Copy className="size-3.5" aria-hidden />
-              </Button>
+              {c.tempPassword ? (
+                <>
+                  <code className="rounded-md bg-[var(--color-surface-sunken)] px-2 py-1 font-mono text-xs">
+                    {c.tempPassword}
+                  </code>
+                  <Button
+                    variant="ghost"
+                    onClick={() => void copy(c.tempPassword!)}
+                    aria-label={`Copy password for ${c.name}`}
+                  >
+                    <Copy className="size-3.5" aria-hidden />
+                  </Button>
+                </>
+              ) : (
+                // The programme configured one shared initial password, so there is
+                // nothing per-student to hand over here.
+                <span className="text-xs text-[var(--color-fg-subtle)]">
+                  Shared initial password
+                </span>
+              )}
             </div>
           </div>
         ))}
