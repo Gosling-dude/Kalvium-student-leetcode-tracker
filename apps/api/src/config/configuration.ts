@@ -22,6 +22,17 @@ export interface AppConfig {
   corsOrigins: string[];
   swaggerEnabled: boolean;
 
+  /**
+   * Which commit this process is running.
+   *
+   * Read from the host's own injected variable (`RENDER_GIT_COMMIT` on Render), falling
+   * back to a generic `GIT_COMMIT` for other hosts and `null` when nothing set it. It
+   * exists so a deployment check can tell "the new build is live" from "the host is still
+   * serving the previous one" — a healthy `/health` only proves *a* version is up, and a
+   * smoke test that races the build reports on code that was never deployed.
+   */
+  build: { commit: string | null };
+
   database: { url: string };
 
   redis: {
@@ -223,6 +234,7 @@ export function loadConfiguration(): AppConfig {
 
   return {
     env,
+    build: { commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null },
     port: toInt(process.env.PORT, 4000),
     apiPrefix: process.env.API_PREFIX ?? 'api/v1',
     corsOrigins: toList(process.env.CORS_ORIGINS, ['http://localhost:3000']),

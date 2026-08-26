@@ -71,32 +71,50 @@ jobs:
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           base="${BACKEND_URL%/}"
 
           # A healthy /health proves *a* version is running, not that it is the one just
-          # pushed. Without this the whole job races the host's build and reports on the
-          # previous release — which is worse than not running, because it passes.
+          # pushed. Without this the job races the host's build and reports on the previous
+          # release — which is worse than not running, because it passes. The first attempt
+          # at this waited for the integrity endpoint to merely *exist*, which distinguished
+          # exactly one deploy and then silently stopped working; it verified the previous
+          # build on the very next push.
           #
-          # The signal is the integrity endpoint answering at all: it ships with the code,
-          # so 401 (present, needs the secret) or 200 means this build is live, while 404
-          # means the host is still serving the old one.
-          #
-          # 10 minutes covers a free-tier build and restart. Timing out here means the
-          # deploy did not happen, which is itself the finding.
+          # So the check is now identity, not existence: the process reports the commit it
+          # is running (Render injects RENDER_GIT_COMMIT), and this waits for that to equal
+          # the commit that triggered the run. 10 minutes covers a free-tier build and
+          # restart; timing out means the deploy did not happen, which is itself the finding.
           for i in $(seq 1 40); do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            code=$(curl -sS -o /tmp/probe.json -w '%{http_code}' \
               --connect-timeout 20 --max-time 90 \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
               "${base}/api/v1/internal/integrity" || echo "000")
-            if [ "$code" = "401" ] || [ "$code" = "403" ] || [ "$code" = "200" ]; then
-              echo "Deployed build serves /internal/integrity (HTTP ${code} anonymously)."
-              exit 0
+
+            if [ "$code" = "200" ]; then
+              deployed=$(python3 -c "import json;print(json.load(open('/tmp/probe.json')).get('commit') or '')")
+              if [ -z "$deployed" ]; then
+                # No host-injected commit to compare against. Say so rather than looping
+                # for ten minutes and then failing for a reason that is not a real fault:
+                # the integrity assertions below still run, they just cannot prove *which*
+                # build answered them. Set GIT_COMMIT on the host to close this.
+                echo "::warning::The deployment reports no commit id, so this run cannot prove it tested the pushed build. Set GIT_COMMIT (or deploy on a host that injects RENDER_GIT_COMMIT)."
+                exit 0
+              fi
+              if [ "$deployed" = "$EXPECTED_SHA" ]; then
+                echo "Deployed commit matches ${EXPECTED_SHA}."
+                exit 0
+              fi
+              echo "attempt ${i}: deployed ${deployed}, waiting for ${EXPECTED_SHA}"
+            else
+              echo "attempt ${i}: HTTP ${code} — the previous build does not serve this endpoint yet"
             fi
-            echo "attempt ${i}: HTTP ${code} — still the previous build"
             sleep 15
           done
-          echo "::error::The pushed commit was never deployed (integrity endpoint still 404). Check the host's build log."
+
+          echo "::error::The pushed commit was never deployed. Check the host's build log."
           exit 1
 
       - name: Protected endpoints must refuse anonymous callers

@@ -34,6 +34,13 @@ export interface IntegrityReport {
   ok: boolean;
   checkedAt: string;
   programDay: string;
+  /**
+   * The commit this process is running, or `null` when the host injected nothing. A
+   * deployment check compares it against the commit it just pushed; without it, the only
+   * available signal is "the endpoint exists", which stops distinguishing anything after
+   * the first release.
+   */
+  commit: string | null;
   roster: {
     totalStudents: number;
     activeStudents: number;
@@ -123,6 +130,7 @@ export class IntegrityService {
       ok: findings.every((finding) => !finding.shouldBeZero || finding.count === 0),
       checkedAt: new Date().toISOString(),
       programDay: today,
+      commit: this.config.build.commit,
       roster: {
         totalStudents,
         activeStudents,
