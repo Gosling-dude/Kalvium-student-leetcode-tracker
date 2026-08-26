@@ -186,12 +186,22 @@ jobs:
           print(f"Email pending     {report['email']['pendingApproval']}")
           print()
 
-          failed = [f for f in report['findings'] if f['shouldBeZero'] and f['count'] > 0]
+          # Data failures block; configuration gaps are surfaced every run but do not fail
+          # the build. Mixing them would leave this permanently red over an environment
+          # variable nobody can set today — and a check that is always red is one nobody
+          # reads, so the next real data regression would scroll straight past.
+          raised = [f for f in report['findings'] if f['shouldBeZero'] and f['count'] > 0]
+          failed = [f for f in raised if f.get('severity', 'data') == 'data']
+          warned = [f for f in raised if f.get('severity', 'data') != 'data']
+
           for finding in report['findings']:
-              mark = 'FAIL' if finding in failed else 'ok  '
+              mark = 'FAIL' if finding in failed else 'WARN' if finding in warned else 'ok  '
               print(f"{mark}  {finding['check']} = {finding['count']}")
-              if finding in failed:
+              if finding in raised:
                   print(f"      {finding['detail']}")
+
+          for finding in warned:
+              print(f"::warning::{finding['check']} = {finding['count']} — {finding['detail']}")
 
           if failed:
               print()

@@ -195,11 +195,18 @@ GitHub Actions secrets (Repo → Settings → Secrets and variables → Actions)
 **Checking a deployment.** The *Production Smoke Test* workflow runs on every push to
 `main` and can be run on demand. It waits for the pushed commit to actually be the one
 serving traffic (a healthy `/health` only proves *a* version is up), asserts that the
-endpoints holding student data refuse an anonymous caller, and then fails the run on any
-non-zero data-integrity invariant reported by `GET /api/v1/internal/integrity` — students
-carrying a batch no report can see, scored days naming an assignment that no longer exists,
-mentors with no campus grant, and whether the nightly report is configured to produce
-anything. It reads production and writes nothing.
+endpoints holding student data refuse an anonymous caller, and then checks the invariants
+reported by `GET /api/v1/internal/integrity` — students carrying a batch no report can see,
+scored days naming an assignment that no longer exists, mentors with no campus grant, and
+whether the nightly report is configured to produce anything. It reads production and
+writes nothing.
+
+Findings are split by severity. **Data** failures — stored records disagreeing with each
+other, so students are being reported wrongly right now — fail the run. **Config** gaps —
+a feature that cannot run until someone sets an environment variable — are printed and
+annotated as warnings every run, but do not fail it. The split is deliberate: a config gap
+nobody can fix today would leave the check permanently red, and a check that is always red
+is one nobody reads, so the next real data regression would scroll past unnoticed.
 See [.env.example](.env.example) for the complete local list.
 
 ---
