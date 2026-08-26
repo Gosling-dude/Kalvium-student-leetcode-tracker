@@ -35,6 +35,35 @@ the build:
 - **Data integrity** — `GET /internal/integrity` reports six should-be-zero invariants
   from the live database, all zero, asserted on every push.
 
+## Blocked: production has stopped deploying
+
+**Production is serving `90d8db6` and has not taken a new commit since 09:45 UTC.** Three
+commits are queued behind it. Everything below was ruled out as the cause:
+
+| Check | Result |
+|---|---|
+| `npm ci` clean install | passes |
+| The container's exact build sequence | passes, `dist/main.js` produced |
+| `prisma migrate deploy` from an **empty** database | all 20 migrations apply |
+| Boot from a clean build | health 200, database up, zero error lines |
+| Nest module cycle | none |
+| Typecheck, 731 tests | pass |
+
+The commit is deployable and production itself is healthy — the scheduled sync succeeded
+against 130 students on the old build, so `BACKEND_URL` and `CRON_SECRET` are valid.
+
+**What cannot be determined from here:** whether the deploy is failing on the host, whether
+auto-deploy is switched off, or whether the free tier's build minutes are exhausted. There
+is no Render API key, CLI, credential file or `render.yaml` in this repository or
+environment. Open the service's **Events** tab in the Render dashboard: it shows whether a
+deploy for the queued commit was triggered at all, and if so what its build log says. That
+one screen separates the three possibilities.
+
+Nothing else unblocks it. The import needs the schema migration that ships in the queued
+commit — production's `students.email` is still `NOT NULL`, so the 78 emailless students
+cannot be stored there until it deploys. There is no deploy hook and no database credential
+available as an alternative route.
+
 ## Known gaps in production
 
 - **78 new students are prepared but not imported.** Squads 69/70/71/112. Every row is
