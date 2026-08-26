@@ -8,6 +8,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
 import { StudentAccountsService } from './student-accounts.service';
+import { MentorAccountsService } from './mentor-accounts.service';
 
 @Module({
   imports: [
@@ -18,7 +19,13 @@ import { StudentAccountsService } from './student-accounts.service';
     // `AuditService` and `EmailService` need no import here — both modules are `@Global()`.
   ],
   controllers: [AuthController, AdminRecoveryController],
-  providers: [AuthService, JwtStrategy, StudentAccountsService, AdminRecoveryService],
-  exports: [AuthService, StudentAccountsService, AdminRecoveryService],
+  providers: [
+    AuthService,
+    JwtStrategy,
+    StudentAccountsService,
+    MentorAccountsService,
+    AdminRecoveryService,
+  ],
+  exports: [AuthService, StudentAccountsService, MentorAccountsService, AdminRecoveryService],
 })
 export class AuthModule {}

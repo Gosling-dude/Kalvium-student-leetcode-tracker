@@ -18,12 +18,15 @@ import {
   Post,
   Put,
   Query,
+  Res,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsEmail,
   IsHexColor,
   IsOptional,
   IsString,
@@ -46,6 +49,7 @@ import { ScoringConfigService } from '../scoring/scoring-config.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthModule } from '../auth/auth.module';
 import { StudentAccountsService } from '../auth/student-accounts.service';
+import { MentorAccountsService } from '../auth/mentor-accounts.service';
 
 class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
@@ -80,6 +84,24 @@ class RecomputeDto {
 }
 
 /** The complete campus access list for one mentor. */
+class CreateMentorDto {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(120)
+  name!: string;
+
+  @IsEmail()
+  @MaxLength(200)
+  email!: string;
+
+  /** Optional, but strongly preferred: a mentor with no grants logs in to an empty system. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsUUID('4', { each: true })
+  campusIds?: string[];
+}
+
 class SetMentorCampusesDto {
   @IsArray()
   @ArrayMaxSize(100)
@@ -101,6 +123,7 @@ export class AdminController {
     private readonly audit: AuditService,
     private readonly batches: BatchesService,
     private readonly studentAccounts: StudentAccountsService,
+    private readonly mentorAccounts: MentorAccountsService,
   ) {}
 
   // --- Student portal accounts -----------------------------------------------
@@ -113,6 +136,50 @@ export class AdminController {
   @ApiOperation({ summary: 'Which active students have a portal login, and whether it has been used' })
   listStudentAccounts() {
     return this.studentAccounts.listAccounts();
+  }
+
+  @Get('students/accounts/export')
+  @ApiOperation({
+    summary: 'Download the student onboarding status (admin only)',
+    description:
+      'Who has a portal login, who must still change their password, and when they last ' +
+      'signed in. It deliberately contains **no passwords and no hashes**: with a shared ' +
+      'initial password the admin already holds the one secret involved, and with ' +
+      'per-student passwords each is shown exactly once when it is generated. A file that ' +
+      'reprints live credentials is a file that leaks them.',
+  })
+  async exportStudentAccounts(@Res() res: Response): Promise<void> {
+    const rows = await this.studentAccounts.listAccounts();
+    const header = [
+      'Student',
+      'Email',
+      'Batch',
+      'Has Login',
+      'Must Change Password',
+      'Last Login',
+    ];
+    const escape = (value: string): string =>
+      /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+
+    const body = rows.map((row) =>
+      [
+        row.name,
+        row.email,
+        row.batchCode ?? '',
+        row.hasAccount ? 'yes' : 'no',
+        // No account yet means they will be forced to change on first login too, once
+        // provisioned — reported as such rather than left blank and ambiguous.
+        row.hasAccount ? (row.lastLoginAt ? 'no' : 'yes') : 'yes (once provisioned)',
+        row.lastLoginAt ?? '',
+      ]
+        .map((cell) => escape(String(cell)))
+        .join(','),
+    );
+
+    const csv = `\ufeff${[header.join(','), ...body].join('\n')}\n`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="student-onboarding.csv"');
+    res.send(csv);
   }
 
   @Post('students/accounts/provision')
@@ -277,6 +344,30 @@ export class AdminController {
       },
       orderBy: { name: 'asc' },
     });
+  }
+
+  @Post('mentors')
+  @Audit('MENTOR_ACCOUNT_CREATED', 'User')
+  @ApiOperation({
+    summary: 'Create a mentor account',
+    description:
+      "Returns the one-time password only when the programme has not configured a shared " +
+      "initial one — otherwise the admin already knows it and repeating it only widens " +
+      "where it can leak. Either way the mentor is held at the change-password screen " +
+      "until they set their own.",
+  })
+  createMentor(@Body() dto: CreateMentorDto, @CurrentUser() user: RequestUser) {
+    return this.mentorAccounts.create(dto, user.id);
+  }
+
+  @Post('mentors/:id/reset-password')
+  @Audit('MENTOR_PASSWORD_RESET', 'User')
+  @ApiOperation({ summary: "Reset a mentor's password and end their sessions" })
+  resetMentorPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.mentorAccounts.resetPassword(id, user.id);
   }
 
   @Put('mentors/:id/campuses')
