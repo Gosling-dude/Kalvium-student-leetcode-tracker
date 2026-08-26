@@ -9,12 +9,27 @@ name: Production Smoke Test
 # (every student has a placement a report can see, no mentor logs in to an empty system,
 # no scored day claims problems from an assignment that no longer exists).
 #
-# Runs after every push to main — a deploy that breaks one of these should be visible
-# without anyone thinking to look — and on demand from the Actions tab.
+# Runs on a schedule, after every push to main, and on demand.
+#
+# The schedule is the important one. This host's deploys land 30–70 minutes after a push,
+# vary run to run, and skip intermediate commits (it deploys the latest, not each). That is
+# measured, not assumed — it was observed repeatedly while building this. So "did *my*
+# commit deploy" is a poor thing to gate a build on, while "is production correct right
+# now" is worth asking continuously and answers the question that actually matters.
+#
+# On a push, then, a commit that has not deployed within the wait produces a **warning and
+# a green run**: nothing was verified, and saying so is honest, whereas failing would mark
+# a commit red for a deploy that succeeds forty minutes later and would train everyone to
+# ignore the check. The assertions themselves are unchanged and still fail hard — on the
+# scheduled run, and on any push whose commit did land.
 #
 # It reads production and writes nothing. The only credential it needs is CRON_SECRET,
 # the same secret the sync and rollup workflows already use.
 on:
+  schedule:
+    # Every half hour: often enough to catch a bad deploy quickly, rarely enough that a
+    # long-lagging host still gets several clean readings between pushes.
+    - cron: '*/30 * * * *'
   push:
     branches: [main]
   workflow_dispatch: {}
@@ -72,6 +87,7 @@ jobs:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           EXPECTED_SHA: ${{ github.sha }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           base="${BACKEND_URL%/}"
@@ -123,10 +139,22 @@ jobs:
             sleep 15
           done
 
-          echo "::error::The pushed commit was never deployed. Check the host's build log."
-          exit 1
+          # Not a failure. The commit has not deployed *yet*, which on this host is
+          # ordinary — see the note at the top. The run goes green having verified nothing,
+          # and says exactly that. The scheduled run is what keeps production honest.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            echo "::warning::${EXPECTED_SHA:0:7} has not deployed yet, so this run verified nothing about it. The scheduled run checks production continuously."
+            echo "SKIP_ASSERTIONS=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # On a schedule or a manual run there is no specific commit to wait for — assert
+          # against whatever is serving.
+          echo "::warning::Asserting against the currently deployed build rather than ${EXPECTED_SHA:0:7}."
+          exit 0
 
       - name: Protected endpoints must refuse anonymous callers
+        if: env.SKIP_ASSERTIONS != '1'
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
         run: |
@@ -148,6 +176,7 @@ jobs:
           [ "$failures" -eq 0 ] || exit 1
 
       - name: Live data-integrity report
+        if: env.SKIP_ASSERTIONS != '1'
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
