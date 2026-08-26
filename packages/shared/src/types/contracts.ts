@@ -1297,8 +1297,15 @@ export interface BaselineLeaderboardRow {
   notSolvedCount: number;
   /** Problems touched without an accepted answer. */
   attemptedCount: number;
+  /** Weighted points earned — difficulty-scaled, for the mentor report. */
   score: number;
   maxScore: number;
+  /**
+   * Questions solved as a percentage of questions set — `solvedCount / totalQuestions`,
+   * deliberately *not* the weighted score. The columns beside it are counts, so a reader
+   * computes 3 of 4 and expects 75%; a difficulty-weighted 67% on the same row would
+   * disagree with the numbers next to it.
+   */
   percent: number;
   timeTakenSeconds: number | null;
   submittedAt: string | null;

@@ -814,7 +814,12 @@ export class BaselineTestsService {
         attemptedCount: attempt?.attemptedCount ?? 0,
         score,
         maxScore: attempt?.maxScore || maxScore,
-        percent: baselinePercent(score, attempt?.maxScore || maxScore),
+        // Questions solved, not points earned. The three columns either side of this one
+        // are counts — total, solved, not solved — so a reader works out 3 of 4 and
+        // expects 75%. Weighting by difficulty made the same row say 67%, disagreeing with
+        // itself. The weighted figure is still carried as `score`/`maxScore` for the
+        // mentor report, which is where difficulty is the point.
+        percent: baselinePercent(solvedCount, totalQuestions),
         timeTakenSeconds: attempt?.timeTakenSeconds ?? null,
         submittedAt: attempt?.submittedAt?.toISOString() ?? null,
         status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
@@ -995,7 +1000,9 @@ export class BaselineTestsService {
       attemptedCount: attempt?.attemptedCount ?? 0,
       score: attempt?.score ?? 0,
       maxScore: attempt?.maxScore || maxScore,
-      percent: baselinePercent(attempt?.score ?? 0, attempt?.maxScore || maxScore),
+      // Same definition as the leaderboard row, so the detail view and the board it was
+      // opened from cannot disagree about a student's score.
+      percent: baselinePercent(solvedCount, totalQuestions),
       timeTakenSeconds: attempt?.timeTakenSeconds ?? null,
       startedAt: attempt?.startedAt?.toISOString() ?? null,
       submittedAt: attempt?.submittedAt?.toISOString() ?? null,

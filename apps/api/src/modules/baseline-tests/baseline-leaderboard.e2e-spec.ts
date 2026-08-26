@@ -199,6 +199,28 @@ describe('baseline leaderboard', () => {
     expect(board.totalStudents).toBe(board.attemptedStudents + board.notStartedStudents);
   });
 
+  it('reports Score % as questions solved, so the row agrees with its own columns', async () => {
+    // The problems on this test carry equal points, so this assertion would pass either
+    // way here — it is pinned because with difficulty-weighted points (EASY 10, MEDIUM 20,
+    // which is the default) the weighted figure said 67% on a row whose columns read
+    // "4 total, 3 solved, 1 not solved". A reader computes 75% and the row disagreed.
+    const board = await service.leaderboard(testId);
+    for (const row of board.rows) {
+      const expected = Math.round((row.solvedCount / row.totalQuestions) * 100);
+      expect(row.percent).toBe(expected);
+      expect(row.solvedCount + row.notSolvedCount).toBe(row.totalQuestions);
+    }
+  });
+
+  it('gives the detail view the same score as the board it was opened from', async () => {
+    const board = await service.leaderboard(testId);
+    const row = board.rows.find((candidate) => candidate.studentName === 'Rahul Sharma')!;
+    const detail = await service.studentResult(testId, row.studentId);
+
+    expect(detail.percent).toBe(row.percent);
+    expect(detail.solvedCount).toBe(row.solvedCount);
+  });
+
   it('averages over the students who actually sat it', async () => {
     // 75 + 50 + 0 over three students. The absent student is not a zero in the average —
     // they are not a measurement at all.
