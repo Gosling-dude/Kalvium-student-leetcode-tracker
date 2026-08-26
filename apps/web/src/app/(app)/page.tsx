@@ -381,6 +381,22 @@ export default function DashboardPage() {
                 </li>
               ))}
             </ul>
+          ) : data.assignmentCount > 0 ? (
+            // Work exists for today, just not one set that speaks for everyone in view.
+            // Saying "no assignment" here sends an admin off to create a duplicate of an
+            // assignment that is already in the database.
+            <EmptyState
+              title={`${data.assignmentCount} assignments today`}
+              description="Each batch was given its own problems, so there is no single set for this view. Pick a batch below, or open Assignments to see them all."
+              action={
+                <Link
+                  href="/assignments"
+                  className="text-sm font-medium text-[var(--color-brand)] underline-offset-2 hover:underline"
+                >
+                  View assignments
+                </Link>
+              }
+            />
           ) : (
             <EmptyState
               title="No assignment for today"

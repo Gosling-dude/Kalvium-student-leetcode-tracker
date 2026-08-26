@@ -111,6 +111,14 @@ export class DashboardService {
 
       const active = statuses;
 
+      // The day's assignments that actually bear on the current filter. A campus-agnostic
+      // set (`campusId: null`) is aimed at everyone, so it stays in scope for every
+      // campus; another campus's set never does.
+      const scopedAssignments =
+        campusId === null
+          ? assignments
+          : assignments.filter((a) => a.campusId === null || a.campusId === campusId);
+
       // Per-batch first: each batch is bucketed against *its own* problem count, so a
       // 5-problem Intermediate day and a 4-problem Foundation day are both reported
       // honestly instead of being flattened to one denominator (§10).
@@ -201,11 +209,21 @@ export class DashboardService {
         // where batches were given different sets, any one of them would misreport that
         // batch's problems as everyone's, so it is null and `batchBreakdown` carries the
         // per-batch truth instead.
+        //
+        // Counted within the scope, not across the whole day: with a campus filter
+        // applied, another campus's assignment is not a reason to withhold this one.
+        // `assignments.length === 1` compared against every campus's sets at once, so
+        // asking for one campus that had exactly one assignment still showed nothing
+        // whenever any other campus also had work that day.
         assignment: batchId
           ? this.findAssignmentFor(assignments, { campusId, batchId })
-          : assignments.length === 1
-            ? assignments[0]!
+          : scopedAssignments.length === 1
+            ? scopedAssignments[0]!
             : null,
+        // Lets the UI distinguish "nobody set today's work" from "each batch has its
+        // own set". Both arrive as `assignment: null`, and reporting the second as the
+        // first tells an admin to create an assignment that already exists.
+        assignmentCount: scopedAssignments.length,
         solvedBuckets: buckets,
         completionPercent: completionPercentage(totalSolved, totalAssigned),
         attemptedNotSolvedStudents,

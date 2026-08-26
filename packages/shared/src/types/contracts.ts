@@ -348,6 +348,17 @@ export interface DashboardStats {
   batchBreakdown: DashboardBatchBreakdown[];
   /** Null on an unfiltered multi-batch day: there is no single assignment for everyone. */
   assignment: AssignmentSummary | null;
+  /**
+   * How many assignments exist for this day *within the current scope*.
+   *
+   * `assignment` being null has two completely different meanings, and without this
+   * count the UI cannot tell them apart: nobody has set today's work yet, or several
+   * batches were each given their own set and no single one speaks for everyone. The
+   * dashboard rendered both as "No assignment for today — create today's four problems"
+   * while three assignments sat in the database, which sends an admin to create a
+   * duplicate of work that already exists.
+   */
+  assignmentCount: number;
   /** Index = number solved, so `solvedBuckets[4]` is the count who cleared everything. */
   solvedBuckets: number[];
   completionPercent: number;

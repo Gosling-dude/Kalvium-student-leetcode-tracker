@@ -97,10 +97,13 @@ function assignmentSummary(overrides: {
   batchName: string | null;
   batchCode: string | null;
   problemCount: number;
+  campusId?: string | null;
+  id?: string;
 }) {
   return {
-    id: `assignment-${overrides.batchCode ?? 'none'}`,
+    id: overrides.id ?? `assignment-${overrides.batchCode ?? 'none'}`,
     dayKey: '2026-08-10',
+    campusId: overrides.campusId ?? null,
     batchId: overrides.batchId,
     batchName: overrides.batchName,
     batchCode: overrides.batchCode,
@@ -606,5 +609,78 @@ describe('DashboardService.getStats — sync health', () => {
     const { syncSummary } = await service.getStats('2026-08-10', {});
     expect(syncSummary.byStatus).toEqual({});
     expect(syncSummary.failed).toBe(0);
+  });
+});
+
+/**
+ * What the dashboard says about today's problem set when several audiences each have
+ * their own.
+ *
+ * Production ran a day with three assignments — one campus-wide set and two batch sets —
+ * and the dashboard's "Today's assignment" card read "No assignment for today. Create
+ * today's four problems." Every one of those assignments was in the database. The card
+ * was reading `assignment`, which is deliberately null when no single set covers the
+ * view; with nothing else to go on, the UI could not tell that apart from a day nobody
+ * had set work for, and told an admin to create a duplicate.
+ */
+describe('DashboardService — how many assignments the day actually has', () => {
+  it('reports the count when several audiences each have their own set, so "none" is not implied', async () => {
+    const rows = [
+      dailyStatus({
+        studentId: 's1',
+        name: 'Foundation student',
+        batchId: 'batch-a',
+        batchCode: 'A',
+        solvedCount: 0,
+        assignedCount: 4,
+        problems: [],
+      }),
+    ];
+    const service = makeService(rows, [
+      assignmentSummary({ id: 'a-srm', campusId: 'campus-srm', batchId: null, batchName: null, batchCode: null, problemCount: 4 }),
+      assignmentSummary({ id: 'a-vels-a', campusId: 'campus-vels', batchId: 'batch-a', batchName: 'Foundation', batchCode: 'A', problemCount: 4 }),
+      assignmentSummary({ id: 'a-vels-b', campusId: 'campus-vels', batchId: 'batch-b', batchName: 'Intermediate', batchCode: 'B', problemCount: 4 }),
+    ]);
+
+    const stats = await service.getStats('2026-08-10');
+
+    // Still null — no single set speaks for every campus and batch in view.
+    expect(stats.assignment).toBeNull();
+    // ...but the day plainly has work, and the UI can now say which is true.
+    expect(stats.assignmentCount).toBe(3);
+  });
+
+  it('reports zero only when the day genuinely has no assignment', async () => {
+    const service = makeService([], []);
+
+    const stats = await service.getStats('2026-08-10');
+
+    expect(stats.assignment).toBeNull();
+    expect(stats.assignmentCount).toBe(0);
+  });
+
+  it('shows a campus its own single set even while another campus also has work that day', async () => {
+    const rows = [
+      dailyStatus({
+        studentId: 's1',
+        name: 'SRM student',
+        batchId: null,
+        solvedCount: 0,
+        assignedCount: 4,
+        problems: [],
+      }),
+    ];
+    const service = makeService(rows, [
+      assignmentSummary({ id: 'a-srm', campusId: 'campus-srm', batchId: null, batchName: null, batchCode: null, problemCount: 4 }),
+      assignmentSummary({ id: 'a-vels-a', campusId: 'campus-vels', batchId: 'batch-a', batchName: 'Foundation', batchCode: 'A', problemCount: 4 }),
+      assignmentSummary({ id: 'a-vels-b', campusId: 'campus-vels', batchId: 'batch-b', batchName: 'Intermediate', batchCode: 'B', problemCount: 4 }),
+    ]);
+
+    // Filtering to SRM: that campus had exactly one set, and another campus's two are
+    // no reason to withhold it.
+    const stats = await service.getStats('2026-08-10', { campusId: 'campus-srm' });
+
+    expect(stats.assignment?.id).toBe('a-srm');
+    expect(stats.assignmentCount).toBe(1);
   });
 });
