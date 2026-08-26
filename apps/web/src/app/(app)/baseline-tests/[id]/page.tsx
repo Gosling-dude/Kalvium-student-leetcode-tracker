@@ -22,6 +22,7 @@ import { RefreshCw, Send, ShieldAlert, Square } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { CampusChip, BatchChip } from '@/components/scope-filter';
+import { BaselineLeaderboard } from '@/components/baseline-leaderboard';
 import {
   Badge,
   Button,
@@ -160,6 +161,11 @@ export default function BaselineTestDetailPage({
         <StatTile label="Attempted, solved none" value={report.data.attemptedNotSolved} />
         <StatTile label="Never attempted" value={report.data.notAttempted} />
       </div>
+
+      {/* The board a mentor actually reads down. Placed above the per-problem breakdown
+          because "who needs a conversation" is the first question, and "which problem was
+          hardest" is the second. */}
+      <BaselineLeaderboard testId={id} />
 
       <Card>
         <CardHeader

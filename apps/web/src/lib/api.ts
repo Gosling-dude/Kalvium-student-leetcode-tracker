@@ -15,6 +15,8 @@ import type {
   AssignmentSummary,
   AuthUser,
   BaselineAttemptSummary,
+  BaselineLeaderboard,
+  BaselineStudentResult,
   BaselineTestReport,
   BaselineTestSummary,
   BatchHistoryEntry,
@@ -495,6 +497,20 @@ export const api = {
 
   baselineTestAttempts: (id: string) =>
     apiFetch<BaselineAttemptSummary[]>(`/baseline-tests/${id}/attempts`),
+
+  baselineLeaderboard: (
+    id: string,
+    params: {
+      search?: string;
+      squad?: string;
+      status?: string;
+      sort?: string;
+      direction?: string;
+    } = {},
+  ) => apiFetch<BaselineLeaderboard>(`/baseline-tests/${id}/leaderboard${qs(params)}`),
+
+  baselineStudentResult: (id: string, studentId: string) =>
+    apiFetch<BaselineStudentResult>(`/baseline-tests/${id}/students/${studentId}`),
 
   createBaselineTest: (body: unknown) =>
     apiFetch<BaselineTestSummary>('/baseline-tests', { method: 'POST', body }),

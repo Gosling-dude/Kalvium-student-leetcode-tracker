@@ -31,18 +31,25 @@ import {
 import {
   assessRisk,
   attemptExpiry,
+  baselinePercent,
   BASELINE_RISK_SIGNAL_LABELS,
   BASELINE_RISK_THRESHOLDS,
   describeScope,
   extractProblemSlug,
   gradeAttempt,
   isTestOpen,
+  rankBaselineEntries,
   scopeApplies,
   type AudienceScope,
+  type BaselineAttemptProblemResult,
+  type BaselineAttemptStatus,
   type BaselineAttemptSummary,
+  type BaselineLeaderboard,
+  type BaselineLeaderboardRow,
   type BaselineProblemOutcome,
   type BaselineProblemStat,
   type BaselineScopeBreakdown,
+  type BaselineStudentResult,
   type BaselineTestReport,
   type BaselineTestSummary,
   type DayKey,
@@ -69,6 +76,9 @@ const HISTORY_LOOKBACK_DAYS = 30;
 /** An eligible student, carrying the names the report groups and labels by. */
 interface EligibleStudent {
   id: string;
+  name: string;
+  email: string;
+  squadName: string | null;
   campusId: string | null;
   batchId: string | null;
   campusName: string | null;
@@ -729,6 +739,272 @@ export class BaselineTestsService {
     };
   }
 
+  /**
+   * The student-wise leaderboard for one baseline test.
+   *
+   * Computed on read rather than materialised. A baseline is graded once and then barely
+   * changes, so there is nothing to gain from a stored board — and a stored one would have
+   * to be invalidated by every re-grade, which is exactly the kind of staleness that makes
+   * two screens disagree about a student's score.
+   *
+   * Built from the *eligible roster* rather than from the attempt rows, so a student who
+   * never opened the test still has a line. Omitting them shrinks the denominator and
+   * makes a test half the cohort skipped look like a test everybody took.
+   *
+   * Filtering and sorting happen after ranking, deliberately: a mentor filtering to one
+   * squad wants to see that squad's members with their standing *in the cohort*, not
+   * renumbered 1..n within the filter. Rank means "how many students did better", and it
+   * must not change because someone typed in a search box.
+   */
+  async leaderboard(
+    testId: string,
+    query: {
+      search?: string;
+      squad?: string;
+      campusId?: string;
+      batchId?: string;
+      status?: BaselineAttemptStatus | 'ALL';
+      sort?: 'rank' | 'name' | 'squad' | 'solved' | 'percent';
+      direction?: 'asc' | 'desc';
+    } = {},
+  ): Promise<BaselineLeaderboard> {
+    const test = await this.prisma.baselineTest.findUnique({
+      where: { id: testId },
+      include: this.include(),
+    });
+    if (!test) throw new NotFoundException(`Baseline test ${testId} was not found`);
+
+    const [eligible, attempts] = await Promise.all([
+      this.eligibleStudents(test),
+      this.prisma.baselineTestAttempt.findMany({
+        where: { testId },
+        include: {
+          student: { select: { id: true, name: true, email: true, squad: { select: { name: true } } } },
+          campus: { select: { name: true } },
+          batch: { select: { name: true } },
+          results: { select: { status: true } },
+        },
+      }),
+    ]);
+
+    const totalQuestions = test.problems.length;
+    const maxScore = test.problems.reduce((total, problem) => total + problem.points, 0);
+    const attemptByStudent = new Map(attempts.map((attempt) => [attempt.studentId, attempt]));
+
+    // One entry per eligible student. An attempt belonging to a student who has since left
+    // the roster is intentionally not resurrected here — the board describes the cohort as
+    // it stands, and `report()` is where historical attempt counts live.
+    const entries = eligible.map((student) => {
+      const attempt = attemptByStudent.get(student.id);
+      const solvedCount = attempt?.solvedCount ?? 0;
+      const score = attempt?.score ?? 0;
+
+      return {
+        studentId: student.id,
+        studentName: student.name,
+        studentEmail: student.email,
+        // Preferring the attempt's frozen campus/batch keeps a past test grouping the
+        // student under where they sat it, not where they are now (§17).
+        squadName: attempt?.student.squad?.name ?? student.squadName,
+        campusName: attempt?.campus?.name ?? student.campusName,
+        batchName: attempt?.batch?.name ?? student.batchName,
+        totalQuestions,
+        solvedCount,
+        notSolvedCount: Math.max(0, totalQuestions - solvedCount),
+        attemptedCount: attempt?.attemptedCount ?? 0,
+        score,
+        maxScore: attempt?.maxScore || maxScore,
+        percent: baselinePercent(score, attempt?.maxScore || maxScore),
+        timeTakenSeconds: attempt?.timeTakenSeconds ?? null,
+        submittedAt: attempt?.submittedAt?.toISOString() ?? null,
+        status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
+        attempted: attempt !== undefined,
+      };
+    });
+
+    const ranked = rankBaselineEntries(entries).map(
+      (row): BaselineLeaderboardRow => ({ rank: row.rank, isTied: row.isTied, ...row.entry }),
+    );
+
+    // Summary statistics describe the whole cohort and are computed before filtering — a
+    // squad filter narrows who is listed, not what the test's average was.
+    const sat = ranked.filter((row) => row.attempted);
+    const percents = sat.map((row) => row.percent);
+
+    const filtered = this.filterLeaderboard(ranked, query);
+
+    return {
+      testId: test.id,
+      testTitle: test.name,
+      dayKey: test.dayKey,
+      totalQuestions,
+      maxScore,
+      totalStudents: ranked.length,
+      attemptedStudents: sat.length,
+      notStartedStudents: ranked.length - sat.length,
+      averagePercent:
+        percents.length > 0
+          ? Math.round(percents.reduce((total, p) => total + p, 0) / percents.length)
+          : 0,
+      highestPercent: percents.length > 0 ? Math.max(...percents) : 0,
+      lowestPercent: percents.length > 0 ? Math.min(...percents) : 0,
+      rows: filtered,
+    };
+  }
+
+  /** Search, scope and sort — applied after ranking so `rank` keeps its cohort meaning. */
+  private filterLeaderboard(
+    rows: BaselineLeaderboardRow[],
+    query: {
+      search?: string;
+      squad?: string;
+      campusId?: string;
+      batchId?: string;
+      status?: BaselineAttemptStatus | 'ALL';
+      sort?: 'rank' | 'name' | 'squad' | 'solved' | 'percent';
+      direction?: 'asc' | 'desc';
+    },
+  ): BaselineLeaderboardRow[] {
+    let result = rows;
+
+    const search = query.search?.trim().toLowerCase();
+    if (search) {
+      result = result.filter(
+        (row) =>
+          row.studentName.toLowerCase().includes(search) ||
+          row.studentEmail.toLowerCase().includes(search) ||
+          (row.squadName?.toLowerCase().includes(search) ?? false),
+      );
+    }
+
+    if (query.squad) {
+      const squad = query.squad.toLowerCase();
+      result = result.filter((row) => row.squadName?.toLowerCase() === squad);
+    }
+    if (query.status && query.status !== 'ALL') {
+      result = result.filter((row) => row.status === query.status);
+    }
+
+    const sort = query.sort ?? 'rank';
+    // Rank already encodes the meaningful ordering, so ascending rank is the natural
+    // default; the other columns each get the direction a reader expects when they click
+    // it once (best first for numbers, A–Z for text).
+    const direction =
+      query.direction ?? (sort === 'name' || sort === 'squad' ? 'asc' : sort === 'rank' ? 'asc' : 'desc');
+    const sign = direction === 'asc' ? 1 : -1;
+
+    const compare = (a: BaselineLeaderboardRow, b: BaselineLeaderboardRow): number => {
+      switch (sort) {
+        case 'name':
+          return sign * a.studentName.localeCompare(b.studentName);
+        case 'squad':
+          return sign * (a.squadName ?? '').localeCompare(b.squadName ?? '');
+        case 'solved':
+          return sign * (a.solvedCount - b.solvedCount);
+        case 'percent':
+          return sign * (a.percent - b.percent);
+        default:
+          return sign * (a.rank - b.rank);
+      }
+    };
+
+    // Rank is the tiebreak for every other column, so equal values stay in board order
+    // rather than in whatever order the database happened to return them.
+    return [...result].sort((a, b) => compare(a, b) || a.rank - b.rank);
+  }
+
+  /**
+   * One student's result on one test, with the per-question breakdown.
+   *
+   * `rank` is resolved from the same board `leaderboard()` builds rather than recomputed
+   * locally, so the number here and the number in the table can never disagree.
+   */
+  async studentResult(testId: string, studentId: string): Promise<BaselineStudentResult> {
+    const test = await this.prisma.baselineTest.findUnique({
+      where: { id: testId },
+      include: this.include(),
+    });
+    if (!test) throw new NotFoundException(`Baseline test ${testId} was not found`);
+
+    const student = await this.prisma.student.findUnique({
+      where: { id: studentId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        squad: { select: { name: true } },
+        campus: { select: { name: true } },
+        batch: { select: { name: true } },
+      },
+    });
+    if (!student) throw new NotFoundException(`Student ${studentId} was not found`);
+
+    const attempt = await this.prisma.baselineTestAttempt.findUnique({
+      where: { testId_studentId: { testId, studentId } },
+      include: {
+        student: { select: { id: true, name: true, email: true, squad: { select: { name: true } } } },
+        campus: { select: { name: true } },
+        batch: { select: { name: true } },
+        reviewedBy: { select: { name: true } },
+        results: true,
+      },
+    });
+
+    const board = await this.leaderboard(testId);
+    const row = board.rows.find((candidate) => candidate.studentId === studentId) ?? null;
+
+    const totalQuestions = test.problems.length;
+    const maxScore = test.problems.reduce((total, problem) => total + problem.points, 0);
+    const solvedCount = attempt?.solvedCount ?? 0;
+
+    // The per-question lines come from `toAttemptSummary` so this screen and the mentor
+    // results table describe a problem identically. With no attempt there is nothing to
+    // summarise, so the questions are listed as unattempted rather than omitted — "which
+    // four problems did they miss" is still the question being asked.
+    const problems = attempt
+      ? this.toAttemptSummary(attempt, test).results
+      : test.problems.map((problem) => ({
+          testProblemId: problem.id,
+          problemId: problem.problemId,
+          position: problem.position,
+          title: problem.problem.title,
+          difficulty: problem.difficulty as BaselineAttemptProblemResult['difficulty'],
+          points: problem.points,
+          awardedPoints: 0,
+          status: 'NOT_ATTEMPTED' as BaselineAttemptProblemResult['status'],
+          attempts: 0,
+          solvedAt: null,
+          timeToSolveSeconds: null,
+          language: null,
+        }));
+
+    return {
+      testId: test.id,
+      testTitle: test.name,
+      dayKey: test.dayKey,
+      studentId: student.id,
+      studentName: student.name,
+      studentEmail: student.email,
+      squadName: student.squad?.name ?? null,
+      campusName: attempt?.campus?.name ?? student.campus?.name ?? null,
+      batchName: attempt?.batch?.name ?? student.batch?.name ?? null,
+      rank: row?.rank ?? null,
+      totalQuestions,
+      solvedCount,
+      notSolvedCount: Math.max(0, totalQuestions - solvedCount),
+      attemptedCount: attempt?.attemptedCount ?? 0,
+      score: attempt?.score ?? 0,
+      maxScore: attempt?.maxScore || maxScore,
+      percent: baselinePercent(attempt?.score ?? 0, attempt?.maxScore || maxScore),
+      timeTakenSeconds: attempt?.timeTakenSeconds ?? null,
+      startedAt: attempt?.startedAt?.toISOString() ?? null,
+      submittedAt: attempt?.submittedAt?.toISOString() ?? null,
+      status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
+      attempted: attempt !== null,
+      problems,
+    };
+  }
+
   /** Every attempt on a test, for the mentor-facing results table. */
   async attempts(testId: string): Promise<BaselineAttemptSummary[]> {
     const test = await this.prisma.baselineTest.findUnique({
@@ -812,15 +1088,24 @@ export class BaselineTestsService {
       },
       select: {
         id: true,
+        // Name, email and squad ride along for the leaderboard, which has to render a row
+        // for a student who never opened the test and so has no attempt to read them from.
+        name: true,
+        email: true,
         campusId: true,
         batchId: true,
+        squad: { select: { name: true } },
         campus: { select: { name: true } },
         batch: { select: { name: true } },
       },
+      orderBy: { name: 'asc' },
     });
 
     return rows.map((row) => ({
       id: row.id,
+      name: row.name,
+      email: row.email,
+      squadName: row.squad?.name ?? null,
       campusId: row.campusId,
       batchId: row.batchId,
       campusName: row.campus?.name ?? null,

@@ -305,3 +305,113 @@ export function isTestOpen(
   if (test.closesAt && now.getTime() > test.closesAt.getTime()) return false;
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Student-wise ranking
+// ---------------------------------------------------------------------------
+
+/**
+ * One student's standing on one baseline test.
+ *
+ * `NOT_STARTED` students are part of this list, not omitted from it. A baseline is a
+ * measurement of the whole cohort, and "absent" is a result a mentor needs to see next to
+ * the others — a leaderboard built only from attempt rows silently shrinks the denominator
+ * and makes a test half the cohort skipped look like a test everybody took.
+ */
+export interface BaselineRankableEntry {
+  /** Stable identity — the final, deterministic tiebreak. */
+  studentId: string;
+  studentName: string;
+  solvedCount: number;
+  score: number;
+  /** Seconds from the start of the attempt to the last accepted answer; `null` if none. */
+  timeTakenSeconds: number | null;
+  /** `NOT_STARTED` never outranks a student who sat the test, whatever the arithmetic. */
+  attempted: boolean;
+}
+
+export interface BaselineRankedEntry<T extends BaselineRankableEntry = BaselineRankableEntry> {
+  rank: number;
+  entry: T;
+  /** True when at least one other student shares this rank. */
+  isTied: boolean;
+}
+
+/**
+ * Ordering, most significant first:
+ *   1. attempted        (first) — a student who did not sit the test is never ranked above
+ *                                 one who did, even though both may score 0
+ *   2. score            (desc)  — the headline number, points rather than raw count
+ *   3. solvedCount      (desc)  — breaks equal-score ties when problems carry equal points
+ *   4. timeTakenSeconds (asc)   — faster wins; `null` (solved nothing) sorts last
+ *   5. studentName      (asc)   — deterministic and human-sensible
+ *   6. studentId        (asc)   — guarantees totality
+ */
+export function compareBaselineEntries(a: BaselineRankableEntry, b: BaselineRankableEntry): number {
+  if (a.attempted !== b.attempted) return a.attempted ? -1 : 1;
+  if (a.score !== b.score) return b.score - a.score;
+  if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+
+  const aTime = a.timeTakenSeconds;
+  const bTime = b.timeTakenSeconds;
+  if (aTime !== bTime) {
+    if (aTime === null) return 1;
+    if (bTime === null) return -1;
+    return aTime - bTime;
+  }
+
+  const byName = a.studentName.localeCompare(b.studentName);
+  if (byName !== 0) return byName;
+  return a.studentId.localeCompare(b.studentId);
+}
+
+/** Two students tie only when the *meaningful* fields match — identity is excluded. */
+function isBaselineTie(a: BaselineRankableEntry, b: BaselineRankableEntry): boolean {
+  return (
+    a.attempted === b.attempted &&
+    a.score === b.score &&
+    a.solvedCount === b.solvedCount &&
+    a.timeTakenSeconds === b.timeTakenSeconds
+  );
+}
+
+/**
+ * Competition ranking ("1224"): tied students share a rank and the next distinct student
+ * skips ahead. Two students who solved the same problems in the same time genuinely tie,
+ * and inventing an order between them would be arbitrary.
+ *
+ * Pure and total, so the same inputs produce the same board every time it is requested —
+ * the board is computed on read rather than materialised, and an unstable comparator would
+ * make consecutive page loads disagree.
+ */
+export function rankBaselineEntries<T extends BaselineRankableEntry>(
+  entries: readonly T[],
+): BaselineRankedEntry<T>[] {
+  const sorted = [...entries].sort(compareBaselineEntries);
+  const ranked: BaselineRankedEntry<T>[] = [];
+
+  let currentRank = 0;
+  for (let i = 0; i < sorted.length; i += 1) {
+    const entry = sorted[i]!;
+    const previous = i > 0 ? sorted[i - 1]! : null;
+
+    // Share the previous rank on a tie; otherwise take this position (1-based), which is
+    // what makes the sequence skip after a tie rather than run 1,2,2,3.
+    if (previous && isBaselineTie(entry, previous)) {
+      ranked.push({ rank: currentRank, entry, isTied: true });
+      const last = ranked[ranked.length - 2];
+      if (last) last.isTied = true;
+    } else {
+      currentRank = i + 1;
+      ranked.push({ rank: currentRank, entry, isTied: false });
+    }
+  }
+
+  return ranked;
+}
+
+/** Score as a whole-number percentage, guarding the "test with no points" case. */
+export function baselinePercent(score: number, maxScore: number): number {
+  if (maxScore <= 0) return 0;
+  return Math.round((score / maxScore) * 100);
+}

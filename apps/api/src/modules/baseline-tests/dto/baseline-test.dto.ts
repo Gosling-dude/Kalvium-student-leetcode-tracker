@@ -17,8 +17,10 @@ import {
   ValidateNested,
 } from 'class-validator';
 import {
+  BASELINE_ATTEMPT_STATUSES,
   BASELINE_REVIEW_STATUSES,
   BASELINE_TEST_STATUSES,
+  type BaselineAttemptStatus,
   type BaselineReviewStatus,
   type BaselineTestStatus,
 } from '@dsa/shared';
@@ -251,4 +253,43 @@ export class ReviewAttemptDto {
   @MaxLength(2000)
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   note?: string;
+}
+
+/**
+ * Filtering and sorting for the student-wise leaderboard.
+ *
+ * None of these change a student's `rank` — that is computed across the whole eligible
+ * cohort before any of this is applied, so filtering to one squad shows those students
+ * with their standing among everyone, not renumbered 1..n.
+ */
+export class BaselineLeaderboardQueryDto {
+  @ApiPropertyOptional({ description: 'Matches student name, email or squad.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  search?: string;
+
+  @ApiPropertyOptional({ description: 'Squad name, exact match.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  squad?: string;
+
+  @ApiPropertyOptional({
+    enum: [...BASELINE_ATTEMPT_STATUSES, 'ALL'],
+    description: 'Narrow to one participation state. Defaults to every student.',
+  })
+  @IsOptional()
+  @IsIn([...BASELINE_ATTEMPT_STATUSES, 'ALL'])
+  status?: BaselineAttemptStatus | 'ALL';
+
+  @ApiPropertyOptional({ enum: ['rank', 'name', 'squad', 'solved', 'percent'] })
+  @IsOptional()
+  @IsIn(['rank', 'name', 'squad', 'solved', 'percent'])
+  sort?: 'rank' | 'name' | 'squad' | 'solved' | 'percent';
+
+  @ApiPropertyOptional({ enum: ['asc', 'desc'] })
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  direction?: 'asc' | 'desc';
 }

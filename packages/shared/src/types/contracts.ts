@@ -1269,6 +1269,88 @@ export interface BaselineAttemptSummary {
   results: BaselineAttemptProblemResult[];
 }
 
+/**
+ * One row of a baseline test's student-wise leaderboard.
+ *
+ * Separate from `BaselineAttemptSummary` and deliberately narrower: this is the
+ * cohort-facing board, so it carries no risk signals, no review state and no evidence
+ * lines — those are mentor triage about a *suspicion*, and they have no business on a
+ * ranked list that gets read out or exported.
+ *
+ * Every eligible student appears, including those who never opened the test. `attempted`
+ * is what separates "sat it and scored nothing" from "absent"; the two are different
+ * conversations.
+ */
+export interface BaselineLeaderboardRow {
+  /** Competition rank ("1224"): ties share a rank and the next student skips ahead. */
+  rank: number;
+  isTied: boolean;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  squadName: string | null;
+  campusName: string | null;
+  batchName: string | null;
+  /** Problems on the test — the denominator, never hardcoded. */
+  totalQuestions: number;
+  solvedCount: number;
+  notSolvedCount: number;
+  /** Problems touched without an accepted answer. */
+  attemptedCount: number;
+  score: number;
+  maxScore: number;
+  percent: number;
+  timeTakenSeconds: number | null;
+  submittedAt: string | null;
+  status: BaselineAttemptStatus;
+  /** False for a student with no attempt row at all. */
+  attempted: boolean;
+}
+
+export interface BaselineLeaderboard {
+  testId: string;
+  testTitle: string;
+  /** The program day the test belongs to. */
+  dayKey: string;
+  totalQuestions: number;
+  maxScore: number;
+  /** Eligible students, whether or not they sat it. */
+  totalStudents: number;
+  attemptedStudents: number;
+  notStartedStudents: number;
+  averagePercent: number;
+  highestPercent: number;
+  lowestPercent: number;
+  rows: BaselineLeaderboardRow[];
+}
+
+/** One student's baseline result with the per-question breakdown behind it. */
+export interface BaselineStudentResult {
+  testId: string;
+  testTitle: string;
+  dayKey: string;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  squadName: string | null;
+  campusName: string | null;
+  batchName: string | null;
+  rank: number | null;
+  totalQuestions: number;
+  solvedCount: number;
+  notSolvedCount: number;
+  attemptedCount: number;
+  score: number;
+  maxScore: number;
+  percent: number;
+  timeTakenSeconds: number | null;
+  startedAt: string | null;
+  submittedAt: string | null;
+  status: BaselineAttemptStatus;
+  attempted: boolean;
+  problems: BaselineAttemptProblemResult[];
+}
+
 export interface BaselineAttemptProblemResult {
   testProblemId: string;
   problemId: string;

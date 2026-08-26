@@ -9,6 +9,8 @@ import { CampusesModule } from '../campuses/campuses.module';
 import { CampusesService } from '../campuses/campuses.service';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { LeaderboardModule } from '../leaderboard/leaderboard.module';
+import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
+import { BaselineTestsService } from '../baseline-tests/baseline-tests.service';
 import { ReportsService } from './reports.service';
 
 @ApiTags('Reports')
@@ -18,6 +20,7 @@ export class ReportsController {
   constructor(
     private readonly reports: ReportsService,
     private readonly campuses: CampusesService,
+    private readonly baseline: BaselineTestsService,
   ) {}
 
   /** Rejects a non-numeric cohort rather than silently exporting every cohort. */
@@ -185,6 +188,48 @@ export class ReportsController {
     this.send(res, payload);
   }
 
+  @Get('export/baseline')
+  @ApiOperation({
+    summary: "Download one baseline test's student-wise results",
+    description:
+      'Every eligible student, in board order, including those who never started — the ' +
+      'export has to reconcile with the leaderboard it was taken from, and a file that ' +
+      'quietly drops the absent students does not.',
+  })
+  @ApiQuery({ name: 'testId', required: true })
+  @ApiQuery({ name: 'format', required: false, enum: EXPORT_FORMATS })
+  @ApiQuery({ name: 'squad', required: false })
+  async exportBaseline(
+    @Res() res: Response,
+    @Query('testId') testId: string,
+    @Query('format') format: ExportFormat = 'XLSX',
+    @Query('squad') squad?: string,
+  ): Promise<void> {
+    if (!testId) throw new BadRequestException('testId is required.');
+
+    const board = await this.baseline.leaderboard(testId, { squad });
+    const payload = await this.reports.export(
+      format,
+      `baseline-${board.dayKey}-${board.testTitle}${squad ? `-${squad}` : ''}`,
+      [
+        { header: 'Rank', key: 'rank', width: 8 },
+        { header: 'Student', key: 'studentName', width: 26 },
+        { header: 'Email', key: 'studentEmail', width: 30 },
+        { header: 'Squad', key: 'squadName', width: 16 },
+        { header: 'Campus', key: 'campusName', width: 22 },
+        { header: 'Batch', key: 'batchName', width: 20 },
+        { header: 'Baseline Test', key: 'testTitle', width: 24 },
+        { header: 'Total Questions', key: 'totalQuestions', width: 16 },
+        { header: 'Solved', key: 'solvedCount', width: 10 },
+        { header: 'Not Solved', key: 'notSolvedCount', width: 12 },
+        { header: 'Score %', key: 'percent', width: 10 },
+        { header: 'Status', key: 'status', width: 16 },
+      ],
+      board.rows.map((row) => ({ ...row, testTitle: board.testTitle })),
+    );
+    this.send(res, payload);
+  }
+
   private send(res: Response, payload: { filename: string; contentType: string; buffer: Buffer }) {
     res.setHeader('Content-Type', payload.contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${payload.filename}"`);
@@ -194,7 +239,16 @@ export class ReportsController {
 }
 
 @Module({
-  imports: [DashboardModule, LeaderboardModule, BatchesModule, CampusesModule],
+  imports: [
+    DashboardModule,
+    LeaderboardModule,
+    BatchesModule,
+    CampusesModule,
+    // One-directional on purpose: reports may read baseline results, while
+    // `BaselineTestsModule` still has no handle on leaderboards or scoring, so a baseline
+    // score cannot reach a streak or a daily rank (§25, §39).
+    BaselineTestsModule,
+  ],
   controllers: [ReportsController],
   providers: [ReportsService],
   exports: [ReportsService],

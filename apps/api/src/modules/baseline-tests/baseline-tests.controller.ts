@@ -16,6 +16,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { BaselineTestsService } from './baseline-tests.service';
 import {
+  BaselineLeaderboardQueryDto,
   BaselineTestQueryDto,
   CreateBaselineTestDto,
   ReviewAttemptDto,
@@ -57,6 +58,33 @@ export class BaselineTestsController {
   })
   report(@Param('id', ParseUUIDPipe) id: string) {
     return this.baseline.report(id);
+  }
+
+  @Get(':id/leaderboard')
+  @ApiOperation({
+    summary: 'Student-wise leaderboard for one baseline test',
+    description:
+      'Every eligible student, ranked competition-style, including those who never ' +
+      'started — "absent" is a result, and a board built only from attempts silently ' +
+      'shrinks the denominator. Search, squad and status narrow who is listed; none of ' +
+      'them renumber `rank`, which always means "how many students did better".',
+  })
+  leaderboard(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: BaselineLeaderboardQueryDto,
+  ) {
+    return this.baseline.leaderboard(id, query);
+  }
+
+  @Get(':id/students/:studentId')
+  @ApiOperation({
+    summary: "One student's baseline result, with the per-question breakdown",
+  })
+  studentResult(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('studentId', ParseUUIDPipe) studentId: string,
+  ) {
+    return this.baseline.studentResult(id, studentId);
   }
 
   @Get(':id/attempts')

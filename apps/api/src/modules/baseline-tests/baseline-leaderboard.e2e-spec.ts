@@ -1,0 +1,293 @@
+/**
+ * The baseline student-wise leaderboard, against a real database.
+ *
+ * Two things are being verified that a unit test on the ranking function cannot reach:
+ *
+ *  1. The board is built from the *eligible roster*, so a student who never opened the
+ *     test still has a row. A board assembled from attempt rows silently shrinks the
+ *     denominator and makes a test half the cohort skipped look like a test everybody took.
+ *
+ *  2. Historical immutability. Solving a baseline problem *after* the attempt window has
+ *     closed must not raise the recorded score. The baseline says what the student could do
+ *     that day; their current ability is a separate number.
+ *
+ * Fixtures live under a unique prefix and are removed in `afterAll`.
+ */
+
+import { PrismaClient } from '@prisma/client';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { BaselineTestsService } from './baseline-tests.service';
+import { ProgramTimeService } from '../../common/services/program-time.service';
+
+const prisma = new PrismaClient();
+
+const RUN = `e2e-baseline-${Date.now()}`;
+const email = (name: string): string => `${RUN}-${name}@baseline-board.invalid`;
+
+const time = new ProgramTimeService({ program: { timezone: 'Asia/Kolkata' } } as never);
+const campuses = { resolveScope: async () => ({ campusId: null, batchId: null }) } as never;
+const provider = {} as never;
+const service = new BaselineTestsService(prisma as never, time, campuses, provider);
+
+/** The attempt window: opened and closed well in the past, so "later" is unambiguous. */
+const OPENED_AT = new Date('2026-08-01T04:00:00.000Z');
+const CLOSED_AT = new Date('2026-08-01T05:00:00.000Z');
+const AFTER_THE_TEST = new Date('2026-08-10T06:00:00.000Z');
+
+let campusId: string;
+let testId: string;
+const problemIds: string[] = [];
+const studentIds: Record<string, string> = {};
+
+async function makeStudent(key: string, name: string): Promise<string> {
+  const student = await prisma.student.create({
+    data: {
+      name,
+      email: email(key),
+      leetcodeUsername: `${RUN}-${key}`,
+      campusId,
+      status: 'ACTIVE',
+      createdAt: new Date('2026-07-01T00:00:00.000Z'),
+    },
+  });
+  studentIds[key] = student.id;
+  return student.id;
+}
+
+/** An attempt whose window is closed, graded from whatever is in the submission mirror. */
+async function makeAttempt(studentId: string, solvedSlugIndexes: number[]): Promise<void> {
+  await prisma.baselineTestAttempt.create({
+    data: {
+      testId,
+      studentId,
+      campusId,
+      startedAt: OPENED_AT,
+      expiresAt: CLOSED_AT,
+      maxScore: problemIds.length,
+      status: 'SUBMITTED',
+      submittedAt: CLOSED_AT,
+    },
+  });
+
+  for (const index of solvedSlugIndexes) {
+    await prisma.submission.create({
+      data: {
+        studentId,
+        problemId: problemIds[index]!,
+        providerSubmissionId: `${RUN}-${studentId}-${index}`,
+        provider: 'leetcode',
+        titleSlug: `${RUN}-problem-${index}`,
+        title: `Problem ${index}`,
+        status: 'ACCEPTED',
+        submittedAt: new Date(OPENED_AT.getTime() + (index + 1) * 60_000),
+        dayKey: '2026-08-01',
+      },
+    });
+  }
+}
+
+beforeAll(async () => {
+  // Its own campus, not a shared one. Eligibility for a baseline is "every ACTIVE student
+  // in the test's scope", so running against a seeded campus would pull that campus's real
+  // roster onto this board and make every count in this file depend on the seed.
+  const campus = await prisma.campus.create({
+    data: { name: `${RUN} Campus`, code: RUN.slice(0, 24).toUpperCase(), status: 'ACTIVE' },
+  });
+  campusId = campus.id;
+
+  for (let i = 0; i < 4; i += 1) {
+    const problem = await prisma.problem.create({
+      data: {
+        titleSlug: `${RUN}-problem-${i}`,
+        title: `Problem ${i}`,
+        difficulty: 'EASY',
+        url: `https://leetcode.com/problems/${RUN}-problem-${i}/`,
+      },
+    });
+    problemIds.push(problem.id);
+  }
+
+  const test = await prisma.baselineTest.create({
+    data: {
+      name: `${RUN} Baseline`,
+      dayKey: '2026-08-01',
+      campusId,
+      status: 'CLOSED',
+      durationMinutes: 60,
+      opensAt: OPENED_AT,
+      closesAt: CLOSED_AT,
+      problems: {
+        create: problemIds.map((problemId, index) => ({
+          problemId,
+          position: index + 1,
+          points: 1,
+          difficulty: 'EASY',
+        })),
+      },
+    },
+  });
+  testId = test.id;
+
+  // 3 of 4, 2 of 4, 0 of 4 having tried, and one student who never opened it.
+  await makeAttempt(await makeStudent('rahul', 'Rahul Sharma'), [0, 1, 2]);
+  await makeAttempt(await makeStudent('aman', 'Aman Verma'), [0, 1]);
+  await makeAttempt(await makeStudent('ravi', 'Ravi Kumar'), []);
+  await makeStudent('absent', 'Absent Student');
+
+  await service.gradeTest(testId);
+});
+
+afterAll(async () => {
+  const ids = Object.values(studentIds);
+  await prisma.baselineTestProblemResult.deleteMany({
+    where: { attempt: { testId } },
+  });
+  await prisma.baselineTestAttempt.deleteMany({ where: { testId } });
+  await prisma.baselineTestProblem.deleteMany({ where: { testId } });
+  await prisma.baselineTest.delete({ where: { id: testId } });
+  await prisma.submission.deleteMany({ where: { studentId: { in: ids } } });
+  await prisma.student.deleteMany({ where: { id: { in: ids } } });
+  await prisma.problem.deleteMany({ where: { id: { in: problemIds } } });
+  await prisma.campus.deleteMany({ where: { id: campusId } });
+  await prisma.$disconnect();
+});
+
+describe('baseline leaderboard', () => {
+  it('ranks students by score, best first', async () => {
+    const board = await service.leaderboard(testId);
+    expect(board.rows.slice(0, 3).map((row) => row.studentName)).toEqual([
+      'Rahul Sharma',
+      'Aman Verma',
+      'Ravi Kumar',
+    ]);
+    expect(board.rows.slice(0, 3).map((row) => row.rank)).toEqual([1, 2, 3]);
+  });
+
+  it('reports solved, not-solved and percent against the real question count', async () => {
+    const board = await service.leaderboard(testId);
+    const rahul = board.rows.find((row) => row.studentName === 'Rahul Sharma')!;
+
+    expect(rahul.totalQuestions).toBe(4);
+    expect(rahul.solvedCount).toBe(3);
+    expect(rahul.notSolvedCount).toBe(1);
+    expect(rahul.percent).toBe(75);
+  });
+
+  it('lists a student who never opened the test', async () => {
+    const board = await service.leaderboard(testId);
+    const absent = board.rows.find((row) => row.studentName === 'Absent Student');
+
+    expect(absent).toBeDefined();
+    expect(absent!.attempted).toBe(false);
+    expect(absent!.status).toBe('NOT_STARTED');
+    expect(absent!.solvedCount).toBe(0);
+  });
+
+  it('never ranks the absent student above one who sat it and scored nothing', async () => {
+    const board = await service.leaderboard(testId);
+    const ravi = board.rows.findIndex((row) => row.studentName === 'Ravi Kumar');
+    const absent = board.rows.findIndex((row) => row.studentName === 'Absent Student');
+
+    expect(ravi).toBeLessThan(absent);
+  });
+
+  it('counts the whole eligible cohort, not just the attempts', async () => {
+    const board = await service.leaderboard(testId);
+    expect(board.attemptedStudents).toBe(3);
+    expect(board.notStartedStudents).toBe(1);
+    expect(board.totalStudents).toBe(board.attemptedStudents + board.notStartedStudents);
+  });
+
+  it('averages over the students who actually sat it', async () => {
+    // 75 + 50 + 0 over three students. The absent student is not a zero in the average —
+    // they are not a measurement at all.
+    const board = await service.leaderboard(testId);
+    expect(board.averagePercent).toBe(42);
+    expect(board.highestPercent).toBe(75);
+    expect(board.lowestPercent).toBe(0);
+  });
+
+  it('keeps cohort rank when filtered to one student', async () => {
+    // Rank means "how many students did better". Filtering must not renumber it to 1.
+    const board = await service.leaderboard(testId, { search: 'Aman' });
+    expect(board.rows).toHaveLength(1);
+    expect(board.rows[0]!.rank).toBe(2);
+  });
+
+  it('reports cohort-wide statistics regardless of the filter', async () => {
+    const board = await service.leaderboard(testId, { search: 'Aman' });
+    expect(board.totalStudents).toBe(4);
+    expect(board.averagePercent).toBe(42);
+  });
+
+  it('sorts by name without changing anyone’s rank', async () => {
+    const board = await service.leaderboard(testId, { sort: 'name', direction: 'asc' });
+    expect(board.rows.map((row) => row.studentName)).toEqual([
+      'Absent Student',
+      'Aman Verma',
+      'Rahul Sharma',
+      'Ravi Kumar',
+    ]);
+    expect(board.rows.find((row) => row.studentName === 'Rahul Sharma')!.rank).toBe(1);
+  });
+
+  it('filters to students who never started', async () => {
+    const board = await service.leaderboard(testId, { status: 'NOT_STARTED' });
+    expect(board.rows.map((row) => row.studentName)).toEqual(['Absent Student']);
+  });
+
+  it('gives the per-question breakdown for one student', async () => {
+    const result = await service.studentResult(testId, studentIds.rahul!);
+
+    expect(result.rank).toBe(1);
+    expect(result.solvedCount).toBe(3);
+    expect(result.problems).toHaveLength(4);
+    expect(result.problems.filter((p) => p.status === 'ACCEPTED')).toHaveLength(3);
+    expect(result.problems.filter((p) => p.status !== 'ACCEPTED')).toHaveLength(1);
+  });
+
+  it('lists every question for a student who never started, rather than none', async () => {
+    const result = await service.studentResult(testId, studentIds.absent!);
+
+    expect(result.attempted).toBe(false);
+    expect(result.problems).toHaveLength(4);
+    expect(result.problems.every((p) => p.status === 'NOT_ATTEMPTED')).toBe(true);
+  });
+});
+
+describe('baseline historical immutability', () => {
+  it('does not raise a closed baseline when the student solves the problem later', async () => {
+    const before = await service.leaderboard(testId);
+    const rahulBefore = before.rows.find((row) => row.studentName === 'Rahul Sharma')!;
+    expect(rahulBefore.solvedCount).toBe(3);
+
+    // The fourth problem, solved nine days after the test closed.
+    await prisma.submission.create({
+      data: {
+        studentId: studentIds.rahul!,
+        problemId: problemIds[3]!,
+        providerSubmissionId: `${RUN}-late-solve`,
+        provider: 'leetcode',
+        titleSlug: `${RUN}-problem-3`,
+        title: 'Problem 3',
+        status: 'ACCEPTED',
+        submittedAt: AFTER_THE_TEST,
+        dayKey: '2026-08-10',
+      },
+    });
+
+    // A re-grade is exactly the operation that would rewrite history if the window were
+    // not frozen — so it is the one worth running here.
+    await service.gradeTest(testId);
+
+    const after = await service.leaderboard(testId);
+    const rahulAfter = after.rows.find((row) => row.studentName === 'Rahul Sharma')!;
+
+    expect(rahulAfter.solvedCount).toBe(3);
+    expect(rahulAfter.percent).toBe(75);
+
+    const detail = await service.studentResult(testId, studentIds.rahul!);
+    expect(detail.problems.filter((p) => p.status === 'ACCEPTED')).toHaveLength(3);
+  });
+});
