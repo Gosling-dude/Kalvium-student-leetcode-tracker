@@ -225,7 +225,15 @@ export class ReportsController {
         { header: 'Score %', key: 'percent', width: 10 },
         { header: 'Status', key: 'status', width: 16 },
       ],
-      board.rows.map((row) => ({ ...row, testTitle: board.testTitle })),
+      board.rows.map((row) => ({
+        ...row,
+        testTitle: board.testTitle,
+        // A student who did not sit the test has no standing to report. They still hold a
+        // board position (everyone absent ties), but printing "1" next to a row that
+        // scored nothing reads as a result, and the screen shows a dash here for exactly
+        // that reason — the export must not disagree with the page it came from.
+        rank: row.attempted ? row.rank : '—',
+      })),
     );
     this.send(res, payload);
   }
