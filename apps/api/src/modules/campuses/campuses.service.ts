@@ -67,6 +67,17 @@ export interface ResolvedScope extends AudienceScope {
   onlyUnassigned: boolean;
 }
 
+/** The batches every campus starts with — see `CampusesService.create`. */
+const DEFAULT_BATCHES = [
+  { name: 'Foundation Level', code: 'A', description: 'Batch A — Foundation Level', sortOrder: 1 },
+  {
+    name: 'Intermediate Level',
+    code: 'B',
+    description: 'Batch B — Intermediate Level',
+    sortOrder: 2,
+  },
+] as const;
+
 @Injectable()
 export class CampusesService {
   private readonly logger = new Logger(CampusesService.name);
@@ -319,6 +330,58 @@ export class CampusesService {
   }
 
   /** Lookup by code, used by the roster loaders. Returns null rather than throwing. */
+  /**
+   * Create a campus, with the standard batches that make it usable.
+   *
+   * Lives here rather than in the HTTP controller because two callers need it: an admin
+   * creating one by hand, and a roster import onboarding an institution the system has not
+   * seen before. A second copy would eventually disagree about the clash rules or forget
+   * the default batches — and a campus with no batches can hold no students and receive no
+   * assignments, which looks like a silent import failure rather than a setup gap.
+   */
+  async create(input: {
+    name: string;
+    code?: string;
+    description?: string | null;
+    sortOrder?: number;
+    createDefaultBatches?: boolean;
+  }): Promise<{ id: string; name: string; code: string }> {
+    const code = input.code ?? (await this.deriveAvailableCode(input.name));
+
+    // Name and code are independently unique, so both are checked — and reported apart,
+    // because "that code is taken" and "that name is taken" need different corrections.
+    const clash = await this.prisma.campus.findFirst({
+      where: { OR: [{ code }, { name: input.name }] },
+      select: { code: true, name: true },
+    });
+    if (clash) {
+      throw new BadRequestException(
+        clash.code === code
+          ? `A campus with code "${code}" already exists.`
+          : `A campus named "${input.name}" already exists.`,
+      );
+    }
+
+    const created = await this.prisma.campus.create({
+      data: {
+        name: input.name,
+        code,
+        description: input.description ?? null,
+        sortOrder: input.sortOrder ?? 0,
+      },
+      select: { id: true, name: true, code: true },
+    });
+
+    if (input.createDefaultBatches !== false) {
+      await this.prisma.batch.createMany({
+        data: DEFAULT_BATCHES.map((batch) => ({ ...batch, campusId: created.id })),
+        skipDuplicates: true,
+      });
+    }
+
+    return created;
+  }
+
   async findByCode(code: string): Promise<{ id: string; name: string; code: string } | null> {
     return this.prisma.campus.findUnique({
       where: { code: normaliseCampusCode(code) },

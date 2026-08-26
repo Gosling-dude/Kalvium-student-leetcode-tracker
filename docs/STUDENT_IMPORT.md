@@ -75,3 +75,33 @@ Rows are matched on email. An existing student is updated in place; the import n
 a password, a submission, a baseline result, a streak or a historical placement. A sheet
 that omits the Squad or Batch column leaves those alone rather than clearing them — a
 missing column says nothing about placement, it does not say "remove them".
+
+## Onboarding a new institution
+
+A roster for a campus the system has not seen before creates it, but only when the request
+names it: a campus **code** alone is never enough. A typo in a code would otherwise split a
+cohort across the real campus and a phantom one that looks just like it.
+
+Filing them under an existing campus instead is the thing to avoid. Campus is what scopes
+reports, assignment targeting and mentor access — so an Alliance student filed under SRM
+appears in SRM's reports and becomes visible to SRM's mentors.
+
+A new campus is created with the standard Foundation/Intermediate batches, because a campus
+with no batches can hold no students and receive no assignments, which looks like a silent
+import failure rather than a setup gap.
+
+## Identity, and its one ambiguity
+
+Rows are matched most-reliable-first: **email**, then **register number**, then **LeetCode
+handle**, then **name within the campus**.
+
+The last is a genuine fallback, and it has a limit worth knowing. A student with no email,
+no register number and no handle can only be identified by their name — and name is
+deliberately scoped to one campus, because two institutions can each have a "Rahul Sharma"
+and they are different people. So importing such a student to a *different* campus creates a
+second record rather than moving the first.
+
+That is the correct reading of the evidence: the system genuinely cannot tell those two
+apart. But it means moving a cohort between campuses is not something the importer can do
+for students who have no stable identifier. Give them an email or a register number first,
+and both re-imports and moves become exact.

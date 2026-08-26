@@ -12,6 +12,7 @@
 
 import {
   BadRequestException,
+  Logger,
   Body,
   Controller,
   Get,
@@ -34,6 +35,8 @@ import { CampusesService } from '../campuses/campuses.service';
 @UseGuards(CronSecretGuard)
 @Controller('internal')
 export class InternalController {
+  private readonly logger = new Logger(InternalController.name);
+
   constructor(
     private readonly tasks: CronTasksService,
     private readonly integrity: IntegrityService,
@@ -62,6 +65,12 @@ export class InternalController {
     @Body()
     body: {
       campusCode?: string;
+      /**
+       * Creates the campus when it does not exist yet. Required for that to happen — a
+       * code alone never creates one, because a typo in a code would otherwise split a
+       * cohort across a real campus and a phantom one that looks just like it.
+       */
+      campusName?: string;
       dryRun?: boolean;
       updateExisting?: boolean;
       rows?: {
@@ -82,9 +91,26 @@ export class InternalController {
 
     let campusId: string | undefined;
     if (body.campusCode) {
-      const campus = await this.campuses.findByCode(body.campusCode);
-      if (!campus) throw new BadRequestException(`No campus with code "${body.campusCode}".`);
-      campusId = campus.id;
+      const existing = await this.campuses.findByCode(body.campusCode);
+      if (existing) {
+        campusId = existing.id;
+      } else if (body.campusName) {
+        // Naming it is the confirmation. A roster for an institution the system has never
+        // seen is a normal thing to onboard, but filing those students under an existing
+        // campus instead would be actively harmful: that campus's reports would include
+        // students who are not its own, and its mentors would gain access to them.
+        const created = await this.campuses.create({
+          name: body.campusName,
+          code: body.campusCode,
+        });
+        campusId = created.id;
+        this.logger.log(`Created campus ${created.code} ("${created.name}") for a roster import`);
+      } else {
+        throw new BadRequestException(
+          `No campus with code "${body.campusCode}". Pass campusName to create it, or use ` +
+            'an existing code.',
+        );
+      }
     }
 
     // Row numbers are 1-based and count the header, matching the spreadsheet path so an

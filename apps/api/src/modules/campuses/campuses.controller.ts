@@ -32,16 +32,6 @@ import {
  * diagnostic assessment simply has no batch, because a placeholder batch would appear in
  * every picker and every assignment target as somewhere work could be set.
  */
-const DEFAULT_BATCHES = [
-  { name: 'Foundation Level', code: 'A', description: 'Batch A — Foundation Level', sortOrder: 1 },
-  {
-    name: 'Intermediate Level',
-    code: 'B',
-    description: 'Batch B — Intermediate Level',
-    sortOrder: 2,
-  },
-] as const;
-
 @ApiTags('Campuses')
 @ApiBearerAuth()
 @Controller('campuses')
@@ -113,38 +103,10 @@ export class CampusesController {
   @Audit('CAMPUS_CREATED', 'Campus')
   @ApiOperation({ summary: 'Create a campus, with its standard batches' })
   async create(@Body() dto: CreateCampusDto) {
-    const code = dto.code ?? (await this.campuses.deriveAvailableCode(dto.name));
-
-    const clash = await this.prisma.campus.findFirst({
-      where: { OR: [{ code }, { name: dto.name }] },
-      select: { code: true, name: true },
-    });
-    if (clash) {
-      throw new BadRequestException(
-        clash.code === code
-          ? `A campus with code "${code}" already exists.`
-          : `A campus named "${dto.name}" already exists.`,
-      );
-    }
-
-    const created = await this.prisma.campus.create({
-      data: {
-        name: dto.name,
-        code,
-        description: dto.description ?? null,
-        sortOrder: dto.sortOrder ?? 0,
-      },
-    });
-
-    // A campus with no batches can hold no students and receive no assignments, so the
-    // standard three are created with it unless the caller explicitly opts out.
-    if (dto.createDefaultBatches !== false) {
-      await this.prisma.batch.createMany({
-        data: DEFAULT_BATCHES.map((batch) => ({ ...batch, campusId: created.id })),
-        skipDuplicates: true,
-      });
-    }
-
+    // Delegates: the rules for creating a campus — clash detection, derived code, the
+    // default batches — live in the service so the roster import applies exactly the same
+    // ones.
+    const created = await this.campuses.create(dto);
     return this.campuses.findById(created.id);
   }
 
