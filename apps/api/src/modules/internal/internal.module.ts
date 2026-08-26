@@ -7,6 +7,7 @@ import { AuditModule } from '../audit/audit.module';
 import { EmailReportsModule } from '../email-reports/email-reports.module';
 import { BatchesModule } from '../batches/batches.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
 import { CronTasksService } from './cron-tasks.service';
 import { IntegrityService } from './integrity.service';
 import { InternalController } from './internal.controller';
@@ -25,6 +26,9 @@ import { InternalController } from './internal.controller';
     EmailReportsModule,
     NotificationsModule,
     BatchesModule,
+    // Read-only: the integrity report checks what the baseline leaderboard actually
+    // computes, using the real service rather than a copy of its logic.
+    BaselineTestsModule,
   ],
   controllers: [InternalController],
   providers: [CronTasksService, IntegrityService],

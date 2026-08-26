@@ -197,6 +197,22 @@ jobs:
                     f"  (accepted submissions: {test['acceptedSubmissions']})")
               for problem in test['perProblem']:
                   print(f"    {problem['solvedByStudents']:>4}  {problem['titleSlug']}")
+
+              # What the product reports, beside the raw counts above. These agreeing is
+              # the fix working; the leaderboard reading 0 while the mirror shows solutions
+              # is the bug, and printing only one of the two hides it.
+              board = test.get('leaderboard')
+              if board:
+                  print(f"  leaderboard: {board['studentsWithAtLeastOneSolved']} student(s) with >=1 solved, "
+                        f"{board['solvedAllCount']} solved all, avg {board['averagePercent']}%, "
+                        f"{board['performanceUnknownStudents']} not synced")
+                  print(f"  distribution (n solved -> students): {board['distribution']}")
+                  mirrored = test['studentsWithAnyAcceptedSolution']
+                  if mirrored > 0 and board['studentsWithAtLeastOneSolved'] == 0:
+                      print(f"::error::Baseline \"{test['name']}\" reports 0 students solving anything "
+                            f"while the mirror holds accepted solutions for {mirrored}. "
+                            f"Performance is being read off participation again.")
+                      sys.exit(1)
           if report.get('baseline'):
               print()
 

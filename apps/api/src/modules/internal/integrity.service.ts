@@ -19,6 +19,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
+import { BaselineTestsService } from '../baseline-tests/baseline-tests.service';
 
 export interface IntegrityFinding {
   /** Stable key, so a smoke test asserts on this rather than on prose. */
@@ -93,6 +94,21 @@ export interface IntegrityReport {
     /** Accepted submissions held for this test's problems, by eligible students. */
     acceptedSubmissions: number;
     perProblem: { titleSlug: string; title: string; solvedByStudents: number }[];
+    /**
+     * What the leaderboard actually computes, beside the raw counts above.
+     *
+     * The raw numbers prove the data exists; these prove the product reports it. A fix
+     * that leaves these at zero while the mirror shows hundreds of solutions is exactly
+     * the failure this whole section was added to catch, so both are printed together.
+     */
+    leaderboard: {
+      studentsWithAtLeastOneSolved: number;
+      solvedAllCount: number;
+      averagePercent: number;
+      /** Index n = students who solved exactly n problems. */
+      distribution: number[];
+      performanceUnknownStudents: number;
+    };
   }[];
 
   email: {
@@ -111,6 +127,7 @@ export class IntegrityService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
+    private readonly baseline: BaselineTestsService,
     @Inject(CONFIG_TOKEN) private readonly config: AppConfig,
   ) {}
 
@@ -250,6 +267,10 @@ export class IntegrityService {
         byProblem.set(row.titleSlug, set);
       }
 
+      // The real service, not a reimplementation — otherwise this checks a copy of the
+      // logic rather than the logic that serves the dashboard.
+      const board = await this.baseline.leaderboard(test.id);
+
       summaries.push({
         testId: test.id,
         name: test.name,
@@ -264,6 +285,15 @@ export class IntegrityService {
           title: problem.problem.title,
           solvedByStudents: byProblem.get(problem.problem.titleSlug)?.size ?? 0,
         })),
+        leaderboard: {
+          studentsWithAtLeastOneSolved: board.rows.filter((row) => row.solvedCount > 0).length,
+          solvedAllCount: board.rows.filter(
+            (row) => row.totalQuestions > 0 && row.solvedCount === row.totalQuestions,
+          ).length,
+          averagePercent: board.averagePercent,
+          distribution: board.performanceDistribution,
+          performanceUnknownStudents: board.performanceUnknownStudents,
+        },
       });
     }
 
