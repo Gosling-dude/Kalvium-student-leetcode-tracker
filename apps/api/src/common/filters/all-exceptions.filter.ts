@@ -82,7 +82,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
         typeof payload === 'string'
           ? payload
           : ((payload as { message?: string | string[] }).message ?? exception.message);
-      return { status, message, error: this.reasonFor(status) };
+      // A thrower that attached a `code` meant it for the client — it is how a caller
+      // tells one 403 from another without parsing prose (`PASSWORD_CHANGE_REQUIRED` is
+      // "finish setting up your account", not "you may not do that"). Dropping it here
+      // made the field on `ErrorResponseBody` unreachable for every HttpException.
+      const code =
+        typeof payload === 'string' ? undefined : (payload as { code?: string }).code;
+      return { status, message, error: this.reasonFor(status), code };
     }
 
     // Provider failures are upstream problems, not client errors: 502/503/504 tell the

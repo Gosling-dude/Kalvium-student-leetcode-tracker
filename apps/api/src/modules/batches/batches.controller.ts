@@ -17,6 +17,7 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { BatchesService } from './batches.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { StudentsService } from '../students/students.service';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { StudentQueryDto } from '../students/dto/student.dto';
 import {
   BatchStatsQueryDto,
@@ -35,6 +36,7 @@ export class BatchesController {
     private readonly campuses: CampusesService,
     private readonly students: StudentsService,
     private readonly prisma: PrismaService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
 
   @Get()
@@ -64,8 +66,21 @@ export class BatchesController {
    */
   @Get(':id/students')
   @ApiOperation({ summary: 'Students in a batch' })
-  async findStudents(@Param('id', ParseUUIDPipe) id: string, @Query() query: StudentQueryDto) {
-    await this.batches.findById(id);
+  async findStudents(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: StudentQueryDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const batch = await this.batches.findById(id);
+
+    // A batch belongs to exactly one campus, so the campus rule answers this route too.
+    // Without it, `/batches/:id/students` is a way to read another campus's roster by
+    // naming one of its batches.
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (!this.mentorScope.canSeeCampus(batch.campusId, allowed)) {
+      return this.students.emptyPage(query);
+    }
+
     // Mutated rather than spread — `skip`/`take` are getters and would be lost.
     query.batchId = id;
     return this.students.findAll(query);

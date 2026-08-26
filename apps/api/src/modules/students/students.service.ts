@@ -59,8 +59,18 @@ export class StudentsService {
     private readonly metrics: StudentMetricsService,
   ) {}
 
-  async findAll(query: StudentQueryDto): Promise<Paginated<StudentSummary>> {
-    const where = this.buildWhere(query);
+  /**
+   * `scope` is authorization, not filtering, which is why it is a separate argument rather
+   * than a field on `StudentQueryDto`. The DTO is parsed from the query string under
+   * `forbidNonWhitelisted`, so anything declared on it is something a client is allowed to
+   * send — and "which campuses may you read" is precisely the one value a caller must not
+   * be able to supply.
+   */
+  async findAll(
+    query: StudentQueryDto,
+    scope: { campusIds?: string[] } = {},
+  ): Promise<Paginated<StudentSummary>> {
+    const where = this.buildWhere(query, scope);
     const sortBy = safeSortField(query.sortBy, SORTABLE, 'name');
 
     const [rows, total] = await this.prisma.$transaction([
@@ -685,7 +695,10 @@ export class StudentsService {
    * `includeArchived=true` alongside everyone else — so no screen shows them by
    * accident while every historical record still points at them.
    */
-  private buildWhere(query: StudentQueryDto): Prisma.StudentWhereInput {
+  private buildWhere(
+    query: StudentQueryDto,
+    scope: { campusIds?: string[] } = {},
+  ): Prisma.StudentWhereInput {
     const search = query.search?.trim();
 
     const archiveScope: Prisma.StudentWhereInput = query.status
@@ -698,13 +711,12 @@ export class StudentsService {
       ...archiveScope,
       ...(query.squadId ? { squadId: query.squadId } : {}),
       // A single campus when one was asked for and permitted; otherwise the set the
-      // caller may read. `campusIds` is set by the controller from the mentor's grants —
-      // never from client input — so a mentor cannot widen their own scope with a query
-      // parameter.
+      // caller may read, which reaches here from their mentor grants and never from the
+      // request.
       ...(query.campusId
         ? { campusId: query.campusId }
-        : query.campusIds
-          ? { campusId: { in: query.campusIds } }
+        : scope.campusIds
+          ? { campusId: { in: scope.campusIds } }
           : {}),
       ...(query.batchId ? { batchId: query.batchId } : {}),
       ...(query.squadNumber !== undefined

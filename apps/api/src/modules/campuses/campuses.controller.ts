@@ -15,6 +15,7 @@ import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decora
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CampusesService } from './campuses.service';
 import { StudentsService } from '../students/students.service';
+import { MentorScopeService } from './mentor-scope.service';
 import { StudentQueryDto } from '../students/dto/student.dto';
 import {
   CampusStatsQueryDto,
@@ -49,6 +50,7 @@ export class CampusesController {
     private readonly campuses: CampusesService,
     private readonly students: StudentsService,
     private readonly prisma: PrismaService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
 
   @Get()
@@ -87,8 +89,20 @@ export class CampusesController {
    */
   @Get(':id/students')
   @ApiOperation({ summary: 'Students at a campus' })
-  async findStudents(@Param('id', ParseUUIDPipe) id: string, @Query() query: StudentQueryDto) {
+  async findStudents(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: StudentQueryDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     await this.campuses.findById(id);
+
+    // The same campus rule as `GET /students`. This route names a campus in its path
+    // rather than a query parameter, which makes it the obvious way around a filter that
+    // only guarded the directory — so it is guarded here too, with the same empty-result
+    // answer rather than a 403.
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (!this.mentorScope.canSeeCampus(id, allowed)) return this.students.emptyPage(query);
+
     // Mutated rather than spread — `skip`/`take` are getters and would be lost.
     query.campusId = id;
     return this.students.findAll(query);

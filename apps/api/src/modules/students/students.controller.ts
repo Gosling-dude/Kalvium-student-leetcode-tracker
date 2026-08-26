@@ -118,9 +118,8 @@ export class StudentsController {
     const narrowed = this.mentorScope.narrow(query.campusId, allowed);
     if (narrowed.deny) return this.students.emptyPage(query);
     query.campusId = narrowed.campusId;
-    query.campusIds = narrowed.campusIds;
 
-    return this.students.findAll(query);
+    return this.students.findAll(query, { campusIds: narrowed.campusIds });
   }
 
   @Get('filters')
