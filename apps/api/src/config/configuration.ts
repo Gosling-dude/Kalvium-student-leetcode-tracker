@@ -6,6 +6,9 @@
  * when a sync silently writes submissions into the wrong day.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   DEFAULT_PROGRAM_TIMEZONE,
   DEFAULT_PROBLEMS_PER_DAY,
@@ -14,6 +17,27 @@ import {
 } from '@dsa/shared';
 
 export type QueueDriver = 'bullmq' | 'inline';
+
+/**
+ * The commit this process is running: the environment first (it describes the *running*
+ * deployment), then the id baked in at build time.
+ *
+ * Never throws. A missing commit id degrades one deployment check to a warning; a config
+ * loader that threw here would take the whole API down for it.
+ */
+function resolveBuildCommit(): string | null {
+  const injected = process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT;
+  if (injected?.trim()) return injected.trim();
+
+  try {
+    // Beside the compiled `main.js`, written by `scripts/write-build-info.mjs`.
+    const file = join(__dirname, '..', 'build-info.json');
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { commit?: string | null };
+    return parsed.commit?.trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 export interface AppConfig {
   env: 'development' | 'test' | 'production';
@@ -25,11 +49,17 @@ export interface AppConfig {
   /**
    * Which commit this process is running.
    *
-   * Read from the host's own injected variable (`RENDER_GIT_COMMIT` on Render), falling
-   * back to a generic `GIT_COMMIT` for other hosts and `null` when nothing set it. It
-   * exists so a deployment check can tell "the new build is live" from "the host is still
-   * serving the previous one" — a healthy `/health` only proves *a* version is up, and a
-   * smoke test that races the build reports on code that was never deployed.
+   * Recorded at build time into `dist/build-info.json` (see `scripts/write-build-info.mjs`),
+   * with the host's injected variable as an override for a running process.
+   *
+   * It exists so a deployment check can tell "the new build is live" from "the host is
+   * still serving the previous one" — a healthy `/health` only proves *a* version is up,
+   * and a smoke test that races the build reports on code that was never deployed.
+   *
+   * Read from the build artifact rather than only from the environment because the
+   * injected variable is not reliably there: Render exposes `RENDER_GIT_COMMIT` for some
+   * service configurations and not others, and depending on it left the deployment check
+   * degraded to a warning on every run. The build always happens in a git clone.
    */
   build: { commit: string | null };
 
@@ -234,7 +264,7 @@ export function loadConfiguration(): AppConfig {
 
   return {
     env,
-    build: { commit: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null },
+    build: { commit: resolveBuildCommit() },
     port: toInt(process.env.PORT, 4000),
     apiPrefix: process.env.API_PREFIX ?? 'api/v1',
     corsOrigins: toList(process.env.CORS_ORIGINS, ['http://localhost:3000']),
