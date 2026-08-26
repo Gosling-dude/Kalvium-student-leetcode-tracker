@@ -308,6 +308,19 @@ export class ImportStudentsDto {
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
   updateExisting?: boolean;
+
+  /**
+   * Which campus these students belong to.
+   *
+   * Required whenever more than one campus exists. The service already refused to guess —
+   * a wrong guess files a whole cohort where no mentor is looking for them — but the DTO
+   * never carried the value and the controller never passed it, so on a multi-campus
+   * deployment the import screen could only ever return that refusal.
+   */
+  @ApiPropertyOptional({ description: 'Campus these students belong to. Required if several exist.' })
+  @IsOptional()
+  @IsUUID()
+  campusId?: string;
 }
 
 export class CreateNoteDto {

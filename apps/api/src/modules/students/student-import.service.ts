@@ -24,6 +24,9 @@ import type { Prisma } from '@prisma/client';
 import {
   IMPORT_COLUMN_ALIASES,
   normaliseBatchCode,
+  normaliseSquadNumber,
+  resolveLeetcodeProfile,
+  squadName,
   resolvePlacementEffectiveDate,
   type ImportResult,
   type ImportRowError,
@@ -40,6 +43,8 @@ interface ParsedRow {
   batch: string | null;
   squad: string | null;
   leetcodeUsername: string;
+  /** Exactly what the sheet held, before any handle extraction — used in error messages. */
+  rawLeetcode: string | null;
   phone: string | null;
 }
 
@@ -419,6 +424,7 @@ export class StudentImportService {
         batch: read('batch') || null,
         squad: read('squad') || null,
         leetcodeUsername: this.normaliseUsername(username),
+        rawLeetcode: username || null,
         phone: read('phone') || null,
       });
     });
@@ -469,11 +475,48 @@ export class StudentImportService {
    * Accepting that is cheaper than rejecting it — a rejected row means a student
    * silently missing from every report.
    */
+  /**
+   * The handle a LeetCode column refers to, via the shared resolver.
+   *
+   * Previously a local regex that treated the last path segment of *any* leetcode.com URL
+   * as a handle — so `leetcode.com/profile/someone` was silently accepted as the handle
+   * "someone", which is a guess about a URL that is not a profile link at all. The shared
+   * resolver already distinguishes a real `/u/` profile, a non-profile URL, a bare handle
+   * and a handle recoverable from a pasted page title, and it is unit-tested. One rule,
+   * used everywhere, beats two that disagree about the same string.
+   *
+   * Returns the raw value when nothing resolves, so `validateRow` reports it against what
+   * the sheet actually said rather than against something this method invented.
+   */
   private normaliseUsername(raw: string): string {
-    const trimmed = raw.trim();
-    const urlMatch = /leetcode\.com\/(?:u\/|profile\/)?([A-Za-z0-9_-]+)/i.exec(trimmed);
-    if (urlMatch?.[1]) return urlMatch[1];
-    return trimmed.replace(/^@/, '');
+    const resolved = resolveLeetcodeProfile(raw);
+    return resolved.username ?? raw.trim().replace(/^@/, '');
+  }
+
+  /**
+   * Why a LeetCode column could not be trusted, in the vocabulary the operator needs:
+   * `INVALID_PROFILE` for a link that is not a profile, `NEEDS_PROFILE_URL` for anything
+   * that did not resolve to a handle. `null` when the value is usable.
+   *
+   * A handle recovered from a pasted page title resolves but is still flagged, because
+   * LeetCode wrote that title and nothing in the row confirms the handle still exists —
+   * the post-import validation pass is what settles those.
+   */
+  private profileIssue(raw: string): { state: string; message: string } | null {
+    const resolved = resolveLeetcodeProfile(raw);
+    if (resolved.username) return null;
+
+    return resolved.resolution === 'NON_PROFILE_URL'
+      ? {
+          state: 'INVALID_PROFILE',
+          message:
+            'This is a generic LeetCode page, not a student profile. Supply the ' +
+            "student's own https://leetcode.com/u/<handle>/ link.",
+        }
+      : {
+          state: 'NEEDS_PROFILE_URL',
+          message: `Could not read a LeetCode handle from "${raw.trim()}" (${resolved.resolution}).`,
+        };
   }
 
   private validateRow(row: ParsedRow): ImportRowError[] {
@@ -501,12 +544,18 @@ export class StudentImportService {
         data,
       });
     } else if (!USERNAME_PATTERN.test(row.leetcodeUsername)) {
+      // Named in the operator's vocabulary rather than as a generic pattern failure: an
+      // admin reading "not a valid username" about `leetcode.com/profile/` has to work out
+      // what to do, while "this is a generic page, supply the student's own /u/ link" says
+      // it. `rawLeetcode` is what the sheet held, before any extraction.
+      const issue = this.profileIssue(row.rawLeetcode ?? row.leetcodeUsername);
       errors.push({
         row: row.rowNumber,
         field: 'leetcodeUsername',
-        message:
-          `"${row.leetcodeUsername}" is not a valid LeetCode username ` +
-          '(letters, digits, underscore and hyphen only)',
+        message: issue
+          ? `${issue.state}: ${issue.message}`
+          : `"${row.leetcodeUsername}" is not a valid LeetCode username ` +
+            '(letters, digits, underscore and hyphen only)',
         data,
       });
     }
@@ -601,12 +650,19 @@ export class StudentImportService {
     const pairs = new Map<string, { batch: string | null; squad: string }>();
     for (const row of rows) {
       if (!row.squad) continue;
-      pairs.set(this.squadKey(row.batch, row.squad), { batch: row.batch, squad: row.squad });
+      pairs.set(this.squadKey(row.batch, row.squad), {
+        batch: row.batch,
+        squad: canonicalSquadName(row.squad),
+      });
     }
 
     for (const [key, pair] of pairs) {
       const batchId = pair.batch ? (batchIds.get(pair.batch.toLowerCase()) ?? null) : null;
 
+      // Matched on the canonical name, so a sheet saying "69", "squad 69" or "Squad 69"
+      // all resolve to the one squad. Matching the raw text created a second squad called
+      // "69" beside the existing "Squad 69" — the same cohort split across two rows, half
+      // the students invisible to any filter on either.
       const existing = await this.prisma.squad.findFirst({
         where: { name: pair.squad, batchId, campusId },
       });
@@ -626,7 +682,21 @@ export class StudentImportService {
   }
 
   /** Squad names are unique per batch, so the cache key must include the batch. */
+  /** Keyed on the canonical squad name, so "69" and "Squad 69" are one entry, not two. */
   private squadKey(batch: string | null, squad: string | null): string {
-    return `${(batch ?? '').toLowerCase()}::${(squad ?? '').toLowerCase()}`;
+    const canonical = squad ? canonicalSquadName(squad).toLowerCase() : '';
+    return `${(batch ?? '').toLowerCase()}::${canonical}`;
   }
+}
+
+/**
+ * The one spelling of a squad name.
+ *
+ * Sheets arrive with "69", "squad 69", "Squad 69" and "SQUAD 69" for the same group. A bare
+ * or differently-cased number becomes the canonical "Squad 69"; anything that is not a
+ * squad number at all (a named pod, say) is kept verbatim rather than mangled.
+ */
+function canonicalSquadName(raw: string): string {
+  const number = normaliseSquadNumber(raw);
+  return number === null ? raw.trim() : squadName(number);
 }

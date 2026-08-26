@@ -219,6 +219,7 @@ export class StudentsController {
         file: { type: 'string', format: 'binary' },
         dryRun: { type: 'boolean' },
         updateExisting: { type: 'boolean' },
+        campusId: { type: 'string', format: 'uuid' },
       },
     },
   })
@@ -235,6 +236,7 @@ export class StudentsController {
     return this.importer.import(file.buffer, {
       dryRun: dto.dryRun,
       updateExisting: dto.updateExisting,
+      campusId: dto.campusId,
     });
   }
 

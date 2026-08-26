@@ -87,6 +87,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await prisma.squad.deleteMany({
+    where: { campusId, OR: [{ name: 'Squad 69' }, { name: 'Alpha Pod' }] },
+  });
   const students = await prisma.student.findMany({
     where: { email: { startsWith: RUN } },
     select: { id: true },
@@ -99,6 +102,41 @@ afterAll(async () => {
     await prisma.student.deleteMany({ where: { id: { in: ids } } });
   }
   await prisma.$disconnect();
+});
+
+describe('spreadsheet import — squad naming', () => {
+  it('resolves "69", "squad 69" and "Squad 69" to one squad', async () => {
+    // Sheets arrive with every spelling of the same group. Matching the raw text created a
+    // second squad literally named "69" beside the existing "Squad 69" — one cohort split
+    // across two rows, with half the students invisible to a filter on either.
+    const rows = [
+      { name: 'Bare', email: email('sq-bare'), leetcode: `${RUN}-sqbare`, squad: '69' },
+      { name: 'Lower', email: email('sq-lower'), leetcode: `${RUN}-sqlower`, squad: 'squad 69' },
+      { name: 'Proper', email: email('sq-proper'), leetcode: `${RUN}-sqproper`, squad: 'Squad 69' },
+    ];
+    await importer.import(await sheet(rows), { campusId, updateExisting: true });
+
+    const squads = await prisma.squad.findMany({
+      where: { campusId, name: { contains: '69' } },
+      include: { _count: { select: { students: true } } },
+    });
+
+    expect(squads).toHaveLength(1);
+    expect(squads[0]!.name).toBe('Squad 69');
+    expect(squads[0]!._count.students).toBe(3);
+  });
+
+  it('leaves a squad that is not a number alone', async () => {
+    await importer.import(
+      await sheet([
+        { name: 'Named', email: email('sq-named'), leetcode: `${RUN}-sqnamed`, squad: 'Alpha Pod' },
+      ]),
+      { campusId, updateExisting: true },
+    );
+
+    const squad = await prisma.squad.findFirst({ where: { campusId, name: 'Alpha Pod' } });
+    expect(squad).not.toBeNull();
+  });
 });
 
 describe('spreadsheet import — placement history', () => {
