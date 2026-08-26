@@ -13,8 +13,12 @@ on:
   workflow_dispatch:
     inputs:
       campusCode:
-        description: 'Campus these students belong to (e.g. SRM, VELS)'
+        description: 'Campus code these students belong to (e.g. SRM, VELS, ALLIANCE)'
         required: true
+        type: string
+      campusName:
+        description: 'Full name — ONLY needed to create a campus that does not exist yet (e.g. "Alliance University"). Leave blank for an existing campus.'
+        required: false
         type: string
       dryRun:
         description: 'Report what would change without writing'
@@ -55,6 +59,7 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           ROSTER: ${{ secrets.ALLIANCE_ROSTER }}
           CAMPUS: ${{ inputs.campusCode }}
+          CAMPUS_NAME: ${{ inputs.campusName }}
           DRY_RUN: ${{ inputs.dryRun }}
         run: |
           set -euo pipefail
@@ -88,6 +93,12 @@ jobs:
               'updateExisting': True,
               'rows': rows,
           }
+          # Only sent when supplied. The endpoint creates a campus only when it is named,
+          # so an absent name means "this campus must already exist" — which is what you
+          # want for every import after the first.
+          campus_name = os.environ.get('CAMPUS_NAME', '').strip()
+          if campus_name:
+              payload['campusName'] = campus_name
           with open('/tmp/payload.json', 'w') as handle:
               json.dump(payload, handle)
           # Count only — never the rows themselves.
