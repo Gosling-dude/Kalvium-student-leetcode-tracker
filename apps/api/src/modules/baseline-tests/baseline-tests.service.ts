@@ -718,11 +718,21 @@ export class BaselineTestsService {
     const scored = summaries.filter((attempt) => attempt.status !== 'NOT_STARTED');
     const completed = summaries.filter((attempt) => attempt.status === 'SUBMITTED').length;
 
+    // Score, median and time describe *the sitting*, so they come from the attempts and are
+    // empty when nobody sat it — which is the honest answer to "how did the test go".
     const scores = scored.map((attempt) => attempt.score).sort((a, b) => a - b);
-    const percents = scored.map((attempt) => attempt.percent);
     const times = scored
       .map((attempt) => attempt.timeTakenSeconds)
       .filter((seconds): seconds is number => seconds !== null);
+
+    // `averagePercent` is the headline "how is the cohort doing" figure and sits beside
+    // solvedAll / attemptedNotSolved / notAttempted, all of which are performance-based —
+    // so it is too, and it is computed exactly as the leaderboard computes it. Leaving it
+    // attempt-based would put two different averages for one test on one screen.
+    const measured = [...performanceByStudent.values()];
+    const performancePercents = measured.map((performance) =>
+      baselinePercent(countSolved(performance), test.problems.length),
+    );
 
     const maxScore = test.problems.reduce((total, problem) => total + problem.points, 0);
 
@@ -738,7 +748,10 @@ export class BaselineTestsService {
       notStarted: Math.max(0, eligible.length - scored.length),
       averageScore: average(scores),
       medianScore: median(scores),
-      averagePercent: average(percents),
+      // Rounded exactly as the leaderboard rounds it. "Almost the same number" on two
+      // views of one test is still two numbers to reconcile.
+      averagePercent:
+        performancePercents.length > 0 ? Math.round(average(performancePercents)) : 0,
       averageTimeTakenSeconds: times.length > 0 ? Math.round(average(times)) : null,
       // Ability across the whole eligible cohort, from the mirror — not "of those who sat
       // it". A student who solved all four last month counts here whether or not they

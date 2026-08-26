@@ -275,6 +275,30 @@ describe('baseline leaderboard', () => {
     expect(board.rows.map((row) => row.studentName)).toEqual(['Absent Student']);
   });
 
+  it('reports the same average on the report and the leaderboard', async () => {
+    // One test, one screen, one number. The report's headline average sits beside
+    // performance-based counts, so computing it from attempts put two different averages
+    // for the same cohort in front of the same reader.
+    const [board, report] = await Promise.all([
+      service.leaderboard(testId),
+      service.report(testId),
+    ]);
+
+    expect(report.averagePercent).toBe(board.averagePercent);
+  });
+
+  it('separates participation counts from performance counts on the report', async () => {
+    const report = await service.report(testId);
+
+    // Participation: three sat it, one did not.
+    expect(report.started).toBe(3);
+    expect(report.notStarted).toBe(1);
+    // Performance: counted across everyone eligible, including the absent student.
+    expect(report.solvedAll + report.attemptedNotSolved + report.notAttempted).toBeLessThanOrEqual(
+      report.totalEligible,
+    );
+  });
+
   it('gives the per-question breakdown for one student', async () => {
     const result = await service.studentResult(testId, studentIds.rahul!);
 
