@@ -317,6 +317,10 @@ export function isTestOpen(
  * measurement of the whole cohort, and "absent" is a result a mentor needs to see next to
  * the others — a leaderboard built only from attempt rows silently shrinks the denominator
  * and makes a test half the cohort skipped look like a test everybody took.
+ *
+ * `solvedCount` here is *general performance* — problems solved at any time — not problems
+ * solved inside the test window. Those are different questions and the board answers the
+ * first; see `computeGeneralPerformance`.
  */
 export interface BaselineRankableEntry {
   /** Stable identity — the final, deterministic tiebreak. */
@@ -326,8 +330,15 @@ export interface BaselineRankableEntry {
   score: number;
   /** Seconds from the start of the attempt to the last accepted answer; `null` if none. */
   timeTakenSeconds: number | null;
-  /** `NOT_STARTED` never outranks a student who sat the test, whatever the arithmetic. */
-  attempted: boolean;
+  /**
+   * Whether we hold any measurement for this student at all.
+   *
+   * A student we have never successfully synced sinks below everyone measured: their 0 is
+   * an absence of evidence, and ranking it as a score would place them above students who
+   * genuinely solved nothing. Note this is **not** attendance — a student who never sat the
+   * test but has solved three of its problems is measured, and ranks on those three.
+   */
+  performanceKnown: boolean;
 }
 
 export interface BaselineRankedEntry<T extends BaselineRankableEntry = BaselineRankableEntry> {
@@ -339,18 +350,23 @@ export interface BaselineRankedEntry<T extends BaselineRankableEntry = BaselineR
 
 /**
  * Ordering, most significant first:
- *   1. attempted        (first) — a student who did not sit the test is never ranked above
- *                                 one who did, even though both may score 0
- *   2. score            (desc)  — the headline number, points rather than raw count
- *   3. solvedCount      (desc)  — breaks equal-score ties when problems carry equal points
- *   4. timeTakenSeconds (asc)   — faster wins; `null` (solved nothing) sorts last
+ *   1. performanceKnown (first) — an unmeasured student is never ranked above a measured
+ *                                 one; their 0 is an absence of evidence, not a score
+ *   2. solvedCount      (desc)  — the headline: problems solved, at any time
+ *   3. score            (desc)  — the weighted figure breaks ties between equal counts
+ *   4. timeTakenSeconds (asc)   — faster wins; `null` sorts last
  *   5. studentName      (asc)   — deterministic and human-sensible
  *   6. studentId        (asc)   — guarantees totality
+ *
+ * Attendance is deliberately **not** a sort key. The board ranks what students can do, and
+ * a student who solved three of the four problems last fortnight outranks one who sat the
+ * test and solved none — which is the correct reading of both facts, and the reason the two
+ * are reported in separate columns rather than folded into one.
  */
 export function compareBaselineEntries(a: BaselineRankableEntry, b: BaselineRankableEntry): number {
-  if (a.attempted !== b.attempted) return a.attempted ? -1 : 1;
-  if (a.score !== b.score) return b.score - a.score;
+  if (a.performanceKnown !== b.performanceKnown) return a.performanceKnown ? -1 : 1;
   if (a.solvedCount !== b.solvedCount) return b.solvedCount - a.solvedCount;
+  if (a.score !== b.score) return b.score - a.score;
 
   const aTime = a.timeTakenSeconds;
   const bTime = b.timeTakenSeconds;
@@ -368,7 +384,7 @@ export function compareBaselineEntries(a: BaselineRankableEntry, b: BaselineRank
 /** Two students tie only when the *meaningful* fields match — identity is excluded. */
 function isBaselineTie(a: BaselineRankableEntry, b: BaselineRankableEntry): boolean {
   return (
-    a.attempted === b.attempted &&
+    a.performanceKnown === b.performanceKnown &&
     a.score === b.score &&
     a.solvedCount === b.solvedCount &&
     a.timeTakenSeconds === b.timeTakenSeconds
@@ -414,4 +430,105 @@ export function rankBaselineEntries<T extends BaselineRankableEntry>(
 export function baselinePercent(score: number, maxScore: number): number {
   if (maxScore <= 0) return 0;
   return Math.round((score / maxScore) * 100);
+}
+
+// ---------------------------------------------------------------------------
+// General LeetCode performance
+// ---------------------------------------------------------------------------
+
+/**
+ * Baseline performance and baseline *participation* are two different questions, and
+ * answering the first with the second is what made an entire cohort read 0/4.
+ *
+ *   Participation — did this student sit the test, inside its window?
+ *   Performance   — can this student solve these problems, on the evidence we hold?
+ *
+ * A student who solved three of the four problems last fortnight and never opened the test
+ * is "Absent" *and* 3/4. Both statements are true, neither implies the other, and a report
+ * that collapses them into one number is wrong however it collapses them.
+ *
+ * Performance is therefore computed from the submission mirror with **no time filter at
+ * all** — not the attempt window, not the test's open/close times, not the program day.
+ * An accepted solution is evidence of ability whenever it was written.
+ */
+export interface BaselineSubmissionEvidence {
+  titleSlug: string;
+  /** Provider verdict. Only `ACCEPTED` counts as solved; the rest are attempts. */
+  status: string;
+  submittedAt: Date;
+}
+
+export interface BaselineProblemPerformance {
+  titleSlug: string;
+  solved: boolean;
+  /** Submissions seen for this problem, any verdict. Distinct from `solved`. */
+  attempts: number;
+  /** Earliest accepted submission — when they first demonstrated it. */
+  firstAcceptedAt: Date | null;
+  /** Most recent accepted submission — useful when a student re-solves for practice. */
+  latestAcceptedAt: Date | null;
+}
+
+/**
+ * One student's standing against a fixed problem set, from their whole submission history.
+ *
+ * A problem counts **once** no matter how many times it was submitted: five submissions to
+ * `two-sum` with one accepted is one problem solved, not five.
+ *
+ * Pure — the caller loads the rows and passes them in, so the rule is testable without a
+ * database and identical everywhere it is applied.
+ */
+export function computeGeneralPerformance(
+  titleSlugs: readonly string[],
+  submissions: readonly BaselineSubmissionEvidence[],
+): BaselineProblemPerformance[] {
+  return titleSlugs.map((rawSlug) => {
+    const slug = rawSlug.toLowerCase();
+
+    // Matched on the slug, never the display title: titles get re-worded and differ in
+    // punctuation and case between the problem record and the submission mirror, while the
+    // slug is what the provider itself keys submissions by.
+    const mine = submissions.filter((row) => row.titleSlug.toLowerCase() === slug);
+    const accepted = mine
+      .filter((row) => row.status === 'ACCEPTED')
+      .sort((a, b) => a.submittedAt.getTime() - b.submittedAt.getTime());
+
+    return {
+      titleSlug: slug,
+      solved: accepted.length > 0,
+      attempts: mine.length,
+      firstAcceptedAt: accepted[0]?.submittedAt ?? null,
+      latestAcceptedAt: accepted[accepted.length - 1]?.submittedAt ?? null,
+    };
+  });
+}
+
+/** Distinct problems solved from the set. Never exceeds the number of problems. */
+export function countSolved(performance: readonly BaselineProblemPerformance[]): number {
+  return performance.filter((problem) => problem.solved).length;
+}
+
+/**
+ * Whether a student's "0 solved" is a measurement or an absence of one.
+ *
+ * A sync that has never succeeded means we hold no submissions for this student — not that
+ * they have solved nothing. Reporting the two identically is the false zero the whole sync
+ * design exists to prevent, and it reaches the baseline board the same way it reaches the
+ * daily one. `OK` is not required: a student synced successfully last week and failing
+ * today still has real mirrored data, which is the last thing we genuinely knew.
+ */
+export function isPerformanceKnown(input: {
+  syncStatus: string | null;
+  lastSuccessAt: Date | null;
+  /**
+   * Whether the mirror holds any submission for this student at all.
+   *
+   * Independent evidence, and it settles the case the sync state alone gets wrong: rows in
+   * the mirror could only have been written by a read that succeeded, so a student with
+   * submissions has been measured even if their `StudentSyncState` is missing or was reset
+   * — which happens when a handle is changed, and to any row predating that table.
+   */
+  hasSubmissions?: boolean;
+}): boolean {
+  return input.lastSuccessAt !== null || input.hasSubmissions === true;
 }

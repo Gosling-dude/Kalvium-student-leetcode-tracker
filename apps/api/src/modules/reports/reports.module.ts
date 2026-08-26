@@ -13,6 +13,14 @@ import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
 import { BaselineTestsService } from '../baseline-tests/baseline-tests.service';
 import { ReportsService } from './reports.service';
 
+/** Matches the on-screen wording, so an export and the page it came from read alike. */
+const PARTICIPATION_LABELS: Record<string, string> = {
+  SUBMITTED: 'Completed',
+  IN_PROGRESS: 'In progress',
+  EXPIRED: 'Expired',
+  NOT_STARTED: 'Absent',
+};
+
 @ApiTags('Reports')
 @ApiBearerAuth()
 @Controller('reports')
@@ -223,16 +231,27 @@ export class ReportsController {
         { header: 'Solved', key: 'solvedCount', width: 10 },
         { header: 'Not Solved', key: 'notSolvedCount', width: 12 },
         { header: 'Score %', key: 'percent', width: 10 },
-        { header: 'Status', key: 'status', width: 16 },
+        // Participation and performance are separate columns here for the same reason they
+        // are separate on screen: a reader must be able to see "Absent" beside "3 solved"
+        // without one being mistaken for the other.
+        { header: 'Test Participation', key: 'participation', width: 18 },
+        { header: 'Solved During Test', key: 'inWindowSolvedCount', width: 18 },
+        { header: 'Sync Status', key: 'syncStatus', width: 16 },
+        { header: 'Last Successful Sync', key: 'lastSuccessfulSyncAt', width: 24 },
       ],
       board.rows.map((row) => ({
         ...row,
         testTitle: board.testTitle,
-        // A student who did not sit the test has no standing to report. They still hold a
-        // board position (everyone absent ties), but printing "1" next to a row that
-        // scored nothing reads as a result, and the screen shows a dash here for exactly
-        // that reason — the export must not disagree with the page it came from.
-        rank: row.attempted ? row.rank : '—',
+        // Rank now describes performance, which every measured student has whether or not
+        // they sat the test. Only an unmeasured student has no standing to report, and the
+        // screen shows a dash there for the same reason.
+        rank: row.performanceKnown ? row.rank : '—',
+        solvedCount: row.performanceKnown ? row.solvedCount : '—',
+        notSolvedCount: row.performanceKnown ? row.notSolvedCount : '—',
+        percent: row.performanceKnown ? row.percent : 'not synced',
+        participation: PARTICIPATION_LABELS[row.status] ?? row.status,
+        lastSuccessfulSyncAt: row.lastSuccessfulSyncAt ?? '',
+        syncStatus: row.syncStatus ?? '',
       })),
     );
     this.send(res, payload);

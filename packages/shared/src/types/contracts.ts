@@ -1293,10 +1293,25 @@ export interface BaselineLeaderboardRow {
   batchName: string | null;
   /** Problems on the test — the denominator, never hardcoded. */
   totalQuestions: number;
+  /**
+   * Distinct problems from the set this student has an accepted solution for, **at any
+   * time**. Not scoped to the test window, the test's open/close times, or the program
+   * day: an accepted solution is evidence of ability whenever it was written.
+   *
+   * This is the headline number, and it is deliberately independent of `status` below.
+   * Reading it off participation is what made a whole cohort show 0/4 on problems many of
+   * them had solved.
+   */
   solvedCount: number;
   notSolvedCount: number;
   /** Problems touched without an accepted answer. */
   attemptedCount: number;
+  /**
+   * Problems solved *inside* the student's own attempt window — what the test itself
+   * measured, as opposed to what the student can do. Zero for anyone who never sat it.
+   * Kept beside `solvedCount` rather than replacing it so both questions stay answerable.
+   */
+  inWindowSolvedCount: number;
   /** Weighted points earned — difficulty-scaled, for the mentor report. */
   score: number;
   maxScore: number;
@@ -1309,9 +1324,22 @@ export interface BaselineLeaderboardRow {
   percent: number;
   timeTakenSeconds: number | null;
   submittedAt: string | null;
+  /**
+   * Test *participation*, not performance: did they sit it, and did they finish.
+   * `NOT_STARTED` means absent from the test — it says nothing about `solvedCount`.
+   */
   status: BaselineAttemptStatus;
   /** False for a student with no attempt row at all. */
   attempted: boolean;
+  /** Latest sync outcome for this student, so a 0 can be read in context. */
+  syncStatus: SyncStatus | null;
+  lastSuccessfulSyncAt: string | null;
+  /**
+   * False when no sync has ever succeeded for this student, so we hold no submissions for
+   * them. Their `solvedCount` of 0 is then an absence of measurement, not a measurement of
+   * zero — the two must not be rendered identically.
+   */
+  performanceKnown: boolean;
 }
 
 export interface BaselineLeaderboard {
@@ -1328,6 +1356,14 @@ export interface BaselineLeaderboard {
   averagePercent: number;
   highestPercent: number;
   lowestPercent: number;
+  /**
+   * How many students solved n of the problems, indexed by n — `[0/4, 1/4, 2/4, 3/4, 4/4]`.
+   * Describes ability across the cohort, counting every eligible student regardless of
+   * whether they sat the test.
+   */
+  performanceDistribution: number[];
+  /** Students whose performance is unmeasured because no sync has ever succeeded. */
+  performanceUnknownStudents: number;
   rows: BaselineLeaderboardRow[];
 }
 
@@ -1353,8 +1389,13 @@ export interface BaselineStudentResult {
   timeTakenSeconds: number | null;
   startedAt: string | null;
   submittedAt: string | null;
+  /** Participation. Independent of `solvedCount` — see `BaselineLeaderboardRow.status`. */
   status: BaselineAttemptStatus;
   attempted: boolean;
+  inWindowSolvedCount: number;
+  syncStatus: SyncStatus | null;
+  lastSuccessfulSyncAt: string | null;
+  performanceKnown: boolean;
   problems: BaselineAttemptProblemResult[];
 }
 
@@ -1369,6 +1410,10 @@ export interface BaselineAttemptProblemResult {
   status: ProblemStatus;
   attempts: number;
   solvedAt: string | null;
+  /** Earliest accepted submission, at any time — when they first demonstrated it. */
+  firstAcceptedAt: string | null;
+  /** Most recent accepted submission, at any time. */
+  latestAcceptedAt: string | null;
   timeToSolveSeconds: number | null;
 }
 

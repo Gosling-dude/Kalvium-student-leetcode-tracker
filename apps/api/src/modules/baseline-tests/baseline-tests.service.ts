@@ -32,6 +32,9 @@ import {
   assessRisk,
   attemptExpiry,
   baselinePercent,
+  computeGeneralPerformance,
+  countSolved,
+  isPerformanceKnown,
   BASELINE_RISK_SIGNAL_LABELS,
   BASELINE_RISK_THRESHOLDS,
   describeScope,
@@ -47,6 +50,7 @@ import {
   type BaselineLeaderboard,
   type BaselineLeaderboardRow,
   type BaselineProblemOutcome,
+  type BaselineProblemPerformance,
   type BaselineProblemStat,
   type BaselineScopeBreakdown,
   type BaselineStudentResult,
@@ -54,6 +58,7 @@ import {
   type BaselineTestSummary,
   type DayKey,
   type ProblemStatus,
+  type SyncStatus,
   type StudentBaselineTest,
 } from '@dsa/shared';
 import type { Prisma } from '@prisma/client';
@@ -676,6 +681,13 @@ export class BaselineTestsService {
       },
     });
 
+    // The same mirror-derived performance the board uses, so the report's headline figures
+    // and its leaderboard can never tell a mentor two different stories.
+    const performanceByStudent = await this.generalPerformance(
+      test.problems.map((problem) => problem.problem.titleSlug.toLowerCase()),
+      eligible.map((student) => student.id),
+    );
+
     const summaries = attempts.map((attempt) => this.toAttemptSummary(attempt, test));
     const scored = summaries.filter((attempt) => attempt.status !== 'NOT_STARTED');
     const completed = summaries.filter((attempt) => attempt.status === 'SUBMITTED').length;
@@ -702,17 +714,27 @@ export class BaselineTestsService {
       medianScore: median(scores),
       averagePercent: average(percents),
       averageTimeTakenSeconds: times.length > 0 ? Math.round(average(times)) : null,
-      solvedAll: summaries.filter((a) => a.solvedCount === test.problems.length && a.solvedCount > 0)
-        .length,
+      // Ability across the whole eligible cohort, from the mirror — not "of those who sat
+      // it". A student who solved all four last month counts here whether or not they
+      // opened the test.
+      solvedAll: [...performanceByStudent.values()].filter(
+        (performance) =>
+          test.problems.length > 0 && countSolved(performance) === test.problems.length,
+      ).length,
       // "Tried and got nowhere" and "never opened it" are kept apart here for the same
       // reason they are in the daily tracker: they are different conversations, and the
       // students in the first group are usually the ones who most need one.
-      attemptedNotSolved: summaries.filter((a) => a.solvedCount === 0 && a.attemptedCount > 0)
-        .length,
-      notAttempted:
-        Math.max(0, eligible.length - scored.length) +
-        summaries.filter((a) => a.attemptedCount === 0 && a.status !== 'NOT_STARTED').length,
-      problems: this.problemStats(test, summaries, eligible.length),
+      attemptedNotSolved: [...performanceByStudent.values()].filter(
+        (performance) =>
+          countSolved(performance) === 0 &&
+          performance.some((problem) => problem.attempts > 0),
+      ).length,
+      // Never touched any of these problems, ever — distinct from "sat the test and got
+      // nowhere", which is `attemptedNotSolved` above.
+      notAttempted: [...performanceByStudent.values()].filter((performance) =>
+        performance.every((problem) => problem.attempts === 0),
+      ).length,
+      problems: this.problemStats(test, summaries, performanceByStudent, eligible.length),
       campusBreakdown: this.breakdown(
         summaries,
         eligible,
@@ -737,6 +759,96 @@ export class BaselineTestsService {
         .filter((attempt) => attempt.riskFlags.length > 0)
         .sort((a, b) => b.riskScore - a.riskScore),
     };
+  }
+
+  /**
+   * Every eligible student's standing against the test's problems, from their whole
+   * submission history.
+   *
+   * **No time filter is applied here, deliberately.** Not the attempt window, not the
+   * test's open/close times, not the program day. This is the query whose absence made an
+   * entire cohort read 0/4: performance was being derived from `BaselineTestAttempt` rows,
+   * which only exist once a student clicks Start in the portal — so a cohort that never
+   * opened the test scored zero on problems many of them had solved weeks earlier.
+   *
+   * One query for the whole roster rather than one per student: at 250 students × 20
+   * problems a per-student loop is 250 round trips for data a single indexed scan returns.
+   */
+  private async generalPerformance(
+    titleSlugs: string[],
+    studentIds: string[],
+  ): Promise<Map<string, BaselineProblemPerformance[]>> {
+    const performance = new Map<string, BaselineProblemPerformance[]>();
+    if (studentIds.length === 0 || titleSlugs.length === 0) return performance;
+
+    const rows = await this.prisma.submission.findMany({
+      where: {
+        studentId: { in: studentIds },
+        // Slugs are stored lowercase by the sync; compared lowercase by the rule.
+        titleSlug: { in: titleSlugs },
+      },
+      select: { studentId: true, titleSlug: true, status: true, submittedAt: true },
+    });
+
+    const byStudent = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const list = byStudent.get(row.studentId) ?? [];
+      list.push(row);
+      byStudent.set(row.studentId, list);
+    }
+
+    for (const studentId of studentIds) {
+      performance.set(
+        studentId,
+        computeGeneralPerformance(titleSlugs, byStudent.get(studentId) ?? []),
+      );
+    }
+    return performance;
+  }
+
+  /**
+   * Sync state per student, so a zero can be read in context.
+   *
+   * A student whose sync has never succeeded has *unmeasured* performance, not zero
+   * performance. Rendering the two identically is the false zero the sync design exists to
+   * prevent, and it reaches this board the same way it reaches the daily one.
+   */
+  private async syncStateByStudent(
+    studentIds: string[],
+  ): Promise<
+    Map<string, { status: SyncStatus | null; lastSuccessAt: Date | null; hasSubmissions: boolean }>
+  > {
+    const states = new Map<
+      string,
+      { status: SyncStatus | null; lastSuccessAt: Date | null; hasSubmissions: boolean }
+    >();
+    if (studentIds.length === 0) return states;
+
+    // Submission presence is queried alongside, because it is independent evidence that a
+    // read once succeeded — see `isPerformanceKnown`. Grouped, so it stays one round trip
+    // for the whole roster.
+    const [rows, withSubmissions] = await Promise.all([
+      this.prisma.studentSyncState.findMany({
+        where: { studentId: { in: studentIds } },
+        select: { studentId: true, status: true, lastSuccessAt: true },
+      }),
+      this.prisma.submission.groupBy({
+        by: ['studentId'],
+        where: { studentId: { in: studentIds } },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const mirrored = new Set(withSubmissions.map((row) => row.studentId));
+    for (const studentId of studentIds) {
+      const state = rows.find((row) => row.studentId === studentId);
+      states.set(studentId, {
+        status: (state?.status as SyncStatus | undefined) ?? null,
+        lastSuccessAt: state?.lastSuccessAt ?? null,
+        hasSubmissions: mirrored.has(studentId),
+      });
+    }
+    return states;
   }
 
   /**
@@ -791,12 +903,35 @@ export class BaselineTestsService {
     const maxScore = test.problems.reduce((total, problem) => total + problem.points, 0);
     const attemptByStudent = new Map(attempts.map((attempt) => [attempt.studentId, attempt]));
 
+    // Performance comes from the submission mirror, not from the attempt rows. This is the
+    // fix: with no attempts at all — which is the normal state of a test nobody opened in
+    // the portal — the old code reported the entire cohort as 0 solved, on problems the
+    // mirror held dozens of accepted solutions for.
+    const studentIds = eligible.map((student) => student.id);
+    const slugs = test.problems.map((problem) => problem.problem.titleSlug.toLowerCase());
+    const [performanceByStudent, syncByStudent] = await Promise.all([
+      this.generalPerformance(slugs, studentIds),
+      this.syncStateByStudent(studentIds),
+    ]);
+
     // One entry per eligible student. An attempt belonging to a student who has since left
     // the roster is intentionally not resurrected here — the board describes the cohort as
     // it stands, and `report()` is where historical attempt counts live.
     const entries = eligible.map((student) => {
       const attempt = attemptByStudent.get(student.id);
-      const solvedCount = attempt?.solvedCount ?? 0;
+      const performance = performanceByStudent.get(student.id) ?? [];
+      const sync = syncByStudent.get(student.id) ?? {
+        status: null,
+        lastSuccessAt: null,
+        hasSubmissions: false,
+      };
+
+      // The headline number: distinct problems from this set the student has solved at any
+      // time. Independent of whether they sat the test.
+      const solvedCount = countSolved(performance);
+      // What the test itself measured — solved inside their own attempt window. Zero for
+      // anyone who never sat it, which is correct and is a different fact.
+      const inWindowSolvedCount = attempt?.solvedCount ?? 0;
       const score = attempt?.score ?? 0;
 
       return {
@@ -811,7 +946,10 @@ export class BaselineTestsService {
         totalQuestions,
         solvedCount,
         notSolvedCount: Math.max(0, totalQuestions - solvedCount),
-        attemptedCount: attempt?.attemptedCount ?? 0,
+        inWindowSolvedCount,
+        // Problems touched without an accepted answer, from the whole history.
+        attemptedCount: performance.filter((problem) => !problem.solved && problem.attempts > 0)
+          .length,
         score,
         maxScore: attempt?.maxScore || maxScore,
         // Questions solved, not points earned. The three columns either side of this one
@@ -824,6 +962,15 @@ export class BaselineTestsService {
         submittedAt: attempt?.submittedAt?.toISOString() ?? null,
         status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
         attempted: attempt !== undefined,
+        syncStatus: sync.status,
+        lastSuccessfulSyncAt: sync.lastSuccessAt?.toISOString() ?? null,
+        // A student we have never successfully read has unmeasured performance, not zero
+        // performance. The UI renders the two differently for exactly this reason.
+        performanceKnown: isPerformanceKnown({
+          syncStatus: sync.status,
+          lastSuccessAt: sync.lastSuccessAt,
+          hasSubmissions: sync.hasSubmissions,
+        }),
       };
     });
 
@@ -833,8 +980,20 @@ export class BaselineTestsService {
 
     // Summary statistics describe the whole cohort and are computed before filtering — a
     // squad filter narrows who is listed, not what the test's average was.
+    //
+    // Participation and performance are summarised separately, because they answer
+    // different questions and a reader needs both: "35 started, 25 finished, 64 absent"
+    // beside "12 students can solve all four".
     const sat = ranked.filter((row) => row.attempted);
-    const percents = sat.map((row) => row.percent);
+    const measured = ranked.filter((row) => row.performanceKnown);
+    const percents = measured.map((row) => row.percent);
+
+    // Index n holds the number of students who solved exactly n problems.
+    const performanceDistribution = Array.from({ length: totalQuestions + 1 }, () => 0);
+    for (const row of measured) {
+      const index = Math.min(row.solvedCount, totalQuestions);
+      performanceDistribution[index] = (performanceDistribution[index] ?? 0) + 1;
+    }
 
     const filtered = this.filterLeaderboard(ranked, query);
 
@@ -847,12 +1006,16 @@ export class BaselineTestsService {
       totalStudents: ranked.length,
       attemptedStudents: sat.length,
       notStartedStudents: ranked.length - sat.length,
+      // Averaged over students we actually hold data for. An unmeasured student is not a
+      // zero in the average — they are not a measurement at all.
       averagePercent:
         percents.length > 0
           ? Math.round(percents.reduce((total, p) => total + p, 0) / percents.length)
           : 0,
       highestPercent: percents.length > 0 ? Math.max(...percents) : 0,
       lowestPercent: percents.length > 0 ? Math.min(...percents) : 0,
+      performanceDistribution,
+      performanceUnknownStudents: ranked.length - measured.length,
       rows: filtered,
     };
   }
@@ -960,28 +1123,59 @@ export class BaselineTestsService {
 
     const totalQuestions = test.problems.length;
     const maxScore = test.problems.reduce((total, problem) => total + problem.points, 0);
-    const solvedCount = attempt?.solvedCount ?? 0;
 
-    // The per-question lines come from `toAttemptSummary` so this screen and the mentor
-    // results table describe a problem identically. With no attempt there is nothing to
-    // summarise, so the questions are listed as unattempted rather than omitted — "which
-    // four problems did they miss" is still the question being asked.
-    const problems = attempt
-      ? this.toAttemptSummary(attempt, test).results
-      : test.problems.map((problem) => ({
-          testProblemId: problem.id,
-          problemId: problem.problemId,
-          position: problem.position,
-          title: problem.problem.title,
-          difficulty: problem.difficulty as BaselineAttemptProblemResult['difficulty'],
-          points: problem.points,
-          awardedPoints: 0,
-          status: 'NOT_ATTEMPTED' as BaselineAttemptProblemResult['status'],
-          attempts: 0,
-          solvedAt: null,
-          timeToSolveSeconds: null,
-          language: null,
-        }));
+    // The same source as the board: the whole submission history, no window.
+    const slugs = test.problems.map((problem) => problem.problem.titleSlug.toLowerCase());
+    const [performanceMap, syncMap] = await Promise.all([
+      this.generalPerformance(slugs, [studentId]),
+      this.syncStateByStudent([studentId]),
+    ]);
+    const performance = performanceMap.get(studentId) ?? [];
+    const sync = syncMap.get(studentId) ?? {
+      status: null,
+      lastSuccessAt: null,
+      hasSubmissions: false,
+    };
+    const performanceBySlug = new Map(performance.map((problem) => [problem.titleSlug, problem]));
+
+    const solvedCount = countSolved(performance);
+
+    // In-window results, when the student actually sat the test. Used only to enrich a
+    // problem line with what happened during the attempt — never to decide `solved`.
+    const inWindowByProblem = new Map(
+      attempt ? this.toAttemptSummary(attempt, test).results.map((r) => [r.testProblemId, r]) : [],
+    );
+
+    const problems: BaselineAttemptProblemResult[] = test.problems.map((problem) => {
+      const solvedAnyTime = performanceBySlug.get(problem.problem.titleSlug.toLowerCase());
+      const inWindow = inWindowByProblem.get(problem.id);
+      const solved = solvedAnyTime?.solved ?? false;
+
+      return {
+        testProblemId: problem.id,
+        problemId: problem.problemId,
+        position: problem.position,
+        title: problem.problem.title,
+        difficulty: problem.difficulty as BaselineAttemptProblemResult['difficulty'],
+        points: problem.points,
+        // Points follow the same evidence the ✓ does, so a solved problem never shows as
+        // solved while contributing nothing.
+        awardedPoints: solved ? problem.points : 0,
+        // "Tried and never got it" stays distinct from "never touched it": they are
+        // different conversations, and collapsing them loses the students who need one.
+        status: (solved
+          ? 'ACCEPTED'
+          : (solvedAnyTime?.attempts ?? 0) > 0
+            ? 'ATTEMPTED_NOT_ACCEPTED'
+            : 'NOT_ATTEMPTED') as BaselineAttemptProblemResult['status'],
+        attempts: solvedAnyTime?.attempts ?? 0,
+        solvedAt: solvedAnyTime?.firstAcceptedAt?.toISOString() ?? null,
+        firstAcceptedAt: solvedAnyTime?.firstAcceptedAt?.toISOString() ?? null,
+        latestAcceptedAt: solvedAnyTime?.latestAcceptedAt?.toISOString() ?? null,
+        // Only meaningful for a problem solved during the attempt itself.
+        timeToSolveSeconds: inWindow?.timeToSolveSeconds ?? null,
+      };
+    });
 
     return {
       testId: test.id,
@@ -997,7 +1191,8 @@ export class BaselineTestsService {
       totalQuestions,
       solvedCount,
       notSolvedCount: Math.max(0, totalQuestions - solvedCount),
-      attemptedCount: attempt?.attemptedCount ?? 0,
+      attemptedCount: performance.filter((problem) => !problem.solved && problem.attempts > 0)
+        .length,
       score: attempt?.score ?? 0,
       maxScore: attempt?.maxScore || maxScore,
       // Same definition as the leaderboard row, so the detail view and the board it was
@@ -1008,6 +1203,14 @@ export class BaselineTestsService {
       submittedAt: attempt?.submittedAt?.toISOString() ?? null,
       status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
       attempted: attempt !== null,
+      inWindowSolvedCount: attempt?.solvedCount ?? 0,
+      syncStatus: sync.status,
+      lastSuccessfulSyncAt: sync.lastSuccessAt?.toISOString() ?? null,
+      performanceKnown: isPerformanceKnown({
+        syncStatus: sync.status,
+        lastSuccessAt: sync.lastSuccessAt,
+        hasSubmissions: sync.hasSubmissions,
+      }),
       problems,
     };
   }
@@ -1172,20 +1375,43 @@ export class BaselineTestsService {
     return counts;
   }
 
+  /**
+   * How the cohort fared on each problem, counted from the submission mirror.
+   *
+   * Previously derived from attempt rows, which is why every problem read "Solved 0" on a
+   * test nobody opened in the portal — while the mirror held dozens of accepted solutions
+   * for those same problems. Timing still comes from the attempts, since "how long did it
+   * take" is only meaningful for a problem solved under test conditions.
+   */
   private problemStats(
-    test: { problems: { id: string; position: number; points: number; difficulty: string; problem: { title: string } }[] },
+    test: { problems: { id: string; position: number; points: number; difficulty: string; problem: { title: string; titleSlug: string } }[] },
     attempts: BaselineAttemptSummary[],
+    performanceByStudent: Map<string, BaselineProblemPerformance[]>,
     eligible: number,
   ): BaselineProblemStat[] {
-    return test.problems.map((testProblem): BaselineProblemStat => {
-      const results = attempts
-        .map((attempt) => attempt.results.find((r) => r.testProblemId === testProblem.id))
-        .filter((result): result is NonNullable<typeof result> => result !== undefined);
+    // Slug → how many eligible students solved it, and how many tried without solving it.
+    const solvedBySlug = new Map<string, number>();
+    const triedBySlug = new Map<string, number>();
+    for (const performance of performanceByStudent.values()) {
+      for (const problem of performance) {
+        if (problem.solved) {
+          solvedBySlug.set(problem.titleSlug, (solvedBySlug.get(problem.titleSlug) ?? 0) + 1);
+        } else if (problem.attempts > 0) {
+          triedBySlug.set(problem.titleSlug, (triedBySlug.get(problem.titleSlug) ?? 0) + 1);
+        }
+      }
+    }
 
-      const solved = results.filter((r) => r.status === 'ACCEPTED');
-      const attemptedNotSolved = results.filter((r) => r.status === 'ATTEMPTED_NOT_ACCEPTED');
-      const times = solved
-        .map((r) => r.timeToSolveSeconds)
+    return test.problems.map((testProblem): BaselineProblemStat => {
+      const slug = testProblem.problem.titleSlug.toLowerCase();
+      const solvedCount = solvedBySlug.get(slug) ?? 0;
+      const attemptedNotSolvedCount = triedBySlug.get(slug) ?? 0;
+
+      const times = attempts
+        .map((attempt) => attempt.results.find((r) => r.testProblemId === testProblem.id))
+        .filter((result): result is NonNullable<typeof result> => result !== undefined)
+        .filter((result) => result.status === 'ACCEPTED')
+        .map((result) => result.timeToSolveSeconds)
         .filter((seconds): seconds is number => seconds !== null);
 
       return {
@@ -1194,13 +1420,15 @@ export class BaselineTestsService {
         title: testProblem.problem.title,
         difficulty: testProblem.difficulty as BaselineProblemStat['difficulty'],
         points: testProblem.points,
-        solvedCount: solved.length,
-        attemptedNotSolvedCount: attemptedNotSolved.length,
+        solvedCount,
+        attemptedNotSolvedCount,
         // Everyone eligible who did not solve it and did not fail at it — including the
         // students who never started, who are the largest and most important slice.
-        notAttemptedCount: Math.max(0, eligible - solved.length - attemptedNotSolved.length),
+        notAttemptedCount: Math.max(0, eligible - solvedCount - attemptedNotSolvedCount),
         successRatePercent:
-          eligible > 0 ? Math.round((solved.length / eligible) * 10000) / 100 : 0,
+          eligible > 0 ? Math.round((solvedCount / eligible) * 10000) / 100 : 0,
+        // In-window only: how long a problem took is meaningful under test conditions and
+        // meaningless for a solution written on some other day.
         averageTimeToSolveSeconds: times.length > 0 ? Math.round(average(times)) : null,
       };
     });
@@ -1621,6 +1849,11 @@ export class BaselineTestsService {
           status: (result?.status ?? 'NOT_ATTEMPTED') as ProblemStatus,
           attempts: result?.attempts ?? 0,
           solvedAt: result?.solvedAt?.toISOString() ?? null,
+          // This projection is strictly *in-window*: it describes the attempt, so the
+          // any-time evidence fields are not applicable here and stay null. The
+          // general-performance view is `studentResult`.
+          firstAcceptedAt: null,
+          latestAcceptedAt: null,
           timeToSolveSeconds: result?.timeToSolveSeconds ?? null,
         };
       }),

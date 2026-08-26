@@ -25,7 +25,7 @@ function entry(over: Partial<BaselineRankableEntry> & { studentId: string }): Ba
     solvedCount: 0,
     score: 0,
     timeTakenSeconds: null,
-    attempted: true,
+    performanceKnown: true,
     ...over,
   };
 }
@@ -84,24 +84,40 @@ describe('rankBaselineEntries', () => {
     expect(ranked.map((r) => r.entry.studentId)).toEqual(['timed', 'notime']);
   });
 
-  it('never ranks an absent student above one who sat the test', () => {
-    // Both score 0. Without the `attempted` rule the name tiebreak would put "absent"
-    // first, which reads as though they outperformed someone who actually turned up.
+  it('ranks an absent student on what they can actually solve', () => {
+    // The rule that changed, and the reason it changed: attendance is not performance. A
+    // student who solved three of the four problems last fortnight and never opened the
+    // test outranks one who sat it and solved none. Both facts are reported — in separate
+    // columns — and neither is allowed to overwrite the other.
     const ranked = rankBaselineEntries([
-      entry({ studentId: 'absent', studentName: 'Absent', attempted: false }),
-      entry({ studentId: 'zoya', studentName: 'Zoya', attempted: true }),
+      entry({ studentId: 'sat-solved-none', studentName: 'Ravi', solvedCount: 0, score: 0 }),
+      entry({ studentId: 'absent-solved-three', studentName: 'Aman', solvedCount: 3, score: 3 }),
     ]);
 
-    expect(ranked.map((r) => r.entry.studentId)).toEqual(['zoya', 'absent']);
+    expect(ranked.map((r) => r.entry.studentId)).toEqual([
+      'absent-solved-three',
+      'sat-solved-none',
+    ]);
+  });
+
+  it('never ranks an unmeasured student above a measured one', () => {
+    // Both show 0. But one has never synced successfully, so their 0 is an absence of
+    // evidence rather than a score — and must not be placed above someone we did measure.
+    const ranked = rankBaselineEntries([
+      entry({ studentId: 'unmeasured', studentName: 'Aaron', performanceKnown: false }),
+      entry({ studentId: 'measured', studentName: 'Zoya', performanceKnown: true }),
+    ]);
+
+    expect(ranked.map((r) => r.entry.studentId)).toEqual(['measured', 'unmeasured']);
   });
 
   it('keeps absent students on the board', () => {
     // A leaderboard built only from attempt rows shrinks the denominator and makes a test
     // half the cohort skipped look like a test everybody took.
     const ranked = rankBaselineEntries([
-      entry({ studentId: 'sat', score: 5, attempted: true }),
-      entry({ studentId: 'absent-1', attempted: false }),
-      entry({ studentId: 'absent-2', attempted: false }),
+      entry({ studentId: 'sat', score: 5, solvedCount: 5 }),
+      entry({ studentId: 'absent-1', performanceKnown: false }),
+      entry({ studentId: 'absent-2', performanceKnown: false }),
     ]);
 
     expect(ranked).toHaveLength(3);
@@ -126,9 +142,9 @@ describe('rankBaselineEntries', () => {
 
   it('has a total comparator — no pair ever compares equal unless it is the same student', () => {
     const entries = [
-      entry({ studentId: 'a', score: 5 }),
-      entry({ studentId: 'b', score: 5 }),
-      entry({ studentId: 'c', score: 0, attempted: false }),
+      entry({ studentId: 'a', score: 5, solvedCount: 5 }),
+      entry({ studentId: 'b', score: 5, solvedCount: 5 }),
+      entry({ studentId: 'c', score: 0, performanceKnown: false }),
     ];
     for (const x of entries) {
       for (const y of entries) {

@@ -38,22 +38,32 @@ import {
 
 type SortKey = "rank" | "name" | "squad" | "solved" | "percent";
 
+/** Participation labels. Deliberately never say "0 solved" — that is a different column. */
 const STATUS_LABELS: Record<string, string> = {
   IN_PROGRESS: "In progress",
-  SUBMITTED: "Submitted",
+  SUBMITTED: "Completed",
   EXPIRED: "Expired",
   NOT_STARTED: "Absent",
 };
 
 /** Green at the top, amber in the middle, red at the bottom — the usual reading order. */
-function toneFor(
+function scoreTone(
   percent: number,
-  attempted: boolean,
+  known: boolean,
 ): "success" | "warning" | "danger" | "neutral" {
-  if (!attempted) return "neutral";
+  // An unmeasured student is grey, never red: we hold no reading for them, and colouring
+  // an absence of data as a bad result is the same false zero in a different medium.
+  if (!known) return "neutral";
   if (percent >= 75) return "success";
   if (percent >= 40) return "warning";
   return "danger";
+}
+
+/** Participation is a fact about attendance, so it never borrows the score's colours. */
+function participationTone(status: string): "info" | "success" | "neutral" {
+  if (status === "SUBMITTED") return "success";
+  if (status === "IN_PROGRESS" || status === "EXPIRED") return "info";
+  return "neutral";
 }
 
 export function BaselineLeaderboard({ testId }: { testId: string }) {
@@ -157,7 +167,7 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
       <Card>
         <CardHeader
           title="Student leaderboard"
-          description="Every eligible student, ranked. Absent students are listed too — a board built only from attempts hides how many people skipped the test."
+          description="Solved counts every accepted LeetCode solution for these problems, whenever it was written — not only those submitted during the test. Participation is tracked separately: a student can be Absent and still have solved most of the set."
           action={
             // Fetched with the access token and saved from a blob, not linked. The export
             // endpoint is authenticated, and a plain <a href> carries no Authorization
@@ -173,18 +183,71 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
         />
 
         {board.data ? (
-          <div className="grid gap-3 border-b border-[var(--color-border)] p-5 sm:grid-cols-2 lg:grid-cols-5">
-            <StatTile label="Students" value={board.data.totalStudents} />
-            <StatTile
-              label="Sat the test"
-              value={board.data.attemptedStudents}
-            />
-            <StatTile label="Absent" value={board.data.notStartedStudents} />
-            <StatTile label="Average" value={`${board.data.averagePercent}%`} />
-            <StatTile
-              label="Highest / lowest"
-              value={`${board.data.highestPercent}% / ${board.data.lowestPercent}%`}
-            />
+          // Two blocks, labelled, never interleaved. "Absent" and "solved nothing" are
+          // different facts about different things, and a single row of tiles mixing them
+          // is how a mentor concludes that 64 students failed when 64 students simply did
+          // not open the test.
+          <div className="space-y-4 border-b border-[var(--color-border)] p-5">
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                Test participation
+              </h3>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatTile label="Eligible" value={board.data.totalStudents} />
+                <StatTile label="Started" value={board.data.attemptedStudents} />
+                <StatTile
+                  label="Completed"
+                  value={
+                    board.data.rows.filter((row) => row.status === "SUBMITTED").length
+                  }
+                />
+                <StatTile label="Absent" value={board.data.notStartedStudents} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                LeetCode performance{" "}
+                <span className="font-normal normal-case tracking-normal">
+                  — accepted solutions at any time, not only during the test
+                </span>
+              </h3>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatTile label="Average" value={`${board.data.averagePercent}%`} />
+                <StatTile
+                  label="Highest / lowest"
+                  value={`${board.data.highestPercent}% / ${board.data.lowestPercent}%`}
+                />
+                <StatTile
+                  label={`Solved all ${board.data.totalQuestions}`}
+                  value={
+                    board.data.performanceDistribution[board.data.totalQuestions] ?? 0
+                  }
+                />
+                <StatTile
+                  label="Not synced yet"
+                  value={board.data.performanceUnknownStudents}
+                />
+              </div>
+
+              {/* The full spread, so "how is the cohort doing" is answerable at a glance
+                  rather than by counting rows. */}
+              <div className="mt-3 flex flex-wrap gap-2">
+                {board.data.performanceDistribution.map((count, solved) => (
+                  <span
+                    key={solved}
+                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs"
+                  >
+                    <span className="font-medium">
+                      {solved}/{board.data!.totalQuestions}
+                    </span>{" "}
+                    <span className="text-[var(--color-fg-muted)]">
+                      {count} student{count === 1 ? "" : "s"}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
         ) : null}
 
@@ -290,17 +353,40 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
                   <Td className="text-right tabular-nums">
                     {row.totalQuestions}
                   </Td>
-                  <Td className="text-right tabular-nums">{row.solvedCount}</Td>
                   <Td className="text-right tabular-nums">
-                    {row.notSolvedCount}
+                    {row.performanceKnown ? row.solvedCount : "—"}
+                  </Td>
+                  <Td className="text-right tabular-nums">
+                    {row.performanceKnown ? row.notSolvedCount : "—"}
                   </Td>
                   <Td className="text-right tabular-nums font-medium">
-                    {row.percent}%
+                    {row.performanceKnown ? (
+                      <Badge tone={scoreTone(row.percent, true)}>{row.percent}%</Badge>
+                    ) : (
+                      // Never "0%" for a student we have never read. This column reports
+                      // measurements, and there is none.
+                      <span
+                        className="text-xs text-[var(--color-fg-subtle)]"
+                        title="No successful sync yet — we hold no submissions for this student"
+                      >
+                        Not synced
+                      </span>
+                    )}
                   </Td>
                   <Td>
-                    <Badge tone={toneFor(row.percent, row.attempted)}>
+                    <Badge tone={participationTone(row.status)}>
                       {STATUS_LABELS[row.status] ?? row.status}
                     </Badge>
+                  </Td>
+                  <Td className="whitespace-nowrap text-xs text-[var(--color-fg-subtle)]">
+                    {row.lastSuccessfulSyncAt
+                      ? new Date(row.lastSuccessfulSyncAt).toLocaleDateString()
+                      : "—"}
+                    {row.syncStatus && row.syncStatus !== "OK" ? (
+                      <span className="ml-1 text-[var(--color-warning)]" title={row.syncStatus}>
+                        ⚠
+                      </span>
+                    ) : null}
                   </Td>
                 </tr>
               ))}
@@ -350,10 +436,35 @@ function StudentBreakdown({
             label="Baseline test"
             value={`${row.totalQuestions} questions`}
           />
-          <StatTile label="Solved" value={row.solvedCount} />
+          <StatTile label="Solved (any time)" value={row.solvedCount} />
           <StatTile label="Not solved" value={row.notSolvedCount} />
           <StatTile label="Score" value={`${row.percent}%`} />
         </div>
+
+        {/* What the sitting itself recorded, beside what the student can do now. Shown only
+            when the two differ — when they agree there is nothing to explain, and a second
+            identical number is just noise. */}
+        {detail.data && detail.data.inWindowSolvedCount !== detail.data.solvedCount ? (
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-sunken)] p-3 text-xs">
+            <p>
+              <span className="font-medium">During the test:</span>{" "}
+              {detail.data.inWindowSolvedCount}/{detail.data.totalQuestions} —{" "}
+              <span className="font-medium">now:</span> {detail.data.solvedCount}/
+              {detail.data.totalQuestions}. The recorded test result does not change when a
+              problem is solved later; the current figure does.
+            </p>
+          </div>
+        ) : null}
+
+        <p className="text-xs text-[var(--color-fg-muted)]">
+          Participation:{" "}
+          <span className="font-medium">
+            {STATUS_LABELS[row.status] ?? row.status}
+          </span>
+          {row.lastSuccessfulSyncAt
+            ? ` · last synced ${new Date(row.lastSuccessfulSyncAt).toLocaleString()}`
+            : " · never synced"}
+        </p>
 
         {detail.isLoading ? (
           <TableSkeleton rows={4} cols={2} />
@@ -388,6 +499,13 @@ function StudentBreakdown({
                   <span className="min-w-0 flex-1 truncate text-sm">
                     {problem.title}
                   </span>
+                  {/* When it was solved matters: a solution from three weeks before the
+                      test is the evidence the old window-scoped view threw away. */}
+                  {solved && problem.firstAcceptedAt ? (
+                    <span className="shrink-0 text-xs text-[var(--color-fg-subtle)]">
+                      {new Date(problem.firstAcceptedAt).toLocaleDateString()}
+                    </span>
+                  ) : null}
                   {/* "Attempted but never accepted" is a different conversation from
                       "never opened it", so the two do not collapse into one ✗. */}
                   {!solved && problem.attempts > 0 ? (

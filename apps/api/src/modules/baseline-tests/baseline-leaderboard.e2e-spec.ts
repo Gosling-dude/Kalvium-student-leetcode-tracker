@@ -49,6 +49,9 @@ async function makeStudent(key: string, name: string): Promise<string> {
       campusId,
       status: 'ACTIVE',
       createdAt: new Date('2026-07-01T00:00:00.000Z'),
+      // Every real student has one — the importer creates it — and it is what tells a
+      // genuine zero apart from "we have never read this account".
+      syncState: { create: { status: 'OK', lastSuccessAt: new Date('2026-08-26T00:00:00.000Z') } },
     },
   });
   studentIds[key] = student.id;
@@ -147,6 +150,7 @@ afterAll(async () => {
   await prisma.baselineTestProblem.deleteMany({ where: { testId } });
   await prisma.baselineTest.delete({ where: { id: testId } });
   await prisma.submission.deleteMany({ where: { studentId: { in: ids } } });
+  await prisma.studentSyncState.deleteMany({ where: { studentId: { in: ids } } });
   await prisma.student.deleteMany({ where: { id: { in: ids } } });
   await prisma.problem.deleteMany({ where: { id: { in: problemIds } } });
   await prisma.campus.deleteMany({ where: { id: campusId } });
@@ -154,14 +158,15 @@ afterAll(async () => {
 });
 
 describe('baseline leaderboard', () => {
-  it('ranks students by score, best first', async () => {
+  it('ranks students by problems solved, best first', async () => {
     const board = await service.leaderboard(testId);
-    expect(board.rows.slice(0, 3).map((row) => row.studentName)).toEqual([
+    expect(board.rows.slice(0, 2).map((row) => row.studentName)).toEqual([
       'Rahul Sharma',
       'Aman Verma',
-      'Ravi Kumar',
     ]);
-    expect(board.rows.slice(0, 3).map((row) => row.rank)).toEqual([1, 2, 3]);
+    expect(board.rows.slice(0, 2).map((row) => row.rank)).toEqual([1, 2]);
+    // Ravi and the absent student both solved nothing, so they share third.
+    expect(board.rows.slice(2).every((row) => row.solvedCount === 0)).toBe(true);
   });
 
   it('reports solved, not-solved and percent against the real question count', async () => {
@@ -184,12 +189,20 @@ describe('baseline leaderboard', () => {
     expect(absent!.solvedCount).toBe(0);
   });
 
-  it('never ranks the absent student above one who sat it and scored nothing', async () => {
+  it('ties the absent student with one who sat it and solved nothing', async () => {
+    // Both genuinely solved none of these problems, and both were measured — so they tie
+    // on performance. Attendance is reported in its own column and does not reorder them:
+    // the board ranks what students can do.
     const board = await service.leaderboard(testId);
-    const ravi = board.rows.findIndex((row) => row.studentName === 'Ravi Kumar');
-    const absent = board.rows.findIndex((row) => row.studentName === 'Absent Student');
+    const ravi = board.rows.find((row) => row.studentName === 'Ravi Kumar')!;
+    const absent = board.rows.find((row) => row.studentName === 'Absent Student')!;
 
-    expect(ravi).toBeLessThan(absent);
+    expect(ravi.solvedCount).toBe(0);
+    expect(absent.solvedCount).toBe(0);
+    expect(ravi.rank).toBe(absent.rank);
+    // The distinction survives, in the column that carries it.
+    expect(ravi.status).toBe('SUBMITTED');
+    expect(absent.status).toBe('NOT_STARTED');
   });
 
   it('counts the whole eligible cohort, not just the attempts', async () => {
@@ -221,13 +234,16 @@ describe('baseline leaderboard', () => {
     expect(detail.solvedCount).toBe(row.solvedCount);
   });
 
-  it('averages over the students who actually sat it', async () => {
-    // 75 + 50 + 0 over three students. The absent student is not a zero in the average —
-    // they are not a measurement at all.
+  it('averages over every student we hold data for, sat or not', async () => {
+    // 75 + 50 + 0 + 0 over four measured students. The absent student *is* in this average
+    // now, because we measured them: they solved none of these problems. What would be
+    // excluded is a student we have never successfully read — an absence of measurement
+    // rather than a measurement of zero.
     const board = await service.leaderboard(testId);
-    expect(board.averagePercent).toBe(42);
+    expect(board.averagePercent).toBe(31);
     expect(board.highestPercent).toBe(75);
     expect(board.lowestPercent).toBe(0);
+    expect(board.performanceUnknownStudents).toBe(0);
   });
 
   it('keeps cohort rank when filtered to one student', async () => {
@@ -240,7 +256,7 @@ describe('baseline leaderboard', () => {
   it('reports cohort-wide statistics regardless of the filter', async () => {
     const board = await service.leaderboard(testId, { search: 'Aman' });
     expect(board.totalStudents).toBe(4);
-    expect(board.averagePercent).toBe(42);
+    expect(board.averagePercent).toBe(31);
   });
 
   it('sorts by name without changing anyone’s rank', async () => {
@@ -278,11 +294,20 @@ describe('baseline leaderboard', () => {
   });
 });
 
-describe('baseline historical immutability', () => {
-  it('does not raise a closed baseline when the student solves the problem later', async () => {
+describe('baseline historical immutability vs current ability', () => {
+  it('raises current performance but never the recorded test result', async () => {
+    // The two requirements that look contradictory until they are separated:
+    //
+    //   "If a student has solved a baseline question at ANY TIME, recognise it."
+    //   "Solving Q3 later must NOT change the recorded baseline from 3/4 to 4/4."
+    //
+    // Both hold, because they are about different numbers. `inWindowSolvedCount` is what
+    // the test measured on the day and is frozen; `solvedCount` is what the student can do
+    // now. Reporting only one of them is what forces a choice between the two rules.
     const before = await service.leaderboard(testId);
     const rahulBefore = before.rows.find((row) => row.studentName === 'Rahul Sharma')!;
     expect(rahulBefore.solvedCount).toBe(3);
+    expect(rahulBefore.inWindowSolvedCount).toBe(3);
 
     // The fourth problem, solved nine days after the test closed.
     await prisma.submission.create({
@@ -299,17 +324,39 @@ describe('baseline historical immutability', () => {
       },
     });
 
-    // A re-grade is exactly the operation that would rewrite history if the window were
-    // not frozen — so it is the one worth running here.
+    // A re-grade is the operation that would rewrite history if the window were not frozen.
     await service.gradeTest(testId);
 
     const after = await service.leaderboard(testId);
     const rahulAfter = after.rows.find((row) => row.studentName === 'Rahul Sharma')!;
 
-    expect(rahulAfter.solvedCount).toBe(3);
-    expect(rahulAfter.percent).toBe(75);
+    // Current ability now reflects the late solve — this is the reported bug being fixed.
+    expect(rahulAfter.solvedCount).toBe(4);
+    expect(rahulAfter.percent).toBe(100);
 
+    // The test's own record does not move. It says what happened on the day.
+    expect(rahulAfter.inWindowSolvedCount).toBe(3);
+  });
+
+  it('keeps the stored attempt untouched by the later solve', async () => {
+    // Immutability at the storage layer, not just in the projection: the row that records
+    // what the student did during the test still says three.
+    const attempt = await prisma.baselineTestAttempt.findUnique({
+      where: { testId_studentId: { testId, studentId: studentIds.rahul! } },
+    });
+
+    expect(attempt?.solvedCount).toBe(3);
+  });
+
+  it('shows the improvement between the two, per problem', async () => {
     const detail = await service.studentResult(testId, studentIds.rahul!);
-    expect(detail.problems.filter((p) => p.status === 'ACCEPTED')).toHaveLength(3);
+
+    // Four ✓ on current ability...
+    expect(detail.problems.filter((p) => p.status === 'ACCEPTED')).toHaveLength(4);
+    // ...while the recorded sitting stays at three.
+    expect(detail.inWindowSolvedCount).toBe(3);
+    // And the late one carries the evidence of when it was actually solved.
+    const late = detail.problems[3]!;
+    expect(late.firstAcceptedAt).toBe(AFTER_THE_TEST.toISOString());
   });
 });
