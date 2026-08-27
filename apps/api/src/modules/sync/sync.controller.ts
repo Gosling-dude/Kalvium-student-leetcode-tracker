@@ -4,6 +4,7 @@ import { IsArray, IsIn, IsOptional, IsUUID, Matches } from 'class-validator';
 import { SYNC_MODES, type SyncMode } from '@dsa/shared';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 import { SyncService } from './sync.service';
 
@@ -30,7 +31,10 @@ class BackfillDayDto {
 @ApiBearerAuth()
 @Controller('sync')
 export class SyncController {
-  constructor(private readonly sync: SyncService) {}
+  constructor(
+    private readonly sync: SyncService,
+    private readonly mentorScope: MentorScopeService,
+  ) {}
 
   @Post()
   @Roles('ADMIN', 'MENTOR')
@@ -102,8 +106,8 @@ export class SyncController {
 
   @Get('jobs/:id/items')
   @ApiOperation({ summary: 'Per-student outcomes for a sync job' })
-  items(@Param('id', ParseUUIDPipe) id: string) {
-    return this.sync.jobItems(id);
+  async items(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    return this.sync.jobItems(id, await this.mentorScope.allowedCampusIds(user));
   }
 
   @Post('jobs/:id/cancel')

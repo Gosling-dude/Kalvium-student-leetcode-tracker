@@ -24,6 +24,7 @@ import type {
 
 import { CONFIG_TOKEN, type AppConfig } from '../../config/configuration';
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import type { CampusScope } from '../campuses/mentor-scope.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { paginate } from '../../common/dto/pagination.dto';
@@ -412,19 +413,39 @@ export class SyncService implements OnModuleInit {
   }
 
   /** Per-student detail for a job — powers the "which students failed and why" view. */
-  async jobItems(jobId: string) {
+  /**
+   * Per-student outcomes for one sync job.
+   *
+   * @param viewerCampusIds The campuses the caller may see, or `null` for an admin.
+   *
+   * These rows carry student names and LeetCode handles, so an unscoped answer is a
+   * directory of every campus's students — reachable by any mentor, since the sync job id
+   * is the only thing it keys on and a job covers the whole roster. Filtering on the
+   * *student* (rather than on the job, which has no campus) is what narrows it.
+   */
+  async jobItems(jobId: string, viewerCampusIds: CampusScope = null) {
     const items = await this.prisma.syncJobItem.findMany({
       where: { syncJobId: jobId },
       orderBy: { processedAt: 'desc' },
     });
 
     const students = await this.prisma.student.findMany({
-      where: { id: { in: items.map((i) => i.studentId) } },
+      where: {
+        id: { in: items.map((i) => i.studentId) },
+        // `[]` matches nobody, which is right for a mentor with no grants.
+        ...(viewerCampusIds !== null ? { campusId: { in: viewerCampusIds } } : {}),
+      },
       select: { id: true, name: true, leetcodeUsername: true },
     });
     const byId = new Map(students.map((s) => [s.id, s]));
 
-    return items.map((item) => ({
+    // A row whose student was filtered out is dropped rather than rendered as "Unknown":
+    // reporting a redacted row still discloses that another campus had a student with
+    // that sync outcome, and the count itself is information.
+    const visible =
+      viewerCampusIds === null ? items : items.filter((item) => byId.has(item.studentId));
+
+    return visible.map((item) => ({
       studentId: item.studentId,
       name: byId.get(item.studentId)?.name ?? 'Unknown',
       leetcodeUsername: byId.get(item.studentId)?.leetcodeUsername ?? '',
