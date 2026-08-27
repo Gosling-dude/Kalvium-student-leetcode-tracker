@@ -35,42 +35,32 @@ the build:
 - **Data integrity** — `GET /internal/integrity` reports six should-be-zero invariants
   from the live database, all zero, asserted on every push.
 
-## Blocked: production has stopped deploying
+## Resolved: production deploys again
 
-**Production is serving `90d8db6` and has not taken a new commit since 09:45 UTC.** Three
-commits are queued behind it. Everything below was ruled out as the cause:
-
-| Check | Result |
-|---|---|
-| `npm ci` clean install | passes |
-| The container's exact build sequence | passes, `dist/main.js` produced |
-| `prisma migrate deploy` from an **empty** database | all 20 migrations apply |
-| Boot from a clean build | health 200, database up, zero error lines |
-| Nest module cycle | none |
-| Typecheck, 731 tests | pass |
-
-The commit is deployable and production itself is healthy — the scheduled sync succeeded
-against 130 students on the old build, so `BACKEND_URL` and `CRON_SECRET` are valid.
-
-**What cannot be determined from here:** whether the deploy is failing on the host, whether
-auto-deploy is switched off, or whether the free tier's build minutes are exhausted. There
-is no Render API key, CLI, credential file or `render.yaml` in this repository or
-environment. Open the service's **Events** tab in the Render dashboard: it shows whether a
-deploy for the queued commit was triggered at all, and if so what its build log says. That
-one screen separates the three possibilities.
-
-Nothing else unblocks it. The import needs the schema migration that ships in the queued
-commit — production's `students.email` is still `NOT NULL`, so the 78 emailless students
-cannot be stored there until it deploys. There is no deploy hook and no database credential
-available as an alternative route.
+Production is serving the current commit. The push-to-serving lag measured on 27 Aug was
+about three minutes, not the 30–70 the earlier note recorded, so the smoke test's
+"deployed commit is a descendant of / equal to this one" check now passes on the push
+itself rather than only on the schedule.
 
 ## Known gaps in production
 
-- **78 new students are prepared but not imported.** Squads 69/70/71/112. Every row is
-  blocked on a missing email address, and the existing roster gives no rule that would
-  derive one safely (three name conventions, two squad formats). No addresses were
-  invented. See `tmp/import/README.md` for the prepared file, the live profile-validation
-  results and the steps.
+- **Alliance’s 46 students have no email address, so none of them can log in.** The
+  roster they were imported from carries no email column, and the existing addresses give
+  no rule that would reconstruct one safely: three name conventions and two squad formats
+  are in use (`first.last.s.NNN`, `first.initial.sNN`, `last.first.sNN`; `s69` and `s.69`).
+  A wrong guess creates a student who can never log in and who a later correct import
+  duplicates rather than updates, so no addresses were invented. They are tracked, synced
+  and reported on in full — only the *portal login* is blocked. Supply an Email column and
+  re-run the import to close it. SRM (99) and VELS (31) all have addresses and accounts.
+- **One Alliance student has no LeetCode handle.** TIPPU DAVALASAB GHORPADE’s roster entry
+  is `leetcode.com/profile/`, a generic page carrying no handle, so he syncs as
+  `PROFILE_MISSING` — which reads as “nobody has collected a handle yet” rather than as a
+  failed read, and is deliberately not the same thing as “solved 0”.
+- **Alliance has no assignment and no baseline test.** All 18 assignments and both baseline
+  tests are scoped to SRM or VELS. Alliance students therefore show no assignment progress
+  because there is nothing assigned to them, not because the calculation is wrong. Creating
+  either means choosing real problems, which is a programme decision, not one this repo can
+  make up.
 - **The nightly report generates nothing.** `EMAIL_FROM` and `EMAIL_DEFAULT_TO` are not
   set on the server, so the Daily Report Generation workflow runs and produces no reports.
   This was previously silent — the endpoint answered HTTP 200 with an empty result and the

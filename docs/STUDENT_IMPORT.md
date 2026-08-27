@@ -72,9 +72,37 @@ skip, with per-row errors and their reasons, and writes nothing.
 ## Re-importing is safe
 
 Rows are matched on email. An existing student is updated in place; the import never resets
-a password, a submission, a baseline result, a streak or a historical placement. A sheet
-that omits the Squad or Batch column leaves those alone rather than clearing them — a
-missing column says nothing about placement, it does not say "remove them".
+a password, a submission, a baseline result, a streak or a historical placement.
+
+**A blank cell is silence, not an erasure.** Email, LeetCode, Phone, Squad and Batch are all
+left alone when the sheet does not supply them. This matters more than it sounds: a roster
+assembled before anyone collected a student's LeetCode handle still carries the placeholder
+in its profile column, and writing that blank through would erase a handle collected since,
+taking the student's sync and their whole solved history off the dashboard with it.
+Clearing a handle or an address is a deliberate single-student edit through the directory,
+not something a bulk upload does as a side effect of a column nobody filled in.
+
+## Reconciling — when the roster is the whole campus
+
+`archiveAbsent` says "this file is the *complete* roster for this campus": everyone active
+there and absent from it is **archived**. Off by default, because the ordinary upload is a
+partial roster and reading one as "archive everyone else" would empty a campus from a
+twelve-row file.
+
+Archived, never deleted. `Submission.student` cascades on delete, so removing a departed
+student would take their submissions with them and silently rewrite every report about a day
+they were present. Archiving drops them out of the `status: ACTIVE` queries that make up the
+current roster and leaves the history intact — and it reverses: name them on a later roster
+and they come back ACTIVE on their own record, carrying their history, rather than as a
+second student.
+
+Two refusals guard it. It will not run without a campus, because the complement of the
+roster would then be every student in the system. And it archives nobody when any row
+errored — a student missing from a partially-applied roster is indistinguishable from one
+whose row simply failed to save.
+
+Dry-run it first. The dry run resolves identity for real and writes nothing, so it reports
+which rows already exist, which are new, and exactly who would be archived.
 
 ## Onboarding a new institution
 
