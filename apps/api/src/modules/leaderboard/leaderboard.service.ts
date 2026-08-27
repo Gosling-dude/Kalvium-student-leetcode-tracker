@@ -34,6 +34,7 @@ import {
 } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import type { CampusScope } from '../campuses/mentor-scope.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 
@@ -236,16 +237,41 @@ export class LeaderboardService {
     };
   }
 
-  async getSquadLeaderboard(period: Period, dayKey?: DayKey): Promise<SquadLeaderboardRow[]> {
+  /**
+   * @param viewerCampusIds The campuses the caller may see, or `null` for an admin.
+   *
+   * Squads are campus-scoped, so an unscoped board hands a mentor every other campus's
+   * squads and their averages. Filtering on the squad's campus rather than dropping rows
+   * afterwards keeps `rank` meaning "how many squads did better" across the whole
+   * programme, which is what a rank is for — a mentor sees their squads' true standing,
+   * not a renumbering of the four they can see.
+   *
+   * The cache key carries the viewer's scope for the same reason it carries the period:
+   * two callers with different scopes must not share an entry.
+   */
+  async getSquadLeaderboard(
+    period: Period,
+    dayKey?: DayKey,
+    viewerCampusIds: CampusScope = null,
+  ): Promise<SquadLeaderboardRow[]> {
     const day = dayKey ?? this.time.today();
     const periodKey = this.periodKey(period, day);
+    const scopeKey = viewerCampusIds === null ? 'all' : [...viewerCampusIds].sort().join(',');
 
     return this.cache.remember(
-      `leaderboard:squad:${period}:${periodKey}`,
+      `leaderboard:squad:${period}:${periodKey}:${scopeKey}`,
       CACHE_TTL.leaderboard,
       async () => {
         const entries = await this.prisma.squadLeaderboardEntry.findMany({
-          where: { period, periodKey },
+          where: {
+            period,
+            periodKey,
+            // `[]` matches no squad, which is the correct answer for a mentor with no
+            // grants — never "no filter".
+            ...(viewerCampusIds !== null
+              ? { squad: { campusId: { in: viewerCampusIds } } }
+              : {}),
+          },
           include: { squad: { select: { name: true } } },
           orderBy: { rank: 'asc' },
         });

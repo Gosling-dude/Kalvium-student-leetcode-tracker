@@ -4,6 +4,7 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger'
 import { BadRequestException } from '@nestjs/common';
 import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { CampusesService } from '../campuses/campuses.service';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { LeaderboardService, type Period } from './leaderboard.service';
 
 const PERIODS: Period[] = ['DAILY', 'WEEKLY', 'MONTHLY'];
@@ -15,6 +16,7 @@ export class LeaderboardController {
   constructor(
     private readonly leaderboard: LeaderboardService,
     private readonly campuses: CampusesService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
 
   /** Rejects an unrecognised period rather than silently ranking the wrong window. */
@@ -75,7 +77,15 @@ export class LeaderboardController {
   @ApiOperation({ summary: 'Squad leaderboard for a period' })
   @ApiQuery({ name: 'period', required: false, enum: ['DAILY', 'WEEKLY', 'MONTHLY'] })
   @ApiQuery({ name: 'dayKey', required: false })
-  squads(@Query('period') period = 'DAILY', @Query('dayKey') dayKey?: string) {
-    return this.leaderboard.getSquadLeaderboard(this.assertPeriod(period), dayKey);
+  async squads(
+    @CurrentUser() user: RequestUser,
+    @Query('period') period = 'DAILY',
+    @Query('dayKey') dayKey?: string,
+  ) {
+    return this.leaderboard.getSquadLeaderboard(
+      this.assertPeriod(period),
+      dayKey,
+      await this.mentorScope.allowedCampusIds(user),
+    );
   }
 }
