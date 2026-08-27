@@ -803,6 +803,27 @@ export interface ImportResult {
   /** Batches and squads auto-created because the sheet referenced them. */
   createdBatches: string[];
   createdSquads: string[];
+  /**
+   * Students the roster did not mention, when the import was asked to reconcile
+   * (`archiveAbsent`). Absent entirely otherwise — an ordinary import adds and updates
+   * and has no opinion about anyone it was not given.
+   *
+   * These are *archived*, never deleted: a student who leaves the programme still owns
+   * every submission, daily status, baseline result and placement row they ever had, and
+   * every historical report about a past day must keep resolving them. Archiving drops
+   * them out of the 51 `status: ACTIVE` queries that make up the current roster while
+   * leaving all of that intact — and it is reversible, which a delete is not.
+   */
+  archived?: ArchivedStudent[];
+}
+
+/** One student archived by a reconciling import. */
+export interface ArchivedStudent {
+  id: string;
+  name: string;
+  email: string | null;
+  leetcodeUsername: string | null;
+  squad: string | null;
 }
 
 export interface AuditLogEntry {

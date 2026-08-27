@@ -28,6 +28,7 @@ import {
   resolveLeetcodeProfile,
   squadName,
   resolvePlacementEffectiveDate,
+  type ArchivedStudent,
   type ImportResult,
   type ImportRowError,
 } from '@dsa/shared';
@@ -81,7 +82,26 @@ export class StudentImportService {
    */
   async importRows(
     rows: ParsedRow[],
-    options: { dryRun?: boolean; updateExisting?: boolean; campusId?: string } = {},
+    options: {
+      dryRun?: boolean;
+      updateExisting?: boolean;
+      campusId?: string;
+      /**
+       * Treat the roster as the *complete* list for this campus: every ACTIVE student in
+       * it that the roster does not mention is archived.
+       *
+       * Off by default, and deliberately so. An ordinary import is additive — a sheet of
+       * twelve new joiners says nothing about the other two hundred students, and reading
+       * it as "archive everyone else" would empty a campus from a partial upload. Only a
+       * caller that knows it holds the whole roster may ask for this.
+       *
+       * Requires `campusId`: reconciling against "every student everywhere" would archive
+       * other campuses' students, which is never what a campus roster means.
+       */
+      archiveAbsent?: boolean;
+      /** Recorded on each archived student, so "why is this person inactive" has an answer. */
+      archiveReason?: string;
+    } = {},
   ): Promise<ImportResult> {
     const campusId = await this.resolveImportCampus(options.campusId);
     const errors: ImportRowError[] = [];
@@ -136,16 +156,40 @@ export class StudentImportService {
       valid.push(row);
     }
 
+    if (options.archiveAbsent && !campusId) {
+      throw new BadRequestException(
+        'archiveAbsent needs a campus. Reconciling against every student in the system ' +
+          'would archive other campuses’ students, which a campus roster never means.',
+      );
+    }
+
     if (options.dryRun) {
+      // Resolve identity for real, then write nothing. This used to report
+      // `skipped: valid.length` and no more, which answered "how many rows parsed" —
+      // while the thing a dry run is run to find out is *which of them already exist*.
+      // Every query below is a read, so the promise that a dry run changes nothing is
+      // unaffected, and the numbers now mean the same as the ones the real run reports
+      // because they come from the same `findExisting`.
+      const matched = new Set<string>();
+      let wouldCreate = 0;
+      for (const row of valid) {
+        const existing = await this.findExisting(row, campusId);
+        if (existing) matched.add(existing.id);
+        else wouldCreate += 1;
+      }
+
       return {
         totalRows: rows.length,
-        created: 0,
-        updated: 0,
-        skipped: valid.length,
+        created: wouldCreate,
+        updated: matched.size,
+        skipped: 0,
         errors,
         warnings,
         createdBatches: [],
         createdSquads: [],
+        ...(options.archiveAbsent
+          ? { archived: await this.absentFromRoster(campusId!, matched) }
+          : {}),
       };
     }
 
@@ -155,6 +199,12 @@ export class StudentImportService {
     let created = 0;
     let updated = 0;
     let skipped = 0;
+    /**
+     * Every student this roster accounted for, whether it created them or matched them.
+     * `archiveAbsent` is the complement of this set — so a student the roster *did*
+     * name can never be archived by the same run, however they were matched.
+     */
+    const onRoster = new Set<string>();
 
     for (const row of valid) {
       const batchId = row.batch ? (batchIds.get(row.batch.toLowerCase()) ?? null) : null;
@@ -162,23 +212,10 @@ export class StudentImportService {
       const squadId = row.squad ? (squadIds.get(squadKey) ?? null) : null;
 
       try {
-        // Identity, most reliable first. Email when the sheet has one; otherwise the
-        // register number, then the LeetCode handle, then the name *within this campus*.
-        // Without the fallbacks a roster with no emails would create fresh duplicates on
-        // every run, which is the opposite of an idempotent import.
-        const identity: Prisma.StudentWhereInput[] = [];
-        if (row.email) identity.push({ email: row.email });
-        if (row.registerNumber) identity.push({ registerNumber: row.registerNumber });
-        if (row.leetcodeUsername) {
-          identity.push({ leetcodeUsername: row.leetcodeUsername.toLowerCase() });
-        }
-        // Name is only an identity *inside one campus*: two campuses can each have a
-        // "Rahul Sharma" and they are different people.
-        identity.push({ name: row.name, campusId });
-
-        const existing = await this.prisma.student.findFirst({ where: { OR: identity } });
+        const existing = await this.findExisting(row, campusId);
 
         if (existing) {
+          onRoster.add(existing.id);
           if (!options.updateExisting) {
             skipped += 1;
             errors.push({
@@ -210,14 +247,27 @@ export class StudentImportService {
             where: { id: existing.id },
             data: {
               name: row.name,
-              // Null rather than '' — an unknown address is absent, and '' would collide
-              // with every other unknown one under the unique index.
-              email: row.email || null,
-              registerNumber: row.registerNumber,
-              phone: row.phone,
-              leetcodeUsername: row.leetcodeUsername
-                ? row.leetcodeUsername.toLowerCase()
-                : null,
+              // A blank cell is silence, not an instruction — the same rule the batch and
+              // squad columns follow below, and for the same reason.
+              //
+              // These three used to write their nulls through, which made a re-import
+              // *destructive*: a roster assembled before anyone collected a student's
+              // LeetCode handle would erase the handle that had been collected since,
+              // taking their sync and their whole solved history off the dashboard with
+              // it. That is not hypothetical — Alliance's BHUVANA SHRI was carrying a
+              // working handle and 20 mirrored submissions against a roster row whose
+              // profile column still read `leetcode.com/profile/`.
+              //
+              // Clearing a handle or an address is a real thing to want, but it is a
+              // deliberate single-student edit through the directory, not something a
+              // bulk upload should do to a cohort as a side effect of a column nobody
+              // filled in.
+              ...(row.email ? { email: row.email } : {}),
+              ...(row.registerNumber ? { registerNumber: row.registerNumber } : {}),
+              ...(row.phone ? { phone: row.phone } : {}),
+              ...(row.leetcodeUsername
+                ? { leetcodeUsername: row.leetcodeUsername.toLowerCase() }
+                : {}),
               campusId,
               // A sheet without a Batch/Squad column says nothing about placement — it
               // does not say "remove them". Writing the null through would unassign the
@@ -225,12 +275,21 @@ export class StudentImportService {
               // the kind of silent, roster-wide edit an import must never make.
               ...(batchId !== null ? { batchId } : {}),
               ...(squadId !== null ? { squadId } : {}),
+              // Naming someone on the current roster is the statement that they are on it,
+              // so a student a previous roster archived comes back ACTIVE — with the
+              // record that already holds their submissions, not a second one. Only
+              // ARCHIVED is reversed here: DROPPED, PAUSED and INACTIVE are mentors'
+              // deliberate judgements about a student who *is* on the roster, and an
+              // import has no business overruling them.
+              ...(existing.status === 'ARCHIVED'
+                ? { status: 'ACTIVE' as const, archivedAt: null, archivedReason: null }
+                : {}),
               ...placement,
             },
           });
           updated += 1;
         } else {
-          await this.prisma.student.create({
+          const fresh = await this.prisma.student.create({
             data: {
               name: row.name,
               // A sheet that omits the email does not say "remove it": only a supplied
@@ -277,6 +336,7 @@ export class StudentImportService {
               syncState: { create: { status: 'NEVER_SYNCED' } },
             },
           });
+          onRoster.add(fresh.id);
           created += 1;
         }
       } catch (error) {
@@ -289,8 +349,36 @@ export class StudentImportService {
       }
     }
 
+    // Reconciliation runs only after every row has been processed, so a student is
+    // archived on the strength of the *whole* roster rather than of the rows seen so far.
+    // A row that failed to save leaves its student off `onRoster`, which would archive
+    // someone the roster does name — so a run with errors refuses to reconcile rather
+    // than acting on a roster it could not fully apply.
+    let archived: ArchivedStudent[] | undefined;
+    if (options.archiveAbsent) {
+      if (errors.length > 0) {
+        warnings.push({
+          row: 0,
+          field: null,
+          message:
+            `Nobody was archived: ${errors.length} row(s) could not be imported, so the ` +
+            'roster was not fully applied and anyone missing from it may simply be a ' +
+            'failed row. Fix the errors and re-run.',
+          data: {},
+        });
+        archived = [];
+      } else {
+        archived = await this.archiveAbsent(
+          campusId!,
+          onRoster,
+          options.archiveReason ?? 'Not on the current roster',
+        );
+      }
+    }
+
     this.logger.log(
       `Import complete: ${created} created, ${updated} updated, ${skipped} skipped, ` +
+        `${archived ? `${archived.length} archived, ` : ''}` +
         `${errors.length} errors, ${warnings.length} warnings`,
     );
 
@@ -303,7 +391,102 @@ export class StudentImportService {
       warnings,
       createdBatches,
       createdSquads,
+      ...(archived ? { archived } : {}),
     };
+  }
+
+  /**
+   * The student this row refers to, if the system already knows them.
+   *
+   * Identity, most reliable first. Email when the sheet has one; otherwise the register
+   * number, then the LeetCode handle, then the name *within this campus*. Without the
+   * fallbacks a roster with no emails would create fresh duplicates on every run, which
+   * is the opposite of an idempotent import.
+   *
+   * Deliberately not scoped to ACTIVE students: someone archived by a previous roster and
+   * named again by this one is the *same person* returning, and matching them updates and
+   * reactivates the record that already holds their submissions rather than creating a
+   * second student who shares their handle — which the unique index would reject anyway.
+   *
+   * One method, called by both the dry run and the real run, so the two can never report
+   * different numbers for the same roster.
+   */
+  private async findExisting(row: ParsedRow, campusId: string) {
+    const identity: Prisma.StudentWhereInput[] = [];
+    if (row.email) identity.push({ email: row.email });
+    if (row.registerNumber) identity.push({ registerNumber: row.registerNumber });
+    if (row.leetcodeUsername) {
+      identity.push({ leetcodeUsername: row.leetcodeUsername.toLowerCase() });
+    }
+    // Name is only an identity *inside one campus*: two campuses can each have a
+    // "Rahul Sharma" and they are different people.
+    identity.push({ name: row.name, campusId });
+
+    return this.prisma.student.findFirst({ where: { OR: identity } });
+  }
+
+  /** Active students at this campus that the roster did not name. Read-only. */
+  private async absentFromRoster(
+    campusId: string,
+    onRoster: Set<string>,
+  ): Promise<ArchivedStudent[]> {
+    const absent = await this.prisma.student.findMany({
+      where: {
+        campusId,
+        status: 'ACTIVE',
+        ...(onRoster.size > 0 ? { id: { notIn: [...onRoster] } } : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        leetcodeUsername: true,
+        squad: { select: { name: true } },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    return absent.map((student) => ({
+      id: student.id,
+      name: student.name,
+      email: student.email,
+      leetcodeUsername: student.leetcodeUsername,
+      squad: student.squad?.name ?? null,
+    }));
+  }
+
+  /**
+   * Archive the students this campus's roster no longer names.
+   *
+   * **Archive, never delete.** A student who has left still owns submissions, daily
+   * statuses, baseline results, leaderboard entries and placement history, and every
+   * report about a day they were present has to keep resolving them. Deleting would
+   * cascade through all of it and silently rewrite the past; archiving drops them out of
+   * the current roster — the `status: ACTIVE` filter every current-roster query already
+   * applies — and leaves the history untouched. It is also reversible, which is the
+   * property that matters most when the input is a hand-assembled roster.
+   *
+   * `archivedAt`/`archivedReason` are set alongside the status rather than inferred from
+   * it, so "when did they leave and why" survives a later status change.
+   */
+  private async archiveAbsent(
+    campusId: string,
+    onRoster: Set<string>,
+    reason: string,
+  ): Promise<ArchivedStudent[]> {
+    const absent = await this.absentFromRoster(campusId, onRoster);
+    if (absent.length === 0) return absent;
+
+    await this.prisma.student.updateMany({
+      where: { id: { in: absent.map((student) => student.id) } },
+      data: { status: 'ARCHIVED', archivedAt: new Date(), archivedReason: reason },
+    });
+
+    this.logger.log(
+      `Archived ${absent.length} student(s) at campus ${campusId} who are not on the ` +
+        'supplied roster',
+    );
+    return absent;
   }
 
   /**

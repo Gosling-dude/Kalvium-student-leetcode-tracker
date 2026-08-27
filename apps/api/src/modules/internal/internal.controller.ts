@@ -73,6 +73,15 @@ export class InternalController {
       campusName?: string;
       dryRun?: boolean;
       updateExisting?: boolean;
+      /**
+       * Treat the payload as the campus's *complete* roster: everyone currently active
+       * there and absent from it is archived (never deleted — see
+       * `StudentImportService.archiveAbsent`).
+       *
+       * Off unless asked for, because the ordinary case is a partial roster and reading
+       * one as "archive everyone else" would empty a campus from a twelve-row upload.
+       */
+      archiveAbsent?: boolean;
       rows?: {
         name?: string;
         email?: string;
@@ -156,10 +165,21 @@ export class InternalController {
       ),
     );
 
+    if (body.archiveAbsent && !campusId) {
+      throw new BadRequestException(
+        'archiveAbsent needs campusCode: reconciling a roster against every student in ' +
+          'the system would archive other campuses’ students.',
+      );
+    }
+
     return this.importer.importRows(parsed, {
       dryRun: body.dryRun ?? false,
       updateExisting: body.updateExisting ?? true,
       campusId,
+      archiveAbsent: body.archiveAbsent ?? false,
+      archiveReason: `Not on the ${body.campusCode ?? 'campus'} roster imported ${new Date()
+        .toISOString()
+        .slice(0, 10)}`,
     });
   }
 
