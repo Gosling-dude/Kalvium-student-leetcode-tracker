@@ -498,6 +498,22 @@ export class AssignmentsService {
     return this.findAllByDay(this.time.today(), scope);
   }
 
+  /**
+   * The campus an assignment belongs to, or `undefined` when there is no such assignment.
+   *
+   * Deliberately distinguishes "no campus" (`null` — targeted at the whole programme)
+   * from "no such row" (`undefined`), because the authorization check above treats them
+   * differently: everyone may read a programme-wide assignment, nobody may read one that
+   * does not exist.
+   */
+  async findCampusOf(id: string): Promise<string | null | undefined> {
+    const row = await this.prisma.assignment.findUnique({
+      where: { id },
+      select: { campusId: true },
+    });
+    return row === null ? undefined : row.campusId;
+  }
+
   async findAll(query: {
     page: number;
     pageSize: number;

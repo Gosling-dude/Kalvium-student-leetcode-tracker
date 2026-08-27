@@ -41,7 +41,7 @@ import {
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { CacheService } from '../../infra/cache/cache.service';
-import { MentorScopeService } from './mentor-scope.service';
+import { MentorScopeService, type CampusScope } from './mentor-scope.service';
 
 /** The campus selector a request may carry: a UUID, a code, or "everything". */
 export type CampusSelector = string | null;
@@ -92,9 +92,21 @@ export class CampusesService {
   ) {}
 
   /** Every campus, in display order. */
-  async findAll(includeArchived = false): Promise<CampusSummary[]> {
+  /**
+   * @param viewerCampusIds The campuses the caller may see, or `null` for an admin. The
+   * campus *picker* reads this list, so an unscoped answer offers a mentor campuses they
+   * cannot open — the server refuses the request, but only after the UI has invited it.
+   * Narrowing here is what makes the picker honest; it is not the security boundary.
+   */
+  async findAll(
+    includeArchived = false,
+    viewerCampusIds: CampusScope = null,
+  ): Promise<CampusSummary[]> {
     const campuses = await this.prisma.campus.findMany({
-      where: includeArchived ? {} : { status: 'ACTIVE' },
+      where: {
+        ...(includeArchived ? {} : { status: 'ACTIVE' as const }),
+        ...(viewerCampusIds !== null ? { id: { in: viewerCampusIds } } : {}),
+      },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       include: {
         _count: {
@@ -723,12 +735,19 @@ export class CampusesService {
    * campuses issuing four queries each: with two campuses the difference is invisible, and
    * with ten it is the difference between a dashboard that loads and one that does not (§27).
    */
-  async getStats(dayKey?: DayKey): Promise<CampusStats[]> {
+  /**
+   * @param viewerCampusIds As `findAll`. These are per-campus completion figures, so an
+   * unscoped answer hands a mentor every other campus's numbers directly.
+   */
+  async getStats(dayKey?: DayKey, viewerCampusIds: CampusScope = null): Promise<CampusStats[]> {
     const day = dayKey ?? this.time.today();
 
     const [campuses, studentGroups, unassignedGroups, statusRows] = await Promise.all([
       this.prisma.campus.findMany({
-        where: { status: 'ACTIVE' },
+        where: {
+          status: 'ACTIVE',
+          ...(viewerCampusIds !== null ? { id: { in: viewerCampusIds } } : {}),
+        },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       }),
       this.prisma.student.groupBy({

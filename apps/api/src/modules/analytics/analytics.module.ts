@@ -1,6 +1,7 @@
 import { Controller, Get, Module, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 
+import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { AnalyticsService } from './analytics.service';
 import { BatchesModule } from '../batches/batches.module';
 import { CampusesModule } from '../campuses/campuses.module';
@@ -22,12 +23,13 @@ export class AnalyticsController {
   @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   async overview(
+    @CurrentUser() user: RequestUser,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     return this.analytics.overview(from, to, scope);
   }
 
@@ -37,12 +39,13 @@ export class AnalyticsController {
   @ApiQuery({ name: 'campus', required: false })
   @ApiQuery({ name: 'batch', required: false })
   async heatmap(
+    @CurrentUser() user: RequestUser,
     @Query('days') days?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
     const parsed = days ? Number.parseInt(days, 10) : 120;
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     return this.analytics.heatmap(
       Number.isFinite(parsed) ? Math.min(parsed, 366) : 120,
       scope,

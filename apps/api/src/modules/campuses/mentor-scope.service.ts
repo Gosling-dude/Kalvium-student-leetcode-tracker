@@ -11,7 +11,7 @@
  * apart is what keeps `[]` from being read as "don't filter".
  */
 
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import type { UserRole } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -95,6 +95,58 @@ export class MentorScopeService {
 
     if (allowed.length === 1) return { campusId: allowed[0]! };
     return { deny: true };
+  }
+
+  /**
+   * Refuse unless this user may act on something belonging to `campusId`.
+   *
+   * For entities that *carry* a campus — an assignment, a baseline test, a squad — rather
+   * than for a filter. Reading or editing one by id bypasses every list-level filter, so
+   * the id has to be checked against the grants directly.
+   *
+   * Raises `NotFoundException` rather than `ForbiddenException`, and with the same message
+   * a genuinely missing row produces. A 403 would confirm the row exists, which turns
+   * sequential ids into a map of what every other campus has.
+   *
+   * `campusId: null` means the entity belongs to no campus in particular — an assignment
+   * targeted at the whole programme. Those are readable by everyone (they were given to
+   * everyone) but writable only by an admin, which is the `write` flag.
+   */
+  assertCampusAllowed(
+    campusId: string | null,
+    allowed: CampusScope,
+    options: { entity: string; id: string; write?: boolean },
+  ): void {
+    if (allowed === null) return;
+
+    if (campusId === null) {
+      if (!options.write) return;
+      throw new NotFoundException(`${options.entity} ${options.id} was not found`);
+    }
+
+    if (!allowed.includes(campusId)) {
+      throw new NotFoundException(`${options.entity} ${options.id} was not found`);
+    }
+  }
+
+  /**
+   * The campus a mentor's *write* must land on, given what they asked for.
+   *
+   * Distinct from `reportingScope` because "no campus named" cannot be answered by pinning
+   * here: creating an assignment with no campus targets the entire programme, which is a
+   * thing only an admin may do. A mentor must name a campus they hold.
+   */
+  assertCanWriteCampus(campusId: string | null, allowed: CampusScope): void {
+    if (allowed === null) return;
+
+    if (campusId === null) {
+      throw new ForbiddenException(
+        'Only an admin can target every campus at once. Choose one of your campuses.',
+      );
+    }
+    if (!allowed.includes(campusId)) {
+      throw new ForbiddenException('You do not have access to that campus.');
+    }
   }
 
   /** True when this user may read a student sitting at `campusId`. */

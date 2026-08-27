@@ -10,10 +10,16 @@ import {
   Patch,
   Post,
   Query,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
+import { CampusesService } from '../campuses/campuses.service';
+import {
+  MentorScopeService,
+  type CampusScope,
+} from '../campuses/mentor-scope.service';
 import { BaselineTestsService } from './baseline-tests.service';
 import {
   BaselineLeaderboardQueryDto,
@@ -38,17 +44,22 @@ import {
 @Controller('baseline-tests')
 @Roles('ADMIN', 'MENTOR')
 export class BaselineTestsController {
-  constructor(private readonly baseline: BaselineTestsService) {}
+  constructor(
+    private readonly baseline: BaselineTestsService,
+    private readonly mentorScope: MentorScopeService,
+    private readonly campuses: CampusesService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'Baseline tests, newest first, optionally filtered by campus/batch' })
-  findAll(@Query() query: BaselineTestQueryDto) {
-    return this.baseline.findAll(query);
+  async findAll(@Query() query: BaselineTestQueryDto, @CurrentUser() user: RequestUser) {
+    return this.baseline.findAll(query, await this.mentorScope.allowedCampusIds(user));
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'One baseline test' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertMayTouch(id, user, { write: false });
     return this.baseline.findById(id);
   }
 
@@ -56,8 +67,9 @@ export class BaselineTestsController {
   @ApiOperation({
     summary: 'Participation, scores, per-problem success, campus/batch breakdown, review queue',
   })
-  report(@Param('id', ParseUUIDPipe) id: string) {
-    return this.baseline.report(id);
+  async report(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    const allowed = await this.assertMayTouch(id, user, { write: false });
+    return this.baseline.report(id, allowed);
   }
 
   @Get(':id/leaderboard')
@@ -69,69 +81,96 @@ export class BaselineTestsController {
       'shrinks the denominator. Search, squad and status narrow who is listed; none of ' +
       'them renumber `rank`, which always means "how many students did better".',
   })
-  leaderboard(
+  async leaderboard(
     @Param('id', ParseUUIDPipe) id: string,
     @Query() query: BaselineLeaderboardQueryDto,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.baseline.leaderboard(id, query);
+    const allowed = await this.assertMayTouch(id, user, { write: false });
+    return this.baseline.leaderboard(id, query, allowed);
   }
 
   @Get(':id/students/:studentId')
   @ApiOperation({
     summary: "One student's baseline result, with the per-question breakdown",
   })
-  studentResult(
+  async studentResult(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('studentId', ParseUUIDPipe) studentId: string,
+    @CurrentUser() user: RequestUser,
   ) {
-    return this.baseline.studentResult(id, studentId);
+    const allowed = await this.assertMayTouch(id, user, { write: false });
+    return this.baseline.studentResult(id, studentId, allowed);
   }
 
   @Get(':id/attempts')
   @ApiOperation({ summary: 'Every attempt on a test, with risk signals and their evidence' })
-  attempts(@Param('id', ParseUUIDPipe) id: string) {
-    return this.baseline.attempts(id);
+  async attempts(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    const allowed = await this.assertMayTouch(id, user, { write: false });
+    return this.baseline.attempts(id, allowed);
   }
 
   @Post()
   @Audit('BASELINE_TEST_CREATED', 'BaselineTest')
   @ApiOperation({ summary: 'Create a baseline test' })
-  create(@Body() dto: CreateBaselineTestDto, @CurrentUser() user: RequestUser) {
+  async create(@Body() dto: CreateBaselineTestDto, @CurrentUser() user: RequestUser) {
+    // Like assignments: an omitted campus targets the whole programme, so it is refused
+    // for a mentor rather than quietly pinned.
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (allowed !== null) {
+      // `campus` is a selector (code or id), so it is resolved before being compared
+      // against the grants, which hold ids.
+      const requested = await this.campuses.resolveSelector(dto.campus ?? null);
+      this.mentorScope.assertCanWriteCampus(requested, allowed);
+    }
     return this.baseline.create(dto, user.id);
   }
 
   @Patch(':id')
   @Audit('BASELINE_TEST_UPDATED', 'BaselineTest')
   @ApiOperation({ summary: 'Update a baseline test (problems and audience are DRAFT-only)' })
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateBaselineTestDto) {
+  async update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateBaselineTestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.update(id, dto);
   }
 
   @Post(':id/duplicate')
   @Audit('BASELINE_TEST_DUPLICATED', 'BaselineTest')
   @ApiOperation({ summary: "Copy a test into a new draft — this week's from last week's" })
-  duplicate(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+  async duplicate(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.duplicate(id, user.id);
   }
 
   @Post(':id/publish')
   @Audit('BASELINE_TEST_PUBLISHED', 'BaselineTest')
   @ApiOperation({ summary: 'Make a test visible to its audience and open for attempts' })
-  publish(@Param('id', ParseUUIDPipe) id: string) {
+  async publish(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.setStatus(id, 'ACTIVE');
   }
 
   @Post(':id/close')
   @Audit('BASELINE_TEST_CLOSED', 'BaselineTest')
   @ApiOperation({ summary: 'Close a test, grade every attempt one final time, freeze the report' })
-  close(@Param('id', ParseUUIDPipe) id: string) {
+  async close(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.setStatus(id, 'CLOSED');
   }
 
   @Patch(':id/status')
   @Audit('BASELINE_TEST_STATUS_CHANGED', 'BaselineTest')
   @ApiOperation({ summary: 'Move a test through DRAFT → SCHEDULED → ACTIVE → CLOSED' })
-  setStatus(@Param('id', ParseUUIDPipe) id: string, @Body() dto: SetBaselineStatusDto) {
+  async setStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetBaselineStatusDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.setStatus(id, dto.status);
   }
 
@@ -145,19 +184,65 @@ export class BaselineTestsController {
   @Post(':id/grade')
   @Audit('BASELINE_TEST_GRADED', 'BaselineTest')
   @ApiOperation({ summary: 'Re-grade every attempt from the submission mirror' })
-  grade(@Param('id', ParseUUIDPipe) id: string) {
+  async grade(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    await this.assertMayTouch(id, user, { write: true });
     return this.baseline.gradeTest(id);
   }
 
   @Patch('attempts/:attemptId/review')
   @Audit('BASELINE_ATTEMPT_REVIEWED', 'BaselineTestAttempt')
   @ApiOperation({ summary: "Record a mentor's conclusion on a flagged attempt" })
-  review(
+  async review(
     @Param('attemptId', ParseUUIDPipe) attemptId: string,
     @Body() dto: ReviewAttemptDto,
     @CurrentUser() user: RequestUser,
   ) {
+    // Reviewing is keyed by *attempt*, not by test, so the test-level guard does not
+    // reach it — the attempt's own campus is what has to be checked.
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (allowed !== null) {
+      const campusId = await this.baseline.findAttemptCampus(attemptId);
+      if (campusId === undefined) {
+        throw new NotFoundException(`Attempt ${attemptId} was not found`);
+      }
+      this.mentorScope.assertCampusAllowed(campusId, allowed, {
+        entity: 'Attempt',
+        id: attemptId,
+        write: true,
+      });
+    }
     return this.baseline.review(attemptId, dto, { id: user.id, name: user.name });
+  }
+
+  /**
+   * Refuse unless this caller may act on the baseline test behind `id`, and return the
+   * campus scope its rows must then be narrowed to.
+   *
+   * Two separate jobs, because a baseline test needs both. The *test* may be visible —
+   * a programme-wide one applies to every campus, including the caller's — while its
+   * *students* must still be narrowed to the caller's campuses. Hiding the test would be
+   * wrong (their students really did sit it); returning every campus's results would be
+   * the leak. So this authorises the test and hands back the scope for the rows.
+   *
+   * A test belonging to a campus the caller does not hold is answered as "not found",
+   * matching a genuinely missing id, so ids cannot be walked.
+   */
+  private async assertMayTouch(
+    id: string,
+    user: RequestUser,
+    options: { write: boolean },
+  ): Promise<CampusScope> {
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    if (allowed === null) return null;
+
+    const campusId = await this.baseline.findCampusOf(id);
+    if (campusId === undefined) throw new NotFoundException(`Baseline test ${id} was not found`);
+    this.mentorScope.assertCampusAllowed(campusId, allowed, {
+      entity: 'Baseline test',
+      id,
+      write: options.write,
+    });
+    return allowed;
   }
 
   @Delete(':id')

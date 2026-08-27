@@ -45,19 +45,24 @@ export class CampusesController {
 
   @Get()
   @ApiOperation({ summary: 'All campuses, in display order' })
-  findAll(@Query() query: ListCampusesQueryDto) {
-    return this.campuses.findAll(query.includeArchived ?? false);
+  async findAll(@Query() query: ListCampusesQueryDto, @CurrentUser() user: RequestUser) {
+    return this.campuses.findAll(
+      query.includeArchived ?? false,
+      await this.mentorScope.allowedCampusIds(user),
+    );
   }
 
   @Get('stats')
   @ApiOperation({ summary: 'Per-campus student counts, placement-pending counts and completion' })
-  stats(@Query() query: CampusStatsQueryDto) {
-    return this.campuses.getStats(query.dayKey);
+  async stats(@Query() query: CampusStatsQueryDto, @CurrentUser() user: RequestUser) {
+    return this.campuses.getStats(query.dayKey, await this.mentorScope.allowedCampusIds(user));
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'A single campus' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    this.mentorScope.assertCampusAllowed(id, allowed, { entity: 'Campus', id });
     return this.campuses.findById(id);
   }
 

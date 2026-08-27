@@ -64,6 +64,7 @@ import {
 import type { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
+import type { CampusScope } from '../campuses/mentor-scope.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { SUBMISSION_PROVIDER, type SubmissionProvider } from '../providers/provider.types';
@@ -297,7 +298,10 @@ export class BaselineTestsService {
   // Admin: reading
   // -------------------------------------------------------------------------
 
-  async findAll(query: BaselineTestQueryDto): Promise<BaselineTestSummary[]> {
+  async findAll(
+    query: BaselineTestQueryDto,
+    viewerCampusIds: CampusScope = null,
+  ): Promise<BaselineTestSummary[]> {
     const scope = await this.campuses.resolveScope({ campus: query.campus, batch: query.batch });
 
     const tests = await this.prisma.baselineTest.findMany({
@@ -311,12 +315,24 @@ export class BaselineTestsService {
               },
             }
           : {}),
-        // A campus filter shows what that campus was set, including the all-campus tests
-        // that also applied to them — the same widening the resolver uses.
-        ...(scope.campusId
-          ? { OR: [{ campusId: scope.campusId }, { campusId: null }] }
-          : {}),
-        ...(scope.batchId ? { OR: [{ batchId: scope.batchId }, { batchId: null }] } : {}),
+        // Each of these is an independent OR-group, so they are combined under `AND`
+        // rather than spread as sibling `OR` keys. Object spread would have the later
+        // ones silently overwrite the earlier — the campus filter and the batch filter
+        // could never both apply, and whichever came last would be the only one in force.
+        AND: [
+          // A campus filter shows what that campus was set, including the all-campus tests
+          // that also applied to them — the same widening the resolver uses.
+          ...(scope.campusId
+            ? [{ OR: [{ campusId: scope.campusId }, { campusId: null }] }]
+            : []),
+          ...(scope.batchId ? [{ OR: [{ batchId: scope.batchId }, { batchId: null }] }] : []),
+          // The viewer's own grants, on top of whatever they filtered by. A programme-wide
+          // test (`campusId: null`) stays listed: it genuinely was set for their campus too,
+          // and its rows are narrowed to their students rather than the test being hidden.
+          ...(viewerCampusIds !== null
+            ? [{ OR: [{ campusId: { in: viewerCampusIds } }, { campusId: null }] }]
+            : []),
+        ],
       },
       include: this.include(),
       orderBy: [{ dayKey: 'desc' }, { createdAt: 'desc' }],
@@ -325,6 +341,30 @@ export class BaselineTestsService {
     const counts = await this.attemptCounts(tests.map((test) => test.id));
     const eligibility = await this.eligibleCounts(tests);
     return tests.map((test) => this.toSummary(test, counts, eligibility));
+  }
+
+  /**
+   * The campus a baseline test belongs to, or `undefined` when there is no such test.
+   *
+   * `null` (targeted at the whole programme) and `undefined` (no such row) are kept
+   * distinct because the authorization check treats them differently — see
+   * `MentorScopeService.assertCampusAllowed`.
+   */
+  async findCampusOf(id: string): Promise<string | null | undefined> {
+    const row = await this.prisma.baselineTest.findUnique({
+      where: { id },
+      select: { campusId: true },
+    });
+    return row === null ? undefined : row.campusId;
+  }
+
+  /** The campus an attempt was sat under, or `undefined` when there is no such attempt. */
+  async findAttemptCampus(attemptId: string): Promise<string | null | undefined> {
+    const row = await this.prisma.baselineTestAttempt.findUnique({
+      where: { id: attemptId },
+      select: { campusId: true },
+    });
+    return row === null ? undefined : row.campusId;
   }
 
   async findById(id: string): Promise<BaselineTestSummary> {
@@ -688,14 +728,14 @@ export class BaselineTestsService {
    * a student who never opened the test has no attempt row, and manufacturing one would
    * make "started" meaningless.
    */
-  async report(testId: string): Promise<BaselineTestReport> {
+  async report(testId: string, viewerCampusIds: CampusScope = null): Promise<BaselineTestReport> {
     const test = await this.prisma.baselineTest.findUnique({
       where: { id: testId },
       include: this.include(),
     });
     if (!test) throw new NotFoundException(`Baseline test ${testId} was not found`);
 
-    const eligible = await this.eligibleStudents(test);
+    const eligible = await this.eligibleStudents(test, viewerCampusIds);
     const attempts = await this.prisma.baselineTestAttempt.findMany({
       where: { testId },
       include: {
@@ -918,6 +958,7 @@ export class BaselineTestsService {
       sort?: 'rank' | 'name' | 'squad' | 'solved' | 'percent';
       direction?: 'asc' | 'desc';
     } = {},
+    viewerCampusIds: CampusScope = null,
   ): Promise<BaselineLeaderboard> {
     const test = await this.prisma.baselineTest.findUnique({
       where: { id: testId },
@@ -926,7 +967,7 @@ export class BaselineTestsService {
     if (!test) throw new NotFoundException(`Baseline test ${testId} was not found`);
 
     const [eligible, attempts] = await Promise.all([
-      this.eligibleStudents(test),
+      this.eligibleStudents(test, viewerCampusIds),
       this.prisma.baselineTestAttempt.findMany({
         where: { testId },
         include: {
@@ -1126,7 +1167,11 @@ export class BaselineTestsService {
    * `rank` is resolved from the same board `leaderboard()` builds rather than recomputed
    * locally, so the number here and the number in the table can never disagree.
    */
-  async studentResult(testId: string, studentId: string): Promise<BaselineStudentResult> {
+  async studentResult(
+    testId: string,
+    studentId: string,
+    viewerCampusIds: CampusScope = null,
+  ): Promise<BaselineStudentResult> {
     const test = await this.prisma.baselineTest.findUnique({
       where: { id: testId },
       include: this.include(),
@@ -1139,12 +1184,24 @@ export class BaselineTestsService {
         id: true,
         name: true,
         email: true,
+        campusId: true,
         squad: { select: { name: true } },
         campus: { select: { name: true } },
         batch: { select: { name: true } },
       },
     });
-    if (!student) throw new NotFoundException(`Student ${studentId} was not found`);
+    // "Not yours" is answered identically to "does not exist", so a mentor cannot walk
+    // student ids to learn who is enrolled at another campus. A student with no campus
+    // matches no mentor's grants, which is the safe direction for the one group nobody
+    // is accountable for.
+    const outsideViewerScope =
+      viewerCampusIds !== null &&
+      (student === null ||
+        student.campusId === null ||
+        !viewerCampusIds.includes(student.campusId));
+    if (!student || outsideViewerScope) {
+      throw new NotFoundException(`Student ${studentId} was not found`);
+    }
 
     const attempt = await this.prisma.baselineTestAttempt.findUnique({
       where: { testId_studentId: { testId, studentId } },
@@ -1255,7 +1312,10 @@ export class BaselineTestsService {
   }
 
   /** Every attempt on a test, for the mentor-facing results table. */
-  async attempts(testId: string): Promise<BaselineAttemptSummary[]> {
+  async attempts(
+    testId: string,
+    viewerCampusIds: CampusScope = null,
+  ): Promise<BaselineAttemptSummary[]> {
     const test = await this.prisma.baselineTest.findUnique({
       where: { id: testId },
       include: this.include(),
@@ -1273,7 +1333,15 @@ export class BaselineTestsService {
       },
       orderBy: [{ score: 'desc' }, { timeTakenSeconds: 'asc' }],
     });
-    return rows.map((attempt) => this.toAttemptSummary(attempt, test));
+    // Attempts carry the campus the student sat under, frozen on the row, so this filters
+    // on what was true at the time rather than on where the student is now.
+    const visible =
+      viewerCampusIds === null
+        ? rows
+        : rows.filter(
+            (attempt) => attempt.campusId !== null && viewerCampusIds.includes(attempt.campusId),
+          );
+    return visible.map((attempt) => this.toAttemptSummary(attempt, test));
   }
 
   /**
@@ -1321,10 +1389,23 @@ export class BaselineTestsService {
    * this", which is a question about now. Where a student *was* matters for the frozen
    * `campusId`/`batchId` on their attempt, which is what the report groups by.
    */
-  private async eligibleStudents(test: {
-    campusId: string | null;
-    batchId: string | null;
-  }): Promise<EligibleStudent[]> {
+  private async eligibleStudents(
+    test: {
+      campusId: string | null;
+      batchId: string | null;
+    },
+    /**
+     * The campuses the *viewer* may read, or `null` for an admin.
+     *
+     * Intersected with the test's own audience rather than replacing it. The two are
+     * different questions — "who sat this test" and "whose results may you see" — and a
+     * programme-wide test (`campusId: null`) is exactly where they diverge: its audience
+     * is everyone, so without this a mentor opening it would get every campus's students
+     * on the leaderboard. Narrowing the *rows* rather than hiding the test is the right
+     * shape, because the test genuinely does apply to their campus too.
+     */
+    viewerCampusIds: CampusScope = null,
+  ): Promise<EligibleStudent[]> {
     // Names come along for the ride so a group with *no attempts yet* can still be
     // labelled. Reading the name off the attempts alone made "0 of 92 started" render as
     // "Unassigned — 0 of 92", which is the single most useful line in the report and the
@@ -1334,6 +1415,10 @@ export class BaselineTestsService {
         status: 'ACTIVE',
         ...(test.campusId ? { campusId: test.campusId } : {}),
         ...(test.batchId ? { batchId: test.batchId } : {}),
+        // `[]` is a mentor with no grants and must match nobody. Prisma's `in: []` does
+        // exactly that, which is the safe direction — the dangerous one would be treating
+        // an empty list as "no filter".
+        ...(viewerCampusIds !== null ? { campusId: { in: viewerCampusIds } } : {}),
       },
       select: {
         id: true,
