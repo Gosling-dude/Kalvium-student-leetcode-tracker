@@ -20,6 +20,11 @@ on:
         description: 'Full name — ONLY needed to create a campus that does not exist yet (e.g. "Alliance University"). Leave blank for an existing campus.'
         required: false
         type: string
+      archiveAbsent:
+        description: 'RECONCILE — the secret holds this campus’s COMPLETE roster; archive anyone active there and absent from it. Leave OFF for a partial roster.'
+        required: true
+        default: false
+        type: boolean
       dryRun:
         description: 'Report what would change without writing'
         required: true
@@ -61,6 +66,7 @@ jobs:
           CAMPUS: ${{ inputs.campusCode }}
           CAMPUS_NAME: ${{ inputs.campusName }}
           DRY_RUN: ${{ inputs.dryRun }}
+          ARCHIVE_ABSENT: ${{ inputs.archiveAbsent }}
         run: |
           set -euo pipefail
           base="${BACKEND_URL%/}"
@@ -91,6 +97,9 @@ jobs:
               'campusCode': os.environ['CAMPUS'],
               'dryRun': os.environ['DRY_RUN'] == 'true',
               'updateExisting': True,
+              # Off unless explicitly asked for. A partial roster read as "archive everyone
+              # else" would empty a campus from a twelve-row upload.
+              'archiveAbsent': os.environ.get('ARCHIVE_ABSENT') == 'true',
               'rows': rows,
           }
           # Only sent when supplied. The endpoint creates a campus only when it is named,
@@ -129,6 +138,10 @@ jobs:
           print(f"updated    : {r['updated']}")
           print(f"errors     : {len(r.get('errors', []))}")
           print(f"warnings   : {len(r.get('warnings', []))}")
+          # Count only. `archived` carries each departing student's name, email and handle,
+          # and this log is readable by anyone who can see the repository's Actions.
+          if r.get('archived') is not None:
+              print(f"archived   : {len(r['archived'])}  (ARCHIVED, not deleted — history kept)")
           for label, key in (('ERROR', 'errors'), ('WARN', 'warnings')):
               for item in r.get(key, []):
                   # Row number and reason only. `data` carries the student's own details.
