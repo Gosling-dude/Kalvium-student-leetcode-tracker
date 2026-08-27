@@ -99,13 +99,22 @@ itself rather than only on the schedule.
   including those who never started. Historical results are immutable: solving a problem
   after a test closes does not raise the recorded score.
 - **Access control** — mentors are scoped to the campuses they are granted, enforced
-  server-side on the student directory, the campus/batch student routes, and — since the
-  reporting endpoints were found unscoped — the mentor tracker, dashboard, leaderboard,
-  reports and email-report reads. Every one resolves through
-  `CampusesService.resolveScopeFor`, which takes the caller, so the check cannot be
-  forgotten at a call site. A mentor naming no campus is pinned to their grant rather than
-  widened to the whole programme. "Not yours" and "does not exist" are answered identically
-  so ids cannot be used to enumerate.
+  server-side across every endpoint that carries campus data: the student directory and
+  detail, the mentor tracker, dashboard, assignments, baseline tests and their
+  reports/leaderboards/attempts, analytics, both leaderboards, reports, email-report reads,
+  the campus list and stats, and a sync job's per-student rows.
+
+  Three shapes, one rule each. Filter-shaped endpoints resolve through
+  `CampusesService.resolveScopeFor`, which takes the caller, so a mentor naming no campus
+  is pinned to their grant rather than widened to the whole programme. Entities fetched by
+  id check the row's own campus through `MentorScopeService.assertCampusAllowed`. Writes go
+  through `assertCanWriteCampus`, which — unlike a read — refuses an omitted campus, since
+  that targets every campus at once.
+
+  "Not yours" and "does not exist" are answered identically throughout, so ids cannot be
+  used to enumerate what other campuses hold. A programme-wide assignment or baseline test
+  stays readable by every mentor (it genuinely applied to their campus) while its student
+  rows are narrowed to theirs, and editing it stays admin-only.
 - **Mentor management** — admins add mentors, change a mentor's campus, reset a password
   and deactivate/reactivate an account from the Admin screen, with no database access. A
   campus can hold any number of mentors. Deactivation is soft and revokes live sessions
