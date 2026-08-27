@@ -99,8 +99,18 @@ itself rather than only on the schedule.
   including those who never started. Historical results are immutable: solving a problem
   after a test closes does not raise the recorded score.
 - **Access control** — mentors are scoped to the campuses they are granted, enforced
-  server-side on the student directory and the campus/batch student routes. "Not yours"
-  and "does not exist" are answered identically so ids cannot be used to enumerate.
+  server-side on the student directory, the campus/batch student routes, and — since the
+  reporting endpoints were found unscoped — the mentor tracker, dashboard, leaderboard,
+  reports and email-report reads. Every one resolves through
+  `CampusesService.resolveScopeFor`, which takes the caller, so the check cannot be
+  forgotten at a call site. A mentor naming no campus is pinned to their grant rather than
+  widened to the whole programme. "Not yours" and "does not exist" are answered identically
+  so ids cannot be used to enumerate.
+- **Mentor management** — admins add mentors, change a mentor's campus, reset a password
+  and deactivate/reactivate an account from the Admin screen, with no database access. A
+  campus can hold any number of mentors. Deactivation is soft and revokes live sessions
+  immediately; nothing deletes a user, because the audit rows recording what they did
+  reference them.
 - **Forced password change** — enforced by a global guard rather than the UI, so an account
   still on its handed-over password can reach the change-password form and nothing else.
   This is what makes the optional shared `SEED_STUDENT_PASSWORD` safe.
