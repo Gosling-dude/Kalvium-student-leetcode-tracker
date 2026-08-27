@@ -52,6 +52,27 @@ export interface AuthUser {
   studentId: string | null;
   /** True when this account has never had its provisioned password changed. */
   mustChangePassword: boolean;
+  /**
+   * The campuses this account may read, or `null` for "every campus".
+   *
+   * `null` and `[]` are different answers and must stay that way: `null` is an admin,
+   * unrestricted, and `[]` is a mentor with no grants, who may see nothing. Collapsing
+   * them into one empty array makes the direction of a bug decide whether an admin sees
+   * nothing or a mentor sees everything.
+   *
+   * This is a *convenience* for the client — it lets the mentor view label itself and
+   * skip offering a campus picker with one option. It is never the enforcement: the
+   * server re-reads the grants on every request (`MentorScopeService`), because anything
+   * the client is told, the client can also change.
+   */
+  campuses: AuthUserCampus[] | null;
+}
+
+/** One campus an account may read, as `/auth/me` reports it. */
+export interface AuthUserCampus {
+  id: string;
+  code: string;
+  name: string;
 }
 
 export interface AuthTokens {

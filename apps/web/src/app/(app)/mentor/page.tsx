@@ -44,6 +44,14 @@ export default function MentorPage() {
     queryFn: () => api.mentorDashboard(dayKey, undefined, campus ?? undefined, batch ?? undefined),
   });
 
+  // Which campuses this account may read; `null` for an admin, who reads every campus.
+  // Used only to *label* the view and to hide a campus picker that would offer one
+  // option — never to filter. The server scopes every response to these grants whatever
+  // the request asks for, which is what makes the label honest rather than decorative.
+  const { data: me } = useQuery({ queryKey: ['me'], queryFn: api.me });
+  const ownCampuses = me?.campuses ?? null;
+  const singleCampus = ownCampuses?.length === 1 ? ownCampuses[0]! : null;
+
   const onExport = async (): Promise<void> => {
     setExporting(true);
     try {
@@ -68,15 +76,18 @@ export default function MentorPage() {
     <div className="space-y-5">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Mentor View</h1>
+          <h1 className="text-xl font-semibold tracking-tight">
+            {singleCampus ? `${singleCampus.code} Mentor View` : 'Mentor View'}
+          </h1>
           <p className="text-sm text-[var(--color-fg-muted)]">
+            {singleCampus ? `${singleCampus.name} · ` : ''}
             {data?.assignment?.topic ? `${data.assignment.topic} · ` : ''}
             {data?.totalStudents ?? 0} students
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <ScopeFilter />
+          {singleCampus ? null : <ScopeFilter />}
           <label htmlFor="dayKey" className="sr-only">
             Date
           </label>

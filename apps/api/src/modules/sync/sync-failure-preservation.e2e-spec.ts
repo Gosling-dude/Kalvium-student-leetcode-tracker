@@ -25,6 +25,7 @@ import { RollupService } from '../scoring/rollup.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
 import { StudentMetricsService } from '../scoring/student-metrics.service';
 import { BatchesService } from '../batches/batches.service';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 
@@ -45,7 +46,7 @@ const noCache = {
 const scoringConfig = new ScoringConfigService(prisma as never);
 const batches = new BatchesService(prisma as never, time, noCache);
 const metrics = new StudentMetricsService(prisma as never, time, scoringConfig, batches);
-const campuses = new CampusesService(prisma as never, time, noCache);
+const campuses = new CampusesService(prisma as never, time, noCache, new MentorScopeService(prisma as never));
 const rollup = new RollupService(
   prisma as never,
   noCache,

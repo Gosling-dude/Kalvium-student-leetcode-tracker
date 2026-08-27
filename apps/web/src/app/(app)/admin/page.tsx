@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 
 import { api } from '@/lib/api';
 import { BatchManagement } from '@/components/batch-management';
+import { MentorManagement } from '@/components/mentor-management';
 import { StudentAccountsPanel } from '@/components/student-accounts-panel';
 import { timeAgo } from '@/lib/utils';
 import {
@@ -68,11 +69,13 @@ export default function AdminPage() {
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Admin</h1>
         <p className="text-sm text-[var(--color-fg-muted)]">
-          Batch management, queue health, sync diagnostics and score recomputation.
+          Mentors and campus access, batches, student logins, queue health and score recomputation.
         </p>
       </header>
 
       <BatchManagement />
+
+      <MentorManagement />
 
       <StudentAccountsPanel />
 

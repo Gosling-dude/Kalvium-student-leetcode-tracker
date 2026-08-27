@@ -35,11 +35,13 @@ import {
   type CampusStats,
   type CampusSummary,
   type DayKey,
+  type UserRole,
 } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { CacheService } from '../../infra/cache/cache.service';
+import { MentorScopeService } from './mentor-scope.service';
 
 /** The campus selector a request may carry: a UUID, a code, or "everything". */
 export type CampusSelector = string | null;
@@ -86,6 +88,7 @@ export class CampusesService {
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
     private readonly cache: CacheService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
 
   /** Every campus, in display order. */
@@ -173,6 +176,59 @@ export class CampusesService {
    *     code like `A` with no campus is rejected, because it names two batches.
    *  3. A batch that belongs to another campus is a 400, not a silent reinterpretation.
    */
+  /**
+   * `resolveScope`, re-derived against what the caller is actually allowed to read.
+   *
+   * `resolveScope` validates what the *request* asked for and has no idea who is asking,
+   * which is exactly how a mentor scoped to one campus could read another: send
+   * `?campus=SRM` and the only thing standing in the way was a filter in the browser.
+   * Worse, sending **no** campus resolves to `null`, and `null` on every aggregate here
+   * means *every campus in the system* — so a mentor's ordinary page load, with no
+   * tampering at all, asked for the whole programme.
+   *
+   * Every reporting endpoint that accepts a `campus` parameter must resolve through this
+   * rather than through `resolveScope`, so the check cannot be forgotten at a call site.
+   *
+   * Denial is reported as the same `BadRequestException` an unknown campus produces:
+   * "not yours" and "does not exist" have to be indistinguishable, or a mentor can walk
+   * campus ids to learn which ones exist.
+   */
+  async resolveScopeFor(
+    user: { id: string; role: UserRole },
+    input: { campus?: string | null; batch?: string | null },
+  ): Promise<ResolvedScope> {
+    const resolved = await this.resolveScope(input);
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    const scoped = this.mentorScope.reportingScope(resolved.campusId, allowed);
+
+    if ('deny' in scoped) {
+      // A mentor with several grants and no campus named is the one denial that is not
+      // about permission: there is no single campus to run under and these endpoints
+      // take exactly one. Say so, rather than pretending the campus does not exist.
+      if (!resolved.campusId && (allowed?.length ?? 0) > 1) {
+        throw new BadRequestException(
+          'You have access to more than one campus. Name the one you want with ?campus=.',
+        );
+      }
+      throw new BadRequestException(
+        `"${input.campus}" is not a known campus.`,
+      );
+    }
+
+    if (scoped.campusId === resolved.campusId) return resolved;
+
+    // The mentor named nothing and was pinned to their single grant, so the names on the
+    // scope have to be re-read — they describe "every campus" and would otherwise label
+    // one campus's report with no campus at all.
+    const campus = await this.campusRef(scoped.campusId!);
+    return {
+      ...resolved,
+      campusId: scoped.campusId,
+      campusName: campus?.name ?? null,
+      campusCode: campus?.code ?? null,
+    };
+  }
+
   async resolveScope(input: {
     campus?: string | null;
     batch?: string | null;

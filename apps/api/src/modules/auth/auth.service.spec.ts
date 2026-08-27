@@ -46,6 +46,12 @@ async function makeService(overrides: { studentStatus?: string | null; role?: st
     refreshToken: {
       create: vi.fn().mockResolvedValue({}),
     },
+    // A mentor's campus grants are read on every login, refresh and profile read, so
+    // `AuthUser.campuses` can tell the client which campus it is looking at. No grants
+    // by default: these tests are about the credential, not about access.
+    mentorCampus: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   };
 
   const jwt = {

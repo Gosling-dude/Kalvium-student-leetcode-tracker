@@ -2,6 +2,7 @@ import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 
 import { BadRequestException } from '@nestjs/common';
+import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { CampusesService } from '../campuses/campuses.service';
 import { LeaderboardService, type Period } from './leaderboard.service';
 
@@ -45,6 +46,7 @@ export class LeaderboardController {
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   @ApiQuery({ name: 'limit', required: false })
   async students(
+    @CurrentUser() user: RequestUser,
     @Query('period') period = 'DAILY',
     @Query('dayKey') dayKey?: string,
     @Query('squadId') squadId?: string,
@@ -56,7 +58,7 @@ export class LeaderboardController {
   ) {
     // `campus`/`batch` (codes or aliases) are preferred; the `*Id` forms are kept for
     // existing callers. Resolved as a pair so `campus=SRM&batch=A` cannot mean Vels'.
-    const scope = await this.campuses.resolveScope({
+    const scope = await this.campuses.resolveScopeFor(user, {
       campus: campus ?? campusId,
       batch: batch ?? batchId,
     });

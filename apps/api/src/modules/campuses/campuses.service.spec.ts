@@ -16,6 +16,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MentorScopeService } from './mentor-scope.service';
 import { CampusesService } from './campuses.service';
 
 const VELS = { id: '11111111-1111-4111-8111-111111111111', code: 'VELS', name: 'Vels Institute', status: 'ACTIVE', sortOrder: 1 };
@@ -94,7 +95,12 @@ function makeService() {
   const time = { today: vi.fn().mockReturnValue('2026-08-22') };
   const cache = { delByPrefix: vi.fn().mockResolvedValue(undefined) };
 
-  const service = new CampusesService(prisma as never, time as never, cache as never);
+  const service = new CampusesService(
+    prisma as never,
+    time as never,
+    cache as never,
+    new MentorScopeService(prisma as never),
+  );
   return { service, prisma };
 }
 

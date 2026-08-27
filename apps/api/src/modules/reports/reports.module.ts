@@ -4,6 +4,7 @@ import type { Response } from 'express';
 import { EXPORT_FORMATS, type ExportFormat } from '@dsa/shared';
 
 import { BadRequestException } from '@nestjs/common';
+import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { BatchesModule } from '../batches/batches.module';
 import { CampusesModule } from '../campuses/campuses.module';
 import { CampusesService } from '../campuses/campuses.service';
@@ -48,12 +49,13 @@ export class ReportsController {
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   @ApiQuery({ name: 'cohort', required: false })
   async daily(
+    @CurrentUser() user: RequestUser,
     @Query('dayKey') dayKey?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     return this.reports.dailyReport(dayKey, {
       campusId: scope.campusId,
       batchId: scope.batchId,
@@ -94,6 +96,7 @@ export class ReportsController {
   @ApiQuery({ name: 'batch', required: false, description: 'Batch-wise export' })
   @ApiQuery({ name: 'cohort', required: false, description: 'Cohort-wise export' })
   async exportDaily(
+    @CurrentUser() user: RequestUser,
     @Res() res: Response,
     @Query('dayKey') dayKey?: string,
     @Query('format') format: ExportFormat = 'XLSX',
@@ -101,7 +104,7 @@ export class ReportsController {
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ): Promise<void> {
-    const resolved = await this.campuses.resolveScope({ campus, batch });
+    const resolved = await this.campuses.resolveScopeFor(user, { campus, batch });
     const cohortNumber = this.parseCohort(cohort);
     const report = await this.reports.dailyReport(dayKey, {
       campusId: resolved.campusId,

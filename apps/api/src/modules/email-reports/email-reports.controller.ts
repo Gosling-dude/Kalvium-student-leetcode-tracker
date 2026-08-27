@@ -59,12 +59,13 @@ export class EmailReportsController {
   @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false, description: 'Batch id, code (A/B) or alias' })
   async daily(
+    @CurrentUser() user: RequestUser,
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     return this.dailyReport.build(date, {
       squadId,
       campusId: scope.campusId,
@@ -77,12 +78,13 @@ export class EmailReportsController {
   @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   async summary(
+    @CurrentUser() user: RequestUser,
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     const report = await this.dailyReport.build(date, {
       squadId,
       campusId: scope.campusId,
@@ -97,13 +99,14 @@ export class EmailReportsController {
   @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   async students(
+    @CurrentUser() user: RequestUser,
     @Param('date') date: string,
     @Query('squadId') squadId?: string,
     @Query('tier') tier?: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     const report = await this.dailyReport.build(date, {
       squadId,
       campusId: scope.campusId,
@@ -119,6 +122,7 @@ export class EmailReportsController {
   @ApiQuery({ name: 'batch', required: false })
   @ApiQuery({ name: 'cohort', required: false, description: 'Restrict the export to one cohort' })
   async exportDaily(
+    @CurrentUser() user: RequestUser,
     @Res() res: Response,
     @Param('date') date: string,
     @Query('format') format: ExportFormat = 'CSV',
@@ -127,7 +131,7 @@ export class EmailReportsController {
     @Query('batch') batch?: string,
     @Query('cohort') cohort?: string,
   ): Promise<void> {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     const report = await this.dailyReport.build(date, {
       squadId,
       campusId: scope.campusId,
@@ -234,8 +238,11 @@ export class EmailReportsController {
 
   @Get('email/history')
   @ApiOperation({ summary: 'Email report history' })
-  async history(@Query() query: ListEmailHistoryDto) {
-    const scope = await this.campuses.resolveScope({ campus: query.campus, batch: query.batch });
+  async history(@Query() query: ListEmailHistoryDto, @CurrentUser() user: RequestUser) {
+    const scope = await this.campuses.resolveScopeFor(user, {
+      campus: query.campus,
+      batch: query.batch,
+    });
     return this.emailReports.history({
       ...query,
       campusId: scope.campusId,
@@ -249,11 +256,12 @@ export class EmailReportsController {
   @ApiQuery({ name: 'campus', required: false, description: 'Campus id or code' })
   @ApiQuery({ name: 'batch', required: false })
   async status(
+    @CurrentUser() user: RequestUser,
     @Query('dayKey') dayKey: string,
     @Query('campus') campus?: string,
     @Query('batch') batch?: string,
   ) {
-    const scope = await this.campuses.resolveScope({ campus, batch });
+    const scope = await this.campuses.resolveScopeFor(user, { campus, batch });
     return this.emailReports.statusForDay(dayKey, scope.batchId, scope.campusId);
   }
 

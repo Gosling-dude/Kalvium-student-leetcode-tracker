@@ -585,4 +585,55 @@ export const api = {
       `/admin/students/${studentId}/reset-password`,
       { method: 'POST' },
     ),
+
+  // --- Mentor management (admin only) ---------------------------------------
+
+  mentors: () => apiFetch<MentorAccountRow[]>('/admin/mentors'),
+
+  createMentor: (body: { name: string; email: string; campusIds: string[] }) =>
+    apiFetch<ProvisionedMentorResponse>('/admin/mentors', { method: 'POST', body }),
+
+  setMentorCampuses: (userId: string, campusIds: string[]) =>
+    apiFetch<{ userId: string; campusIds: string[] }>(`/admin/mentors/${userId}/campuses`, {
+      method: 'PUT',
+      body: { campusIds },
+    }),
+
+  setMentorActive: (userId: string, isActive: boolean) =>
+    apiFetch<{ userId: string; isActive: boolean }>(`/admin/mentors/${userId}/active`, {
+      method: 'PATCH',
+      body: { isActive },
+    }),
+
+  resetMentorPassword: (userId: string) =>
+    apiFetch<ProvisionedMentorResponse>(`/admin/mentors/${userId}/reset-password`, {
+      method: 'POST',
+    }),
 };
+
+/** One row of `GET /admin/mentors`. */
+export interface MentorAccountRow {
+  id: string;
+  name: string;
+  email: string;
+  role: 'ADMIN' | 'MENTOR';
+  isActive: boolean;
+  lastLoginAt: string | null;
+  _count: { mentoredSquads: number };
+  mentorCampuses: { campus: { id: string; name: string; code: string } }[];
+}
+
+/**
+ * A newly created or reset mentor.
+ *
+ * `tempPassword` is null when the programme has configured a shared initial password —
+ * the admin already holds it, and echoing it per account only widens where it can leak.
+ * When it is present it is shown exactly once and is never stored in plaintext anywhere.
+ */
+export interface ProvisionedMentorResponse {
+  userId: string;
+  name: string;
+  email: string;
+  tempPassword: string | null;
+  campusIds: string[];
+}

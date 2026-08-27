@@ -50,6 +50,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuthModule } from '../auth/auth.module';
 import { StudentAccountsService } from '../auth/student-accounts.service';
 import { MentorAccountsService } from '../auth/mentor-accounts.service';
+import { AuthService } from '../auth/auth.service';
 
 class UpsertBatchDto {
   @IsString() @MinLength(1) @MaxLength(80) name!: string;
@@ -102,6 +103,11 @@ class CreateMentorDto {
   campusIds?: string[];
 }
 
+class SetMentorActiveDto {
+  @IsBoolean()
+  isActive!: boolean;
+}
+
 class SetMentorCampusesDto {
   @IsArray()
   @ArrayMaxSize(100)
@@ -124,6 +130,7 @@ export class AdminController {
     private readonly batches: BatchesService,
     private readonly studentAccounts: StudentAccountsService,
     private readonly mentorAccounts: MentorAccountsService,
+    private readonly auth: AuthService,
   ) {}
 
   // --- Student portal accounts -----------------------------------------------
@@ -368,6 +375,48 @@ export class AdminController {
     @CurrentUser() user: RequestUser,
   ) {
     return this.mentorAccounts.resetPassword(id, user.id);
+  }
+
+  @Patch('mentors/:id/active')
+  @Audit('MENTOR_ACTIVE_SET', 'User')
+  @ApiOperation({
+    summary: 'Deactivate or reactivate a mentor',
+    description:
+      'Soft. The account keeps its campus grants, its audit trail and everything it ever ' +
+      'did — deleting a mentor would orphan the audit rows that record their actions, and ' +
+      'those are the record of who changed what. Deactivating revokes every live session ' +
+      'immediately, so it takes effect now rather than whenever their token expires; ' +
+      'reactivating restores exactly the access they had.',
+  })
+  async setMentorActive(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetMentorActiveDto,
+    @CurrentUser() actor: RequestUser,
+  ) {
+    const mentor = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, name: true, email: true, role: true, isActive: true },
+    });
+    if (!mentor) throw new NotFoundException(`User ${id} was not found`);
+    if (mentor.role !== 'MENTOR') {
+      // Deactivating an admin from the mentor screen is almost always a mistake, and the
+      // one case where it is not — locking out the last admin — would lock everyone out.
+      throw new BadRequestException(
+        `${mentor.email} is a ${mentor.role}, not a mentor. This action only applies to mentors.`,
+      );
+    }
+    if (mentor.id === actor.id) {
+      throw new BadRequestException('You cannot deactivate your own account.');
+    }
+
+    await this.prisma.user.update({ where: { id }, data: { isActive: dto.isActive } });
+
+    // A deactivated account with a live session is still a logged-in account. `login`
+    // already refuses `isActive: false`, but an access token issued a minute ago keeps
+    // working until it expires unless the sessions go too.
+    if (!dto.isActive) await this.auth.revokeAllSessions(id);
+
+    return { userId: id, isActive: dto.isActive };
   }
 
   @Put('mentors/:id/campuses')

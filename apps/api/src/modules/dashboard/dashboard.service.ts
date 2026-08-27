@@ -66,6 +66,62 @@ export class DashboardService {
     private readonly assignments: AssignmentsService,
   ) {}
 
+  /**
+   * What a caller who may see no campus gets.
+   *
+   * Answered as a real, empty result rather than a 403, matching the student directory:
+   * "this campus is not yours" and "this campus does not exist" have to be indistinguishable,
+   * or campus ids become an enumeration oracle. The shape is the full contract so the UI
+   * renders its ordinary empty state instead of an error.
+   *
+   * Deliberately not cached and not derived from a query — there is nothing to query.
+   */
+  emptyStats(dayKey?: DayKey): DashboardStats {
+    return {
+      dayKey: dayKey ?? this.time.today(),
+      campusId: null,
+      batchId: null,
+      totalStudents: 0,
+      activeStudents: 0,
+      campusBreakdown: [],
+      batchBreakdown: [],
+      assignment: null,
+      assignmentCount: 0,
+      solvedBuckets: [],
+      completionPercent: 0,
+      attemptedNotSolvedStudents: 0,
+      notAttemptedStudents: 0,
+      averageProblemsSolved: 0,
+      streakChampion: null,
+      topPerformer: null,
+      topSquad: null,
+      lastSyncAt: null,
+      lastSyncStatus: null,
+      unreliableSyncCounts: {},
+      syncSummary: {
+        activeStudents: 0,
+        synced: 0,
+        profileMissing: 0,
+        awaitingFirstSync: 0,
+        failed: 0,
+        byStatus: {},
+      },
+    } satisfies DashboardStats;
+  }
+
+  /** The mentor-tracker equivalent of `emptyStats` — see there for why this is not a 403. */
+  emptyMentorDashboard(dayKey?: DayKey): MentorDashboard {
+    return {
+      dayKey: dayKey ?? this.time.today(),
+      campusId: null,
+      batchId: null,
+      sections: [],
+      assignment: null,
+      buckets: [],
+      totalStudents: 0,
+    } satisfies MentorDashboard;
+  }
+
   async getStats(dayKey?: DayKey, filter: DashboardFilter = {}): Promise<DashboardStats> {
     const day = dayKey ?? this.time.today();
     const campusId = filter.campusId ?? null;

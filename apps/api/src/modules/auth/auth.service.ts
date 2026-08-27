@@ -119,7 +119,7 @@ export class AuthService {
       userAgent: ctx.userAgent,
     });
 
-    return this.issueTokens(this.toAuthUser(user), ctx);
+    return this.issueTokens(this.toAuthUser(user, await this.campusesFor(user)), ctx);
   }
 
   /**
@@ -173,7 +173,7 @@ export class AuthService {
       data: { revokedAt: new Date() },
     });
 
-    return this.issueTokens(this.toAuthUser(user), ctx);
+    return this.issueTokens(this.toAuthUser(user, await this.campusesFor(user)), ctx);
   }
 
   async logout(refreshToken: string): Promise<void> {
@@ -194,7 +194,7 @@ export class AuthService {
   async getProfile(userId: string): Promise<AuthUser> {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('Account not found');
-    return this.toAuthUser(user);
+    return this.toAuthUser(user, await this.campusesFor(user));
   }
 
   async changePassword(
@@ -308,15 +308,18 @@ export class AuthService {
     return bcrypt.hash('invalid-placeholder-password', this.config.auth.bcryptRounds);
   }
 
-  private toAuthUser(user: {
-    id: string;
-    email: string;
-    name: string;
-    role: string;
-    avatarUrl: string | null;
-    studentId?: string | null;
-    passwordChangedAt?: Date | null;
-  }): AuthUser {
+  private toAuthUser(
+    user: {
+      id: string;
+      email: string;
+      name: string;
+      role: string;
+      avatarUrl: string | null;
+      studentId?: string | null;
+      passwordChangedAt?: Date | null;
+    },
+    campuses: AuthUser['campuses'] = null,
+  ): AuthUser {
     return {
       id: user.id,
       email: user.email,
@@ -325,6 +328,25 @@ export class AuthService {
       avatarUrl: user.avatarUrl,
       studentId: user.studentId ?? null,
       mustChangePassword: !user.passwordChangedAt,
+      campuses,
     };
+  }
+
+  /**
+   * The campuses to report on an `AuthUser`, or `null` for an unrestricted role.
+   *
+   * Only ever read for a MENTOR. Every other role is unrestricted here — `null` — which
+   * matches `MentorScopeService.allowedCampusIds`, the rule that actually enforces this.
+   * The two must agree, so this defers to the same condition rather than restating it.
+   */
+  private async campusesFor(user: { id: string; role: string }): Promise<AuthUser['campuses']> {
+    if (user.role !== 'MENTOR') return null;
+
+    const grants = await this.prisma.mentorCampus.findMany({
+      where: { userId: user.id },
+      select: { campus: { select: { id: true, code: true, name: true } } },
+      orderBy: { campus: { sortOrder: 'asc' } },
+    });
+    return grants.map((grant) => grant.campus);
   }
 }

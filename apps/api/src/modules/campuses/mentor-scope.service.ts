@@ -60,6 +60,43 @@ export class MentorScopeService {
     return { campusIds: allowed };
   }
 
+  /**
+   * The campus scope a *reporting* request must run under, given who is asking and what
+   * they asked for.
+   *
+   * The difference from `narrow` is what "no campus named" means. On the student
+   * directory it means "every campus you may see", and the caller passes `campusIds` to a
+   * query that knows how to filter by a list. The dashboard, leaderboard and report
+   * aggregates have no such list parameter — they take one `campusId`, where `null` means
+   * *every campus in the system*. So for them "no campus named" cannot be left as `null`
+   * for a mentor: that is precisely the value that returns the whole programme.
+   *
+   * A mentor with exactly one grant is therefore pinned to it, which is the case that
+   * matters — every mentor today has one campus, and the request their browser sends on
+   * page load names no campus at all.
+   *
+   * Returns `deny` when the answer cannot be expressed as a single campus id: a mentor
+   * with no grants (nothing to show) or with several and no choice made between them.
+   * Answering the multi-grant case with the whole programme would be a silent widening,
+   * and these endpoints have no way to say "these two campuses but not the third".
+   */
+  reportingScope(
+    requestedCampusId: string | null | undefined,
+    allowed: CampusScope,
+  ): { campusId: string | null } | { deny: true } {
+    if (allowed === null) return { campusId: requestedCampusId ?? null };
+    if (allowed.length === 0) return { deny: true };
+
+    if (requestedCampusId) {
+      // Asking for a campus you have no grant on is answered as "nothing", never as
+      // "everything" and never as a 403 — see `narrow` for why not a 403.
+      return allowed.includes(requestedCampusId) ? { campusId: requestedCampusId } : { deny: true };
+    }
+
+    if (allowed.length === 1) return { campusId: allowed[0]! };
+    return { deny: true };
+  }
+
   /** True when this user may read a student sitting at `campusId`. */
   canSeeCampus(campusId: string | null, allowed: CampusScope): boolean {
     if (allowed === null) return true;
