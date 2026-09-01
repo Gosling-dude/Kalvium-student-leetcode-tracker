@@ -17,6 +17,7 @@ import {
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { StudentMetricsService } from '../scoring/student-metrics.service';
+import { BatchesService } from '../batches/batches.service';
 import { paginate, safeSortField } from '../../common/dto/pagination.dto';
 import type { CreateStudentDto, StudentQueryDto, UpdateStudentDto } from './dto/student.dto';
 
@@ -57,6 +58,7 @@ export class StudentsService {
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
     private readonly metrics: StudentMetricsService,
+    private readonly batches: BatchesService,
   ) {}
 
   /**
@@ -176,7 +178,7 @@ export class StudentsService {
   async update(id: string, dto: UpdateStudentDto): Promise<StudentSummary> {
     const before = await this.prisma.student.findUnique({
       where: { id },
-      select: { id: true, batchId: true, campusId: true, status: true },
+      select: { id: true, batchId: true, campusId: true, status: true, createdAt: true },
     });
     if (!before) throw new NotFoundException(`Student ${id} was not found`);
 
@@ -198,6 +200,12 @@ export class StudentsService {
     // dated fact rather than an inference from the current status.
     const archiving = dto.status === 'ARCHIVED' && before.status !== 'ARCHIVED';
     const unarchiving = dto.status !== undefined && dto.status !== 'ARCHIVED' && before.status === 'ARCHIVED';
+
+    // A first classification states what has been true since enrolment; a genuine move is
+    // a decision about today. Same rule as the bulk path and the roster importer.
+    const batchEffectiveFrom = batchChanged
+      ? await this.batches.defaultPlacementDay(before.id, before.createdAt)
+      : this.time.today();
 
     const student = await this.prisma.student.update({
       where: { id },
@@ -234,7 +242,7 @@ export class StudentsService {
                 create: {
                   fromBatchId: before.batchId,
                   toBatchId: dto.batchId ?? null,
-                  effectiveFromDayKey: this.time.today(),
+                  effectiveFromDayKey: batchEffectiveFrom,
                   source: 'MANUAL' as const,
                   reason: 'Batch changed via student update',
                 },
@@ -327,20 +335,26 @@ export class StudentsService {
     return submissions + statuses + entries + blockers + placements > 0;
   }
 
-  /** Bulk reassignment — the operation mentors actually perform on a selection. */
+  /**
+   * Bulk reassignment — the operation mentors actually perform on a selection.
+   *
+   * Dividing an unclassified cohort into batches runs through here, so the effective day
+   * of each history row follows `BatchesService.defaultPlacementDays`: a student's *first*
+   * placement is back-dated to enrolment, a genuine move is effective today. Stamping the
+   * whole selection with "today" is what leaves every earlier day resolving to "no batch",
+   * which in turn makes batch-scoped assignments published before the split unmatchable.
+   */
   async bulkUpdate(
     ids: string[],
     changes: { squadId?: string | null; batchId?: string | null; status?: string },
   ): Promise<number> {
-    const today = this.time.today();
-
     // A bulk batch change has to write one history row per student, so it cannot be a
     // single `updateMany`. Read the previous batches first, then write both sides.
     const previous =
       changes.batchId !== undefined
         ? await this.prisma.student.findMany({
             where: { id: { in: ids } },
-            select: { id: true, batchId: true },
+            select: { id: true, batchId: true, createdAt: true },
           })
         : [];
 
@@ -358,12 +372,13 @@ export class StudentsService {
 
     const moved = previous.filter((student) => student.batchId !== changes.batchId);
     if (moved.length > 0) {
+      const effectiveDays = await this.batches.defaultPlacementDays(moved);
       await this.prisma.studentBatchHistory.createMany({
         data: moved.map((student) => ({
           studentId: student.id,
           fromBatchId: student.batchId,
           toBatchId: changes.batchId ?? null,
-          effectiveFromDayKey: today,
+          effectiveFromDayKey: effectiveDays.get(student.id) ?? this.time.today(),
           source: 'MANUAL' as const,
           reason: 'Bulk batch reassignment',
         })),

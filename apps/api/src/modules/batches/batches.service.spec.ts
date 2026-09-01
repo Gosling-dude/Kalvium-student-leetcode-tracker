@@ -34,11 +34,17 @@ function makeService() {
     studentBatchHistory: {
       findMany: vi.fn().mockResolvedValue([]),
       create: vi.fn(),
+      // Default: the student already has placement history, so an unqualified move is a
+      // genuine move and stays effective today. First-placement cases override this.
+      count: vi.fn().mockResolvedValue(1),
     },
     $transaction: vi.fn(async (operations: unknown[]) => operations),
   };
 
-  const time = { today: vi.fn().mockReturnValue('2026-08-15') };
+  const time = {
+    today: vi.fn().mockReturnValue('2026-08-15'),
+    dayKeyOf: vi.fn((date: Date) => date.toISOString().slice(0, 10)),
+  };
   const cache = { delByPrefix: vi.fn().mockResolvedValue(undefined) };
 
   const service = new BatchesService(
@@ -183,7 +189,12 @@ describe('batchOnDayForStudents', () => {
 });
 
 describe('moveStudent', () => {
-  const student = { id: 's1', name: 'Abishek R V', batchId: 'batch-a' };
+  const student = {
+    id: 's1',
+    name: 'Abishek R V',
+    batchId: 'batch-a',
+    createdAt: new Date('2026-07-01T00:00:00Z'),
+  };
 
   beforeEach(() => vi.clearAllMocks());
 
@@ -217,6 +228,114 @@ describe('moveStudent', () => {
         changedById: 'user-1',
         changedByName: 'Mentor',
       }),
+    });
+  });
+
+  /**
+   * The production defect this suite now pins.
+   *
+   * Alliance published a batch-scoped assignment for 31 Aug, then split its 46
+   * previously-unclassified students into Foundation and Intermediate the next morning.
+   * Every placement was written `effectiveFromDayKey = today`, so 31 Aug still resolved to
+   * "no batch" for all of them — and `selectAssignmentForScope` cannot pair a
+   * batch-targeted assignment with a student who has no batch. The whole cohort scored
+   * `assignedCount = 0` on a day they had genuinely been assigned work.
+   *
+   * A first classification is a statement about who the student has been since enrolment,
+   * not a change made today, so it is back-dated. Genuine moves are unaffected — the test
+   * below this one holds them to today.
+   */
+  it("back-dates a student's first placement to their enrolment day", async () => {
+    const { service, prisma } = makeService();
+    prisma.student.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'A Sri Harish',
+      batchId: null,
+      campusId: 'campus-alliance',
+      createdAt: new Date('2026-08-26T12:57:00Z'),
+    });
+    prisma.batch.findUnique.mockResolvedValue({
+      ...FOUNDATION,
+      campusId: 'campus-alliance',
+      campus: { name: 'Alliance University' },
+    });
+    // No history at all — this is the very first thing recorded about their batch.
+    prisma.studentBatchHistory.count.mockResolvedValue(0);
+
+    await service.moveStudent({ studentId: 's1', toBatchId: 'batch-a' });
+
+    expect(prisma.studentBatchHistory.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        studentId: 's1',
+        fromBatchId: null,
+        toBatchId: 'batch-a',
+        effectiveFromDayKey: '2026-08-26',
+      }),
+    });
+  });
+
+  /**
+   * `Student.batchId` is deliberately not the test for "has this student been classified
+   * before" — an import can stamp that column without ever writing a history row, and a
+   * student carrying a stale `batchId` with no history is exactly the case that must still
+   * back-date. Prior placements are read from the history table itself.
+   */
+  it('treats a stamped batchId with no history as a first placement', async () => {
+    const { service, prisma } = makeService();
+    prisma.student.findUnique.mockResolvedValue({
+      id: 's1',
+      name: 'Imported Student',
+      batchId: 'batch-a',
+      campusId: 'campus-alliance',
+      createdAt: new Date('2026-08-26T12:57:00Z'),
+    });
+    prisma.batch.findUnique.mockResolvedValue({
+      ...INTERMEDIATE,
+      campusId: 'campus-alliance',
+      campus: { name: 'Alliance University' },
+    });
+    prisma.studentBatchHistory.count.mockResolvedValue(0);
+
+    await service.moveStudent({ studentId: 's1', toBatchId: 'batch-b' });
+
+    expect(prisma.studentBatchHistory.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ effectiveFromDayKey: '2026-08-26' }),
+    });
+  });
+
+  /**
+   * The other half of the rule, and the one §7 protects: once a student has been placed,
+   * moving them is a decision about today. Back-dating it would re-file already-scored
+   * days under a batch they were not in at the time.
+   */
+  it('keeps a genuine move effective today, never back-dated', async () => {
+    const { service, prisma } = makeService();
+    prisma.student.findUnique.mockResolvedValue(student);
+    prisma.batch.findUnique.mockResolvedValue(INTERMEDIATE);
+    prisma.studentBatchHistory.count.mockResolvedValue(1);
+
+    await service.moveStudent({ studentId: 's1', toBatchId: 'batch-b' });
+
+    expect(prisma.studentBatchHistory.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ effectiveFromDayKey: '2026-08-15' }),
+    });
+  });
+
+  /** An explicitly supplied day always wins — the importer and the repair script rely on it. */
+  it('honours an explicit effectiveFromDayKey over both defaults', async () => {
+    const { service, prisma } = makeService();
+    prisma.student.findUnique.mockResolvedValue(student);
+    prisma.batch.findUnique.mockResolvedValue(INTERMEDIATE);
+    prisma.studentBatchHistory.count.mockResolvedValue(0);
+
+    await service.moveStudent({
+      studentId: 's1',
+      toBatchId: 'batch-b',
+      effectiveFromDayKey: '2026-08-01',
+    });
+
+    expect(prisma.studentBatchHistory.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ effectiveFromDayKey: '2026-08-01' }),
     });
   });
 

@@ -29,6 +29,7 @@ import {
   isRedundantMove,
   normaliseBatchCode,
   resolveBatchOnDay,
+  resolvePlacementEffectiveDate,
   type BatchHistoryEntry,
   type BatchPlacement,
   type BatchStats,
@@ -302,12 +303,26 @@ export class BatchesService {
    * What deliberately does *not* happen here: no submission, daily status, streak,
    * leaderboard entry, LeetCode record or email is touched. Only `Student.batchId`
    * changes, plus one appended history row. Past days keep the batch frozen on their
-   * `DailyStatus`, so the move takes effect from today forward and yesterday's report
-   * still reads as it did (§6, §7).
+   * `DailyStatus`, so a move takes effect from its own effective day forward and reports
+   * about earlier days still read as they did (§6, §7).
    *
-   * `effectiveFromDayKey` defaults to today rather than to the student's enrolment day:
-   * a mentor moving someone now is making a decision about now, and back-dating it would
-   * retroactively re-file completed days under a batch the student was not in.
+   * When the caller does not pin `effectiveFromDayKey`, the day is decided by
+   * `resolvePlacementEffectiveDate` — the same rule the roster importer already follows,
+   * rather than an unconditional "today":
+   *
+   *  - **A genuine move** (the student already has placement history) is effective today.
+   *    A mentor moving someone now is making a decision about now, and back-dating it
+   *    would retroactively re-file completed days under a batch they were not in.
+   *  - **A first placement** (no history at all) is back-dated to enrolment. Classifying a
+   *    student for the first time states what has been true since they joined; it is not a
+   *    change of mind. Dating it "today" is what silently strips every earlier day of its
+   *    batch, and with it every batch-scoped assignment those days were meant to be
+   *    scored against — a student who is classified after an assignment is published then
+   *    reads as "not assigned" for a day they were genuinely part of.
+   *
+   * `Student.batchId` being already set is deliberately *not* the test: an import can
+   * stamp that column without ever writing history, so prior placements are read from
+   * `StudentBatchHistory` directly.
    */
   async moveStudent(input: {
     studentId: string;
@@ -320,7 +335,7 @@ export class BatchesService {
   }): Promise<{ student: { id: string; name: string }; fromBatchId: string | null; toBatchId: string }> {
     const student = await this.prisma.student.findUnique({
       where: { id: input.studentId },
-      select: { id: true, name: true, batchId: true, campusId: true },
+      select: { id: true, name: true, batchId: true, campusId: true, createdAt: true },
     });
     if (!student) throw new NotFoundException(`Student ${input.studentId} was not found`);
 
@@ -351,7 +366,8 @@ export class BatchesService {
       );
     }
 
-    const effectiveFrom = input.effectiveFromDayKey ?? this.time.today();
+    const effectiveFrom =
+      input.effectiveFromDayKey ?? (await this.defaultPlacementDay(student.id, student.createdAt));
 
     await this.prisma.$transaction([
       this.prisma.student.update({
@@ -379,6 +395,56 @@ export class BatchesService {
     );
 
     return { student: { id: student.id, name: student.name }, fromBatchId: student.batchId, toBatchId: input.toBatchId };
+  }
+
+  /**
+   * The day a placement takes effect when the caller has not pinned one.
+   *
+   * Reads `StudentBatchHistory` rather than trusting `Student.batchId`, then defers to the
+   * shared `resolvePlacementEffectiveDate` rule so this path, the bulk reassignment and
+   * the roster importer cannot drift apart about what a first placement means.
+   */
+  async defaultPlacementDay(studentId: string, createdAt: Date): Promise<DayKey> {
+    const priorPlacements = await this.prisma.studentBatchHistory.count({
+      where: { studentId },
+    });
+    return resolvePlacementEffectiveDate({
+      hasPriorPlacements: priorPlacements > 0,
+      todayDayKey: this.time.today(),
+      enrolmentDayKey: this.time.dayKeyOf(createdAt),
+    });
+  }
+
+  /**
+   * Batched form of `defaultPlacementDay` for the bulk reassignment path, which would
+   * otherwise issue one count query per selected student.
+   */
+  async defaultPlacementDays(
+    students: readonly { id: string; createdAt: Date }[],
+  ): Promise<Map<string, DayKey>> {
+    const today = this.time.today();
+    if (students.length === 0) return new Map();
+
+    const withHistory = new Set(
+      (
+        await this.prisma.studentBatchHistory.findMany({
+          where: { studentId: { in: students.map((student) => student.id) } },
+          select: { studentId: true },
+          distinct: ['studentId'],
+        })
+      ).map((row) => row.studentId),
+    );
+
+    return new Map(
+      students.map((student) => [
+        student.id,
+        resolvePlacementEffectiveDate({
+          hasPriorPlacements: withHistory.has(student.id),
+          todayDayKey: today,
+          enrolmentDayKey: this.time.dayKeyOf(student.createdAt),
+        }),
+      ]),
+    );
   }
 
   /**

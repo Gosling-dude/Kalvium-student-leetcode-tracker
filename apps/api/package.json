@@ -27,7 +27,8 @@
     "db:seed:students": "tsx prisma/seed-students.ts",
     "db:import:roster": "tsx prisma/import-campus-roster.ts",
     "db:reset": "prisma migrate reset --force",
-    "smoke:provider": "tsx scripts/smoke-provider.ts"
+    "smoke:provider": "tsx scripts/smoke-provider.ts",
+    "db:backfill:placements": "tsx scripts/backfill-first-placements.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
