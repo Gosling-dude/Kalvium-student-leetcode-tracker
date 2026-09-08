@@ -86,7 +86,7 @@ export default function MentorPage() {
             {/* Evaluated, not roster. On a past date the two differ for any student who
                 joined the tracker later, and showing only the first reads as the whole
                 cohort — which is how a partial day gets mistaken for a complete one. */}
-            {data && data.rosterTotal > data.totalStudents
+            {data && (data.rosterTotal ?? data.totalStudents) > data.totalStudents
               ? `${data.totalStudents} of ${data.rosterTotal} students evaluated`
               : `${data?.totalStudents ?? 0} students`}
           </p>
@@ -149,6 +149,11 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
   const heading = [section.campusName, section.batchName ?? 'No batch']
     .filter(Boolean)
     .join(' — ');
+  // Tolerated as absent, not assumed present: during a rolling deploy this page can be
+  // live before the API that supplies these two fields. Reading `.length` off an
+  // undefined would blank the whole mentor view over a cosmetic addition.
+  const notObserved = section.notObserved ?? [];
+  const rosterTotal = section.rosterTotal ?? section.totalStudents;
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] pb-2">
@@ -161,8 +166,8 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
         <h2 className="text-base font-semibold">{heading}</h2>
         <span className="text-sm text-[var(--color-fg-muted)]">
           {section.assignedCount} assigned ·{' '}
-          {section.notObserved.length > 0
-            ? `${section.totalStudents} of ${section.rosterTotal} evaluated`
+          {notObserved.length > 0
+            ? `${section.totalStudents} of ${rosterTotal} evaluated`
             : `${section.totalStudents} student${section.totalStudents === 1 ? '' : 's'}`}
         </span>
       </div>
@@ -173,9 +178,7 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
           assignedCount={section.assignedCount}
         />
       ))}
-      {section.notObserved.length > 0 ? (
-        <NotObservedTable rows={section.notObserved} />
-      ) : null}
+      {notObserved.length > 0 ? <NotObservedTable rows={notObserved} /> : null}
     </section>
   );
 }
