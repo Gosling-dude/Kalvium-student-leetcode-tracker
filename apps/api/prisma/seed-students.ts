@@ -804,11 +804,24 @@ async function main(): Promise<void> {
   );
 }
 
-main()
-  .catch((error) => {
-    console.error('Roster synchronisation failed:', (error as Error).message);
-    process.exit(1);
-  })
-  .finally(() => {
-    void prisma.$disconnect();
-  });
+// Only synchronise when this file is *run*, never when it is *imported*.
+//
+// `seed-students.spec.ts` imports `dayKeyOf` and `resolvePlacementEffectiveDate` from
+// here to test them directly. Without this guard that import also started a full roster
+// synchronisation against whatever `DATABASE_URL` happened to be set, and when it failed
+// — as it does in CI, where there is no roster file — `process.exit(1)` took the test
+// runner down with it: 302 passing tests still reported a non-zero exit.
+//
+// `process.exitCode` rather than `process.exit` for the same reason, and to match
+// `import-campus-roster.ts` and `backfill-first-placements.ts`: it lets the `finally`
+// below disconnect Prisma before the process ends.
+if (require.main === module) {
+  main()
+    .catch((error) => {
+      console.error('Roster synchronisation failed:', (error as Error).message);
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      void prisma.$disconnect();
+    });
+}
