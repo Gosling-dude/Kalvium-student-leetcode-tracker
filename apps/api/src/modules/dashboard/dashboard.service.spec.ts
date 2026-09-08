@@ -157,7 +157,13 @@ function makeService(
       // Backs the campus breakdown's unassigned count. These fixtures carry no campus,
       // so there is nothing unassigned to report.
       groupBy: async () => [],
+      // Backs the NOT_OBSERVED lookup: students enrolled after the day being reported.
+      // These fixtures predate the day, so nobody here is unobservable — the behaviour
+      // itself is covered against a real database in `not-observed.e2e-spec.ts`.
+      findMany: async () => [],
     },
+    // Backs `provenSolvedFloor`, which only runs when there are unobserved students.
+    submission: { findMany: async () => [] },
     // Backs the sync-health summary, which is read from the roster rather than from the
     // day's rows — see `getStats`.
     studentSyncState: {
@@ -176,14 +182,24 @@ function makeService(
   const time = {
     today: () => '2026-08-10',
     localTime: (date: Date | null) => (date ? '14:30' : null),
+    dayKeyOf: (date: Date) => date.toISOString().slice(0, 10),
+    bounds: (dayKey: string) => ({
+      start: new Date(`${dayKey}T00:00:00Z`),
+      end: new Date(`${dayKey}T23:59:59Z`),
+    }),
   };
   const assignmentsService = { findAllByDay: async () => assignments };
+  // Placement lookups, only reached when there are unobserved students to place.
+  const campusesService = { campusOnDayForStudents: async () => new Map() };
+  const batchesService = { batchOnDayForStudents: async () => new Map() };
 
   const service = new DashboardService(
     prisma as never,
     cache as never,
     time as never,
     assignmentsService as never,
+    campusesService as never,
+    batchesService as never,
   );
   return service;
 }

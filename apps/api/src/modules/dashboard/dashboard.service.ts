@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import {
+  ASSIGNMENT_LOOKBACK_DAYS,
   CACHE_TTL,
   SYNC_STATUS_LABELS,
+  assignmentWindow,
   completionPercentage,
+  describeNotObserved,
   isTrustworthySync,
+  resolveObservability,
   selectAssignmentForScope,
   summarizeBucketAttempts,
   summarizeProblemStatuses,
@@ -16,6 +20,7 @@ import {
   type MentorBucket,
   type MentorBucketRow,
   type MentorDashboard,
+  type MentorNotObservedRow,
   type MentorProblemOutcome,
   type ProblemStatus,
   type SyncHealthSummary,
@@ -26,6 +31,8 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { AssignmentsService } from '../assignments/assignments.service';
+import { BatchesService } from '../batches/batches.service';
+import { CampusesService } from '../campuses/campuses.service';
 
 /**
  * Options every dashboard read accepts.
@@ -48,6 +55,34 @@ function scopeKey(campusId: string | null, batchId: string | null): string {
 }
 
 /**
+ * How many of *this* assignment's problems a student has proven accepted submissions for.
+ *
+ * The intersection is the point. `solvedSlugs` is gathered in one query spanning every
+ * audience's problems for the day, so without narrowing to the assignment the student was
+ * actually set, an SRM student who happened to solve a problem only Vels was given would
+ * be credited for it — and the floor could exceed the number of problems they were set,
+ * which is how this was caught (`>= 6 of 4`).
+ */
+function countProvenAgainst(
+  solvedSlugs: Set<string> | undefined,
+  assignment: AssignmentSummary,
+): number {
+  if (!solvedSlugs || solvedSlugs.size === 0) return 0;
+  let proven = 0;
+  for (const problem of assignment.problems) {
+    if (solvedSlugs.has(problem.titleSlug.toLowerCase())) proven += 1;
+  }
+  return proven;
+}
+
+/** One scope's unobserved students, carrying the scope so a section can be built from it. */
+interface NotObservedScope {
+  campusId: string | null;
+  batchId: string | null;
+  rows: MentorNotObservedRow[];
+}
+
+/**
  * A `DailyStatus` row joined to the student fields the dashboard renders.
  *
  * Note `campusId` and `batchId` on the row itself: they are the campus and batch the
@@ -64,6 +99,8 @@ export class DashboardService {
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
     private readonly assignments: AssignmentsService,
+    private readonly campuses: CampusesService,
+    private readonly batches: BatchesService,
   ) {}
 
   /**
@@ -119,6 +156,8 @@ export class DashboardService {
       assignment: null,
       buckets: [],
       totalStudents: 0,
+      notObserved: [],
+      rosterTotal: 0,
     } satisfies MentorDashboard;
   }
 
@@ -343,6 +382,16 @@ export class DashboardService {
       const rankByStudent = new Map(ranks.map((r) => [r.studentId, r.rank]));
       const rows = statuses.map((status) => this.toBucketRow(status, rankByStudent));
 
+      // Students the day's assignments were aimed at but that we were not yet watching.
+      // Kept entirely out of `rows` — they must never reach `bucketise`, which would
+      // have to invent a `solvedCount` to place them.
+      const notObservedByScope = await this.loadNotObserved(
+        day,
+        filter,
+        new Set(statuses.map((status) => status.studentId)),
+        assignments,
+      );
+
       // Group by the *historical* campus and batch on the row, so a student who has since
       // moved or transferred is still listed under where they were on this day. The key is
       // the pair: SRM Foundation and Vels Foundation are separate sections with separate
@@ -360,6 +409,14 @@ export class DashboardService {
         byScope.set(key, group);
       }
 
+      // A scope may be entirely unobserved — a batch where every student joined after
+      // the day. It still deserves a section, so the mentor sees the assignment existed
+      // and why it has no numbers, rather than the day appearing not to apply to them.
+      for (const [key, group] of notObservedByScope) {
+        if (byScope.has(key) || group.rows.length === 0) continue;
+        byScope.set(key, { campusId: group.campusId, batchId: group.batchId, rows: [] });
+      }
+
       const [batchOrder, campusOrder] = await Promise.all([this.batchOrder(), this.campusOrder()]);
       const sections: MentorBatchSection[] = [...byScope.values()]
         .sort(
@@ -370,21 +427,34 @@ export class DashboardService {
         .map((group) => {
           const assignment = this.findAssignmentFor(assignments, group);
           const assignedCount = assignment?.problems.length ?? 0;
+          const notObserved = notObservedByScope.get(scopeKey(group.campusId, group.batchId))?.rows
+            ?? [];
           return {
             campusId: group.campusId,
-            campusName: assignment?.campusName ?? group.rows[0]?.campusName ?? null,
-            campusCode: assignment?.campusCode ?? group.rows[0]?.campusCode ?? null,
+            campusName:
+              assignment?.campusName ?? group.rows[0]?.campusName ?? notObserved[0]?.campusName
+                ?? null,
+            campusCode:
+              assignment?.campusCode ?? group.rows[0]?.campusCode ?? notObserved[0]?.campusCode
+                ?? null,
             batchId: group.batchId,
-            batchName: assignment?.batchName ?? group.rows[0]?.batchName ?? null,
-            batchCode: assignment?.batchCode ?? group.rows[0]?.batchCode ?? null,
+            batchName:
+              assignment?.batchName ?? group.rows[0]?.batchName ?? notObserved[0]?.batchName ?? null,
+            batchCode:
+              assignment?.batchCode ?? group.rows[0]?.batchCode ?? notObserved[0]?.batchCode ?? null,
             assignment,
             assignedCount,
             buckets: this.bucketise(group.rows, assignedCount),
+            // The denominator is the observed cohort. `rosterTotal` carries the rest, so
+            // the UI can render "99 of 142 evaluated" instead of implying 99 is everyone.
             totalStudents: group.rows.length,
+            notObserved,
+            rosterTotal: group.rows.length + notObserved.length,
           };
         });
 
       const maxAssigned = Math.max(0, ...rows.map((row) => row.assignedCount));
+      const allNotObserved = sections.flatMap((section) => section.notObserved);
 
       return {
         dayKey: day,
@@ -396,6 +466,8 @@ export class DashboardService {
           : null,
         buckets: this.bucketise(rows, maxAssigned),
         totalStudents: rows.length,
+        notObserved: allNotObserved,
+        rosterTotal: rows.length + allNotObserved.length,
       } satisfies MentorDashboard;
     });
   }
@@ -421,6 +493,156 @@ export class DashboardService {
         problemStatuses: { include: { problem: { select: { title: true } } } },
       },
     });
+  }
+
+  /**
+   * The students an assignment was aimed at on `dayKey` whom the tracker was not yet
+   * watching — the `NOT_OBSERVED` cohort.
+   *
+   * Identified by the two dates being genuinely different (see `@dsa/shared`'s
+   * `observability` module): `StudentCampusHistory` says they were on the roster that
+   * day, `Student.createdAt` says we had not started mirroring them. A student who is
+   * missing a `DailyStatus` row for any *other* reason is not swept in here — the
+   * `createdAt` test is what distinguishes "we never watched" from "we watched and
+   * wrote nothing", and only the first is unknowable.
+   *
+   * Returns rows without a `solvedCount`, deliberately. The only performance number
+   * attached is `provenSolvedFloor`: distinct assigned problems we hold an accepted
+   * submission for, which is a lower bound and is labelled as one everywhere it
+   * surfaces. Everything else about their day is genuinely unknown and says so.
+   */
+  private async loadNotObserved(
+    dayKey: DayKey,
+    filter: DashboardFilter,
+    observedStudentIds: Set<string>,
+    assignments: AssignmentSummary[],
+  ): Promise<Map<string, NotObservedScope>> {
+    const byScope = new Map<string, NotObservedScope>();
+    if (assignments.length === 0) return byScope;
+
+    // Only students whose enrolment postdates the day can be unobserved, so the
+    // `createdAt` bound does the heavy filtering in SQL rather than in memory.
+    const dayEnd = this.time.bounds(dayKey).end;
+    const candidates = await this.prisma.student.findMany({
+      where: {
+        status: 'ACTIVE',
+        createdAt: { gt: dayEnd },
+        ...(filter.squadId ? { squadId: filter.squadId } : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        createdAt: true,
+        leetcodeUsername: true,
+        squad: { select: { name: true } },
+      },
+    });
+
+    const unseen = candidates.filter((student) => !observedStudentIds.has(student.id));
+    if (unseen.length === 0) return byScope;
+
+    // Where they were on the day — from placement history, not their campus now. A late
+    // import back-dated to the cohort's enrolment resolves here; one with no placement
+    // covering the day resolves to null and is dropped, because we cannot say which
+    // assignment (if any) was aimed at them.
+    const ids = unseen.map((s) => s.id);
+    const [campusOnDay, batchOnDay, proven] = await Promise.all([
+      this.campuses.campusOnDayForStudents(ids, dayKey),
+      this.batches.batchOnDayForStudents(ids, dayKey),
+      this.provenSolvedFloors(ids, dayKey, assignments),
+    ]);
+
+    for (const student of unseen) {
+      const campusId = campusOnDay.get(student.id) ?? null;
+      const batchId = batchOnDay.get(student.id) ?? null;
+      if (campusId === null) continue;
+      if (filter.campusId && campusId !== filter.campusId) continue;
+      if (filter.batchId && batchId !== filter.batchId) continue;
+      if (filter.onlyUnassigned && batchId !== null) continue;
+
+      // Only report them against an assignment that actually targeted their scope.
+      // Without one there is nothing unobserved to report: the day simply had no
+      // problems for them, exactly as it does for an observed student.
+      const assignment = selectAssignmentForScope(assignments, { campusId, batchId });
+      if (!assignment) continue;
+
+      // The SQL bound above already narrows to `createdAt > dayKey`, but the authoritative
+      // rule lives in `@dsa/shared`. Re-asserting it here means a timezone edge in the
+      // timestamp bound can only ever drop a row, never invent an unobserved one.
+      const observedFromDayKey = this.time.dayKeyOf(student.createdAt);
+      if (resolveObservability({ observedFromDayKey, dayKey }) === 'OBSERVED') continue;
+
+      const key = scopeKey(campusId, batchId);
+      const group = byScope.get(key) ?? { campusId, batchId, rows: [] };
+      group.rows.push({
+        studentId: student.id,
+        name: student.name,
+        email: student.email,
+        squadName: student.squad?.name ?? null,
+        campusName: assignment.campusName ?? null,
+        campusCode: assignment.campusCode ?? null,
+        batchName: assignment.batchName ?? null,
+        batchCode: assignment.batchCode ?? null,
+        leetcodeUsername: student.leetcodeUsername,
+        observedFromDayKey,
+        // Intersected with *this student's own* assignment, so the floor can never
+        // exceed what they were actually set.
+        provenSolvedFloor: countProvenAgainst(proven.get(student.id), assignment),
+        assignedCount: assignment.problems.length,
+        reason: describeNotObserved(observedFromDayKey),
+      });
+      byScope.set(key, group);
+    }
+
+    return byScope;
+  }
+
+  /**
+   * Distinct assigned problems each unobserved student has a *stored* accepted
+   * submission for, within the assignment's own matching window.
+   *
+   * Reads the local mirror only — never the provider. A first sync for a late-imported
+   * student sometimes pulls submissions old enough to land in a past assignment's
+   * window, and that is real evidence worth showing. It can only ever raise the floor:
+   * the same short upstream window that surfaced one submission may have dropped three
+   * others, so this proves "at least N" and never "exactly N".
+   */
+  private async provenSolvedFloors(
+    studentIds: string[],
+    dayKey: DayKey,
+    assignments: AssignmentSummary[],
+  ): Promise<Map<string, Set<string>>> {
+    const floors = new Map<string, Set<string>>();
+    const slugs = [
+      ...new Set(assignments.flatMap((a) => a.problems.map((p) => p.titleSlug.toLowerCase()))),
+    ];
+    if (slugs.length === 0 || studentIds.length === 0) return floors;
+
+    const { startDayKey, endDayKey } = assignmentWindow(dayKey, ASSIGNMENT_LOOKBACK_DAYS);
+    const rows = await this.prisma.submission.findMany({
+      where: {
+        studentId: { in: studentIds },
+        status: 'ACCEPTED',
+        dayKey: { gte: startDayKey, lte: endDayKey },
+        titleSlug: { in: slugs },
+      },
+      select: { studentId: true, titleSlug: true },
+    });
+
+    // Distinct problems, so five accepted runs at Two Sum still count once (§9).
+    //
+    // Returned as the *set of slugs*, not a count. One day carries several campuses' and
+    // batches' assignments, and this query spans all their slugs in one round trip — so
+    // counting here would credit an SRM student for a problem only Vels was set. The
+    // caller intersects with the student's own assignment, which is the only scope that
+    // can answer "of *their* four, how many can we prove" (§15).
+    for (const row of rows) {
+      const set = floors.get(row.studentId) ?? new Set<string>();
+      set.add(row.titleSlug.toLowerCase());
+      floors.set(row.studentId, set);
+    }
+    return floors;
   }
 
   private statusWhere(dayKey: DayKey, filter: DashboardFilter) {

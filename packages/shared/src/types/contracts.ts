@@ -542,6 +542,39 @@ export interface MentorBucketRow {
   reason: string | null;
 }
 
+/**
+ * A student who was in the assignment's audience on a day the tracker was not yet
+ * watching them.
+ *
+ * Deliberately *not* a `MentorBucketRow`: it carries no `solvedCount`, because there is
+ * no honest value to put there. Giving it one — even zero — is the fabrication the whole
+ * `NOT_OBSERVED` state exists to prevent, and typing it separately means no bucketing or
+ * averaging code can reach for the field by accident.
+ */
+export interface MentorNotObservedRow {
+  studentId: string;
+  name: string;
+  email: string | null;
+  squadName: string | null;
+  campusName: string | null;
+  campusCode: string | null;
+  batchName: string | null;
+  batchCode: string | null;
+  leetcodeUsername: string | null;
+  /** The day the tracker first mirrored this student — why the row is unavailable. */
+  observedFromDayKey: DayKey;
+  /**
+   * Distinct assigned problems we can *prove* they solved, from submissions that
+   * happened to survive inside the provider's short window. A floor, never a score:
+   * "at least 2 of 4", never "2 of 4". Zero means "nothing proven", not "solved none".
+   */
+  provenSolvedFloor: number;
+  /** Problems assigned to this student's audience that day. */
+  assignedCount: number;
+  /** Mentor-facing one-liner explaining the gap. */
+  reason: string;
+}
+
 export interface MentorBucket {
   solvedCount: number;
   label: string;
@@ -575,7 +608,25 @@ export interface MentorBatchSection {
   /** This batch's problem count for the day. Never assume 4. */
   assignedCount: number;
   buckets: MentorBucket[];
+  /**
+   * Students the buckets are computed over — those with real evidence for this day.
+   *
+   * This is the completion-percentage denominator, and it is **not** the roster size.
+   * See `rosterTotal`.
+   */
   totalStudents: number;
+  /**
+   * In the audience on this day, but joined the tracker later. Never in `buckets`,
+   * never counted in `totalStudents`, never scored as zero.
+   */
+  notObserved: MentorNotObservedRow[];
+  /**
+   * `totalStudents + notObserved.length` — everyone the assignment was aimed at.
+   *
+   * Carried so the UI can say "99 of 142 evaluated" rather than quietly showing 99 and
+   * letting a mentor read it as the whole cohort.
+   */
+  rosterTotal: number;
 }
 
 export interface MentorDashboard {
@@ -598,7 +649,12 @@ export interface MentorDashboard {
   assignment: AssignmentSummary | null;
   /** Every student across all sections, bucketed by solved count. */
   buckets: MentorBucket[];
+  /** Observed students across all sections — the denominator, not the roster. */
   totalStudents: number;
+  /** Unobserved students across all sections. */
+  notObserved: MentorNotObservedRow[];
+  /** `totalStudents + notObserved.length` across all sections. */
+  rosterTotal: number;
 }
 
 export interface LeaderboardRow {

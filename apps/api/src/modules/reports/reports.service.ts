@@ -69,8 +69,27 @@ export class ReportsService {
         batchCode: section.batchCode,
         assignedCount: section.assignedCount,
         totalStudents: section.totalStudents,
+        rosterTotal: section.rosterTotal,
+        notObservedCount: section.notObserved.length,
       })),
       totalStudents: students.length,
+      /**
+       * Everyone the day's assignments were aimed at, including students the tracker was
+       * not yet watching. Carried alongside `totalStudents` so a spreadsheet of 98 rows
+       * cannot be read as a 142-strong cohort with 44 people who did nothing — the rows
+       * below are the observed students, and this is how many there were in total.
+       */
+      rosterTotal: mentor.rosterTotal,
+      notObserved: mentor.notObserved.map((row) => ({
+        name: row.name,
+        email: row.email,
+        squad: row.squadName ?? '',
+        leetcodeUsername: row.leetcodeUsername,
+        assigned: row.assignedCount,
+        observedFrom: row.observedFromDayKey,
+        provenSolvedFloor: row.provenSolvedFloor,
+        reason: row.reason,
+      })),
       rows: students.map((student) => ({
           name: student.name,
           email: student.email,

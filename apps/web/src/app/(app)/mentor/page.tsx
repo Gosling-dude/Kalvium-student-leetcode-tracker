@@ -11,6 +11,7 @@ import {
   type MentorBatchSection,
   type MentorBucket,
   type MentorBucketRow,
+  type MentorNotObservedRow,
 } from '@dsa/shared';
 
 import { api, downloadFile } from '@/lib/api';
@@ -82,7 +83,12 @@ export default function MentorPage() {
           <p className="text-sm text-[var(--color-fg-muted)]">
             {singleCampus ? `${singleCampus.name} · ` : ''}
             {data?.assignment?.topic ? `${data.assignment.topic} · ` : ''}
-            {data?.totalStudents ?? 0} students
+            {/* Evaluated, not roster. On a past date the two differ for any student who
+                joined the tracker later, and showing only the first reads as the whole
+                cohort — which is how a partial day gets mistaken for a complete one. */}
+            {data && data.rosterTotal > data.totalStudents
+              ? `${data.totalStudents} of ${data.rosterTotal} students evaluated`
+              : `${data?.totalStudents ?? 0} students`}
           </p>
         </div>
 
@@ -154,8 +160,10 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
         />
         <h2 className="text-base font-semibold">{heading}</h2>
         <span className="text-sm text-[var(--color-fg-muted)]">
-          {section.assignedCount} assigned · {section.totalStudents} student
-          {section.totalStudents === 1 ? '' : 's'}
+          {section.assignedCount} assigned ·{' '}
+          {section.notObserved.length > 0
+            ? `${section.totalStudents} of ${section.rosterTotal} evaluated`
+            : `${section.totalStudents} student${section.totalStudents === 1 ? '' : 's'}`}
         </span>
       </div>
       {section.buckets.map((bucket) => (
@@ -165,7 +173,69 @@ function BatchSectionTables({ section }: { section: MentorBatchSection }) {
           assignedCount={section.assignedCount}
         />
       ))}
+      {section.notObserved.length > 0 ? (
+        <NotObservedTable rows={section.notObserved} />
+      ) : null}
     </section>
+  );
+}
+
+/**
+ * The students this day's assignment was aimed at whom the tracker was not yet watching.
+ *
+ * Rendered as its own table, below the buckets and visibly outside them, because that is
+ * the honest shape of the fact: they are not a sixth performance band, they are people
+ * whose performance is unknown. The alternative — folding them into "Solved 0" — is a
+ * claim we cannot support, and it is the one this whole table exists to avoid making.
+ */
+function NotObservedTable({ rows }: { rows: MentorNotObservedRow[] }) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-dashed border-[var(--color-border)]">
+      <div className="flex flex-wrap items-baseline gap-x-2 border-b border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-2">
+        <h3 className="text-sm font-semibold">⚪ Data unavailable — not observed</h3>
+        <span className="text-sm text-[var(--color-fg-muted)]">
+          {rows.length} student{rows.length === 1 ? '' : 's'} · excluded from the buckets and
+          from the completion percentage
+        </span>
+      </div>
+      <p className="px-4 py-2 text-xs text-[var(--color-fg-muted)]">
+        These students were on the roster for this date, but joined the tracker later.
+        LeetCode only exposes a student&apos;s most recent submissions, so their activity on
+        this date can no longer be retrieved — it is unknown, not zero.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[40rem] text-sm">
+          <thead className="text-left text-xs uppercase tracking-wide text-[var(--color-fg-muted)]">
+            <tr className="border-t border-[var(--color-border)]">
+              <th className="px-4 py-2 font-medium">Student</th>
+              <th className="px-4 py-2 font-medium">Squad</th>
+              <th className="px-4 py-2 font-medium">LeetCode</th>
+              <th className="px-4 py-2 font-medium">Tracked from</th>
+              <th className="px-4 py-2 font-medium">Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.studentId} className="border-t border-[var(--color-border)]">
+                <td className="px-4 py-2">{row.name}</td>
+                <td className="px-4 py-2 text-[var(--color-fg-muted)]">{row.squadName ?? '—'}</td>
+                <td className="px-4 py-2 text-[var(--color-fg-muted)]">
+                  {row.leetcodeUsername ?? '—'}
+                </td>
+                <td className="px-4 py-2 text-[var(--color-fg-muted)]">{row.observedFromDayKey}</td>
+                <td className="px-4 py-2 text-[var(--color-fg-muted)]">
+                  {/* A floor, and worded as one. "at least 2 of 4" is provable; "2 of 4"
+                      would additionally claim they missed the other two, which is not. */}
+                  {row.provenSolvedFloor > 0
+                    ? `at least ${row.provenSolvedFloor} of ${row.assignedCount}`
+                    : 'none recorded'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
