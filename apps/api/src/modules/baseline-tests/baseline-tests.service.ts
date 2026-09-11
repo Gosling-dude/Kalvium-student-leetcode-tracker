@@ -30,7 +30,6 @@ import {
 } from '@nestjs/common';
 import {
   assessRisk,
-  attemptExpiry,
   baselinePercent,
   computeGeneralPerformance,
   countSolved,
@@ -123,7 +122,6 @@ export class BaselineTestsService {
         adminNotes: dto.adminNotes ?? null,
         campusId: scope.campusId,
         batchId: scope.batchId,
-        durationMinutes: dto.durationMinutes ?? 60,
         opensAt: dto.opensAt ? new Date(dto.opensAt) : null,
         closesAt: dto.closesAt ? new Date(dto.closesAt) : null,
         createdById: userId,
@@ -191,7 +189,6 @@ export class BaselineTestsService {
           ...(dto.description !== undefined ? { description: dto.description } : {}),
           ...(dto.instructions !== undefined ? { instructions: dto.instructions } : {}),
           ...(dto.adminNotes !== undefined ? { adminNotes: dto.adminNotes } : {}),
-          ...(dto.durationMinutes !== undefined ? { durationMinutes: dto.durationMinutes } : {}),
           ...(dto.opensAt !== undefined ? { opensAt: dto.opensAt ? new Date(dto.opensAt) : null } : {}),
           ...(dto.closesAt !== undefined ? { closesAt: dto.closesAt ? new Date(dto.closesAt) : null } : {}),
           ...(scope ? { campusId: scope.campusId, batchId: scope.batchId } : {}),
@@ -454,10 +451,11 @@ export class BaselineTestsService {
   /**
    * Begin — or resume — a student's attempt.
    *
-   * Resuming rather than restarting is the point of the unique `(testId, studentId)` key:
-   * a refreshed browser must not reset the clock, and `expiresAt` is written once at the
-   * first start so a later change to the test's duration cannot retroactively shorten or
-   * extend an attempt already under way.
+   * There is no clock. A baseline measures whether a student can solve the problems, and
+   * a student who started late, finished late, or never opened the timer has not thereby
+   * become less able. `expiresAt` is left null on every attempt written from here; the
+   * column survives only so the attempts recorded under the old rule keep the timestamps
+   * they were taken with.
    */
   async startAttempt(studentId: string, testId: string): Promise<StudentBaselineTest> {
     const student = await this.prisma.student.findUnique({
@@ -503,7 +501,6 @@ export class BaselineTestsService {
         campusId: student.campusId,
         batchId: student.batchId,
         startedAt: now,
-        expiresAt: attemptExpiry(now, test.durationMinutes, test.closesAt),
         maxScore: test.problems.reduce((total, problem) => total + problem.points, 0),
       },
     });
@@ -549,12 +546,19 @@ export class BaselineTestsService {
   }
 
   /**
-   * Grade one attempt from the submissions inside its window.
+   * Grade one attempt from the student's submissions — **all** of them.
    *
-   * The window is `[startedAt, min(expiresAt, submittedAt, now)]`. Submissions outside it
-   * do not count towards the score — but an accepted submission from *before* the test
-   * opened is still looked for, because "already solved this" is exactly the signal a
-   * baseline is trying to surface, and silently ignoring it would hide it.
+   * There is no window. If a student has an accepted solution to a baseline problem, at
+   * any time, it counts: the test asks whether they can solve it, and a timestamp is
+   * evidence of that ability rather than a condition on it. A solve from before the test
+   * opened counts; so does one from after it closed.
+   *
+   * `solvedBeforeTest` is still computed, because *when* a problem was first solved is a
+   * fact a mentor reading the risk signals needs. It no longer changes the score.
+   *
+   * `timeToSolveSeconds` is measured from `startedAt` and is therefore only meaningful
+   * for a solve that happened after the attempt began; it is null otherwise, which keeps
+   * the pace-based risk signals from firing on a solve that predates the test.
    */
   private async gradeAttemptById(attemptId: string): Promise<void> {
     const attempt = await this.prisma.baselineTestAttempt.findUnique({
@@ -565,18 +569,16 @@ export class BaselineTestsService {
     });
     if (!attempt) return;
 
-    const windowStart = attempt.startedAt;
-    const windowEnd = this.attemptWindowEnd(attempt);
+    const startedAt = attempt.startedAt;
     const slugs = attempt.test.problems.map((problem) => problem.problem.titleSlug);
 
-    // Two reads, both indexed: everything inside the window, and whether any of these
-    // problems was already accepted before the test opened.
-    const [inWindow, priorAccepted] = await Promise.all([
+    // One read, no date bounds. Narrowing this by time is what discarded solutions the
+    // student had genuinely written, and it is the whole of the bug being fixed.
+    const [all, priorAccepted] = await Promise.all([
       this.prisma.submission.findMany({
         where: {
           studentId: attempt.studentId,
           titleSlug: { in: slugs },
-          submittedAt: { gte: windowStart, lte: windowEnd },
         },
         orderBy: { submittedAt: 'asc' },
       }),
@@ -585,7 +587,7 @@ export class BaselineTestsService {
           studentId: attempt.studentId,
           titleSlug: { in: slugs },
           status: 'ACCEPTED',
-          submittedAt: { lt: attempt.test.opensAt ?? windowStart },
+          submittedAt: { lt: attempt.test.opensAt ?? startedAt },
         },
         select: { titleSlug: true },
       }),
@@ -597,16 +599,18 @@ export class BaselineTestsService {
 
     for (const testProblem of attempt.test.problems) {
       const slug = testProblem.problem.titleSlug;
-      const mine = inWindow.filter((submission) => submission.titleSlug === slug);
+      const mine = all.filter((submission) => submission.titleSlug === slug);
       const accepted = mine.find((submission) => submission.status === 'ACCEPTED') ?? null;
       const first = mine[0] ?? null;
 
-      const timeToSolveSeconds = accepted
-        ? Math.max(
-            0,
-            Math.round((accepted.submittedAt.getTime() - windowStart.getTime()) / 1000),
-          )
-        : null;
+      // Only a solve that happened *after* the attempt started has a "time to solve"
+      // relative to it. A negative interval is not a fast solve, it is a solve from
+      // before the student sat down, and feeding it to the pace signals as a small
+      // positive number would flag the most prepared students as suspicious.
+      const timeToSolveSeconds =
+        accepted && accepted.submittedAt.getTime() >= startedAt.getTime()
+          ? Math.round((accepted.submittedAt.getTime() - startedAt.getTime()) / 1000)
+          : null;
 
       const status: ProblemStatus = accepted
         ? 'ACCEPTED'
@@ -647,6 +651,7 @@ export class BaselineTestsService {
     const lastSolvedAt = resultRows
       .map((row) => row.solvedAt)
       .filter((date): date is Date => date instanceof Date)
+      .filter((date) => date.getTime() >= startedAt.getTime())
       .sort((a, b) => b.getTime() - a.getTime())[0];
 
     await this.prisma.$transaction([
@@ -660,7 +665,7 @@ export class BaselineTestsService {
           score: grade.score,
           maxScore: grade.maxScore,
           timeTakenSeconds: lastSolvedAt
-            ? Math.max(0, Math.round((lastSolvedAt.getTime() - windowStart.getTime()) / 1000))
+            ? Math.max(0, Math.round((lastSolvedAt.getTime() - startedAt.getTime()) / 1000))
             : null,
           riskFlags: risk.signals,
           riskScore: risk.score,
@@ -670,25 +675,13 @@ export class BaselineTestsService {
           ...(risk.reviewRecommended && attempt.reviewStatus === 'NOT_REVIEWED'
             ? { reviewStatus: 'REVIEW_REQUIRED' as const }
             : {}),
-          // An attempt whose window has passed without a hand-in is `EXPIRED`, not
-          // `SUBMITTED` — the two mean different things to a mentor reading the report.
-          ...(attempt.status === 'IN_PROGRESS' && windowEnd.getTime() <= Date.now()
-            ? { status: 'EXPIRED' as const }
-            : {}),
+          // Nothing expires. An attempt the student never handed in stays `IN_PROGRESS`;
+          // the clock that used to move it to `EXPIRED` has been removed, because running
+          // out of time was never a statement about whether they could solve the problem.
           gradedAt: new Date(),
         },
       }),
     ]);
-  }
-
-  private attemptWindowEnd(attempt: {
-    submittedAt: Date | null;
-    expiresAt: Date | null;
-  }): Date {
-    const candidates = [attempt.submittedAt, attempt.expiresAt, new Date()].filter(
-      (date): date is Date => date instanceof Date,
-    );
-    return new Date(Math.min(...candidates.map((date) => date.getTime())));
   }
 
   /**
@@ -1006,12 +999,15 @@ export class BaselineTestsService {
         hasSubmissions: false,
       };
 
-      // The headline number: distinct problems from this set the student has solved at any
-      // time. Independent of whether they sat the test.
+      // The one number: distinct problems from this set the student has solved, at any
+      // time. Independent of whether they sat the test, and of when they solved them.
+      //
+      // There is no longer a second, window-restricted figure beside it. The two used to
+      // differ only because grading discarded solutions outside an attempt's clock, and
+      // with that clock gone the "solved during the test" column reported nothing except
+      // whether the student had pressed Start — an attendance fact wearing a score's
+      // clothes, and the very thing that made a prepared student read 0/4.
       const solvedCount = countSolved(performance);
-      // What the test itself measured — solved inside their own attempt window. Zero for
-      // anyone who never sat it, which is correct and is a different fact.
-      const inWindowSolvedCount = attempt?.solvedCount ?? 0;
       const score = attempt?.score ?? 0;
 
       return {
@@ -1026,7 +1022,6 @@ export class BaselineTestsService {
         totalQuestions,
         solvedCount,
         notSolvedCount: Math.max(0, totalQuestions - solvedCount),
-        inWindowSolvedCount,
         // Problems touched without an accepted answer, from the whole history.
         attemptedCount: performance.filter((problem) => !problem.solved && problem.attempts > 0)
           .length,
@@ -1299,7 +1294,6 @@ export class BaselineTestsService {
       submittedAt: attempt?.submittedAt?.toISOString() ?? null,
       status: (attempt?.status ?? 'NOT_STARTED') as BaselineAttemptStatus,
       attempted: attempt !== null,
-      inWindowSolvedCount: attempt?.solvedCount ?? 0,
       syncStatus: sync.status,
       lastSuccessfulSyncAt: sync.lastSuccessAt?.toISOString() ?? null,
       performanceKnown: isPerformanceKnown({

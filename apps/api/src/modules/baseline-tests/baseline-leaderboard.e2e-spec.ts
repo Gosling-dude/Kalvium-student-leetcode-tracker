@@ -318,20 +318,15 @@ describe('baseline leaderboard', () => {
   });
 });
 
-describe('baseline historical immutability vs current ability', () => {
-  it('raises current performance but never the recorded test result', async () => {
-    // The two requirements that look contradictory until they are separated:
-    //
-    //   "If a student has solved a baseline question at ANY TIME, recognise it."
-    //   "Solving Q3 later must NOT change the recorded baseline from 3/4 to 4/4."
-    //
-    // Both hold, because they are about different numbers. `inWindowSolvedCount` is what
-    // the test measured on the day and is frozen; `solvedCount` is what the student can do
-    // now. Reporting only one of them is what forces a choice between the two rules.
+describe('a baseline solve counts whenever it happened', () => {
+  it('credits a problem solved after the test closed, on the board and in the attempt', async () => {
+    // The programme's rule, stated plainly: "if the student has solved a baseline
+    // question at any time, count it as solved". The grading window that used to hold
+    // this back — `[startedAt, min(expiresAt, submittedAt, now)]` — has been removed, so
+    // the stored attempt and the board now agree instead of reporting 3 and 4.
     const before = await service.leaderboard(testId);
     const rahulBefore = before.rows.find((row) => row.studentName === 'Rahul Sharma')!;
     expect(rahulBefore.solvedCount).toBe(3);
-    expect(rahulBefore.inWindowSolvedCount).toBe(3);
 
     // The fourth problem, solved nine days after the test closed.
     await prisma.submission.create({
@@ -348,38 +343,44 @@ describe('baseline historical immutability vs current ability', () => {
       },
     });
 
-    // A re-grade is the operation that would rewrite history if the window were not frozen.
     await service.gradeTest(testId);
 
     const after = await service.leaderboard(testId);
     const rahulAfter = after.rows.find((row) => row.studentName === 'Rahul Sharma')!;
-
-    // Current ability now reflects the late solve — this is the reported bug being fixed.
     expect(rahulAfter.solvedCount).toBe(4);
     expect(rahulAfter.percent).toBe(100);
-
-    // The test's own record does not move. It says what happened on the day.
-    expect(rahulAfter.inWindowSolvedCount).toBe(3);
   });
 
-  it('keeps the stored attempt untouched by the later solve', async () => {
-    // Immutability at the storage layer, not just in the projection: the row that records
-    // what the student did during the test still says three.
+  it('raises the stored attempt too, so no surface can disagree with another', async () => {
     const attempt = await prisma.baselineTestAttempt.findUnique({
       where: { testId_studentId: { testId, studentId: studentIds.rahul! } },
     });
 
-    expect(attempt?.solvedCount).toBe(3);
+    // Previously frozen at 3 by the attempt window. The window is gone, and with it the
+    // possibility of the attempt row and the leaderboard telling a mentor two different
+    // numbers for the same student.
+    expect(attempt?.solvedCount).toBe(4);
   });
 
-  it('shows the improvement between the two, per problem', async () => {
+  it('is idempotent — re-grading does not double-count the late solve', async () => {
+    await service.gradeTest(testId);
+    await service.gradeTest(testId);
+
+    const attempt = await prisma.baselineTestAttempt.findUnique({
+      where: { testId_studentId: { testId, studentId: studentIds.rahul! } },
+    });
+    expect(attempt?.solvedCount).toBe(4);
+
+    const board = await service.leaderboard(testId);
+    expect(board.rows.find((row) => row.studentName === 'Rahul Sharma')!.solvedCount).toBe(4);
+  });
+
+  it('carries the evidence of when each problem was actually solved', async () => {
     const detail = await service.studentResult(testId, studentIds.rahul!);
 
-    // Four ✓ on current ability...
     expect(detail.problems.filter((p) => p.status === 'ACCEPTED')).toHaveLength(4);
-    // ...while the recorded sitting stays at three.
-    expect(detail.inWindowSolvedCount).toBe(3);
-    // And the late one carries the evidence of when it was actually solved.
+    // Counting it does not mean pretending it happened during the test: the timestamp is
+    // reported as-is, so a mentor can still see it landed afterwards.
     const late = detail.problems[3]!;
     expect(late.firstAcceptedAt).toBe(AFTER_THE_TEST.toISOString());
   });

@@ -1,7 +1,12 @@
 import { Controller, Get, Module, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { EXPORT_FORMATS, type ExportFormat } from '@dsa/shared';
+import {
+  BASELINE_ATTEMPT_STATUS_LABELS,
+  displayAttemptStatus,
+  EXPORT_FORMATS,
+  type ExportFormat,
+} from '@dsa/shared';
 
 import { BadRequestException } from '@nestjs/common';
 import { CurrentUser, type RequestUser } from '../../common/decorators';
@@ -14,13 +19,6 @@ import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
 import { BaselineTestsService } from '../baseline-tests/baseline-tests.service';
 import { ReportsService } from './reports.service';
 
-/** Matches the on-screen wording, so an export and the page it came from read alike. */
-const PARTICIPATION_LABELS: Record<string, string> = {
-  SUBMITTED: 'Completed',
-  IN_PROGRESS: 'In progress',
-  EXPIRED: 'Expired',
-  NOT_STARTED: 'Absent',
-};
 
 @ApiTags('Reports')
 @ApiBearerAuth()
@@ -234,11 +232,10 @@ export class ReportsController {
         { header: 'Solved', key: 'solvedCount', width: 10 },
         { header: 'Not Solved', key: 'notSolvedCount', width: 12 },
         { header: 'Score %', key: 'percent', width: 10 },
-        // Participation and performance are separate columns here for the same reason they
-        // are separate on screen: a reader must be able to see "Absent" beside "3 solved"
-        // without one being mistaken for the other.
-        { header: 'Test Participation', key: 'participation', width: 18 },
-        { header: 'Solved During Test', key: 'inWindowSolvedCount', width: 18 },
+        // Participation is reported as the observation it is — whether anyone opened the
+        // test in the portal — and never as an attendance mark. It does not enter the
+        // score, and a student who never opened it can still be 3 of 4.
+        { header: 'Opened In Portal', key: 'participation', width: 18 },
         { header: 'Sync Status', key: 'syncStatus', width: 16 },
         { header: 'Last Successful Sync', key: 'lastSuccessfulSyncAt', width: 24 },
       ],
@@ -252,7 +249,7 @@ export class ReportsController {
         solvedCount: row.performanceKnown ? row.solvedCount : '—',
         notSolvedCount: row.performanceKnown ? row.notSolvedCount : '—',
         percent: row.performanceKnown ? row.percent : 'not synced',
-        participation: PARTICIPATION_LABELS[row.status] ?? row.status,
+        participation: BASELINE_ATTEMPT_STATUS_LABELS[displayAttemptStatus(row.status)],
         lastSuccessfulSyncAt: row.lastSuccessfulSyncAt ?? '',
         syncStatus: row.syncStatus ?? '',
       })),

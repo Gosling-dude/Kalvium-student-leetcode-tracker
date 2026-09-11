@@ -52,7 +52,6 @@ export default function BaselineTestsPage() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [dayKey, setDayKey] = useState(todayKey());
-  const [durationMinutes, setDurationMinutes] = useState(60);
   const [instructions, setInstructions] = useState('');
   const [urls, setUrls] = useState<string[]>(Array(DEFAULT_PROBLEM_SLOTS).fill(''));
 
@@ -99,7 +98,6 @@ export default function BaselineTestsPage() {
       api.createBaselineTest({
         name,
         dayKey,
-        durationMinutes,
         instructions: instructions || undefined,
         campus: targetCampusId ?? undefined,
         batch: targetBatchId ?? undefined,
@@ -178,20 +176,6 @@ export default function BaselineTestsPage() {
                   type="date"
                   value={dayKey}
                   onChange={(event) => setDayKey(event.target.value)}
-                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
-                />
-              </div>
-              <div>
-                <label htmlFor="bt-duration" className="mb-1.5 block text-xs font-medium">
-                  Duration (minutes)
-                </label>
-                <input
-                  id="bt-duration"
-                  type="number"
-                  min={5}
-                  max={600}
-                  value={durationMinutes}
-                  onChange={(event) => setDurationMinutes(Number(event.target.value))}
                   className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
                 />
               </div>
@@ -300,7 +284,7 @@ export default function BaselineTestsPage() {
                 <p className="mt-1 text-[var(--color-fg-muted)]">
                   {!campusChoiceMade
                     ? 'Pick a target campus above to see what will be created.'
-                    : `${filledCount} problem${filledCount === 1 ? '' : 's'}, ${durationMinutes} minutes, on ${dayKey} for ${targetCampusName} — ${targetBatchName}.`}
+                    : `${filledCount} problem${filledCount === 1 ? '' : 's'} on ${dayKey} for ${targetCampusName} — ${targetBatchName}. No time limit.`}
                 </p>
                 <p className="mt-1 text-xs text-[var(--color-fg-subtle)]">
                   Created as a draft. Students see nothing until it is published.

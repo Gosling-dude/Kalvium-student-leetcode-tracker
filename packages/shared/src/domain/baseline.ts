@@ -3,11 +3,13 @@
  *
  * Two things live here, both pure, both deliberately separate from `domain/scoring.ts`.
  *
- * **Grading.** A baseline score is the sum of the points on the problems a student got
- * accepted inside their own attempt window. It shares no code with the daily assignment
- * formula and produces no value that any daily surface reads (§25). If the two ever need
- * to diverge — and they will, because one measures practice and the other measures
- * capability — they can, without a shared abstraction forcing a compromise.
+ * **Grading.** A baseline score is the sum of the points on the problems a student has
+ * had accepted — at any time. There is no window and no clock: the test asks whether the
+ * student can solve the problem, and a timestamp is evidence of that ability rather than
+ * a condition on it. A student who started late, finished late, or never opened the timer
+ * is not thereby less able, and the previous 60-minute bound turned exactly that into a
+ * zero. Grading shares no code with the daily assignment formula and produces no value
+ * that any daily surface reads (§25).
  *
  * **Risk signals.** The programme wants to know when a result may not reflect the
  * student's own work. What this module will *not* do is conclude that. Every signal below
@@ -33,6 +35,15 @@ export const BASELINE_TEST_STATUS_LABELS: Record<BaselineTestStatus, string> = {
   CLOSED: 'Closed',
 };
 
+/**
+ * Participation states.
+ *
+ * `EXPIRED` is retained for the attempts that were written while a test had a clock, so
+ * no historical row has to be rewritten to fit the current rule. Nothing produces it any
+ * more — `displayAttemptStatus` folds it away — and it is never offered as a filter or
+ * rendered as a distinct outcome, because "ran out of time" was never a statement about
+ * whether the student could solve the problem.
+ */
 export const BASELINE_ATTEMPT_STATUSES = [
   'NOT_STARTED',
   'IN_PROGRESS',
@@ -40,6 +51,40 @@ export const BASELINE_ATTEMPT_STATUSES = [
   'EXPIRED',
 ] as const;
 export type BaselineAttemptStatus = (typeof BASELINE_ATTEMPT_STATUSES)[number];
+
+/** The states a *new* attempt can reach. `EXPIRED` is historical only. */
+export const BASELINE_ACTIVE_ATTEMPT_STATUSES = [
+  'NOT_STARTED',
+  'IN_PROGRESS',
+  'SUBMITTED',
+] as const;
+
+/**
+ * Participation wording. Deliberately free of attendance language.
+ *
+ * A baseline test is not a register. "Absent" — the old label for `NOT_STARTED` — read as
+ * a mark against the student and sat one column away from a solved count that frequently
+ * contradicted it: a student could be "Absent" and 3/4 at the same time. The replacement
+ * describes what the system actually observed, which is whether anyone opened the test in
+ * the portal, and says nothing about the student's ability.
+ */
+export const BASELINE_ATTEMPT_STATUS_LABELS: Record<BaselineAttemptStatus, string> = {
+  NOT_STARTED: 'Not opened in portal',
+  IN_PROGRESS: 'Opened',
+  SUBMITTED: 'Handed in',
+  // Legacy rows only. Shown as what it factually was — opened, never handed in.
+  EXPIRED: 'Opened',
+};
+
+/**
+ * Normalise a stored participation status for display.
+ *
+ * Collapses the historical `EXPIRED` into `IN_PROGRESS` at the boundary, so no surface
+ * has to know the clock ever existed and no filter offers a state nothing can reach.
+ */
+export function displayAttemptStatus(status: BaselineAttemptStatus): BaselineAttemptStatus {
+  return status === 'EXPIRED' ? 'IN_PROGRESS' : status;
+}
 
 export const BASELINE_REVIEW_STATUSES = ['NOT_REVIEWED', 'REVIEW_REQUIRED', 'REVIEWED'] as const;
 export type BaselineReviewStatus = (typeof BASELINE_REVIEW_STATUSES)[number];
@@ -112,9 +157,15 @@ export interface BaselineProblemOutcome {
   problemId: string;
   points: number;
   accepted: boolean;
-  /** Submissions observed for this problem inside the window, accepted or not. */
+  /** Submissions observed for this problem, at any time, accepted or not. */
   attempts: number;
-  /** Seconds from attempt start to the accepted submission; null when not accepted. */
+  /**
+   * Seconds from attempt start to the accepted submission.
+   *
+   * Null when not accepted **and** when the acceptance predates the attempt — a solve
+   * from before the student sat down has no duration relative to the sitting, and
+   * reporting one would feed the pace signals a number that means nothing.
+   */
   timeToSolveSeconds: number | null;
   /** True when an accepted submission for this problem exists from before the test opened. */
   solvedBeforeTest: boolean;
@@ -270,23 +321,6 @@ export function assessRisk(input: RiskAssessmentInput): RiskAssessment {
     evidence,
     reviewRecommended: score >= BASELINE_RISK_THRESHOLDS.reviewRequiredScore,
   };
-}
-
-/**
- * When an attempt's individual window closes.
- *
- * The student's own duration, clamped to the test's close time: starting 10 minutes
- * before a test closes gives you 10 minutes, not the full hour. Returns `closesAt` when
- * the duration would overrun it, and the duration bound otherwise.
- */
-export function attemptExpiry(
-  startedAt: Date,
-  durationMinutes: number,
-  closesAt: Date | null,
-): Date {
-  const byDuration = new Date(startedAt.getTime() + durationMinutes * 60_000);
-  if (closesAt && closesAt.getTime() < byDuration.getTime()) return closesAt;
-  return byDuration;
 }
 
 /**

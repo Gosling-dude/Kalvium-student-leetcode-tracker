@@ -204,9 +204,9 @@ export default function StudentProfilePage({ params }: { params: Promise<{ id: s
           tone="warning"
         />
         <StatTile
-          label="Assignment problems done"
-          value={data.metrics.totalAssignmentProblemsCompleted}
-          hint="across the programme"
+          label="Assignment problems solved"
+          value={data.metrics.distinctAssignmentProblemsSolved}
+          hint="distinct problems, across the programme"
           tone="success"
         />
       </div>

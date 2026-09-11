@@ -16,7 +16,7 @@ import { use } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Clock, ExternalLink } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import {
@@ -85,10 +85,6 @@ export default function StudentBaselineTestPage({
         <h1 className="mt-1 text-xl font-semibold tracking-tight">{data.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--color-fg-muted)]">
           <span>{data.dayKey}</span>
-          <span className="inline-flex items-center gap-1">
-            <Clock className="size-3.5" aria-hidden />
-            {data.durationMinutes} minutes
-          </span>
           <span>
             {data.problemCount} problem{data.problemCount === 1 ? '' : 's'}
           </span>
@@ -107,9 +103,9 @@ export default function StudentBaselineTestPage({
       {!attempt ? (
         <Card className="p-5">
           <p className="text-sm text-[var(--color-fg-muted)]">
-            The problems are revealed when you start, and your {data.durationMinutes}-minute
-            window begins then. Solve them on LeetCode with the account linked to your
-            profile — that is how your results are picked up.
+            The problems are revealed when you start. There is no timer: solve them on
+            LeetCode with the account linked to your profile, in your own time, and your
+            results are picked up from there.
           </p>
           <div className="mt-4">
             <Button
@@ -131,21 +127,14 @@ export default function StudentBaselineTestPage({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium">
-                  {attempt.status === 'SUBMITTED'
-                    ? 'Submitted'
-                    : attempt.status === 'EXPIRED'
-                      ? 'Your window has closed'
-                      : 'In progress'}
+                  {attempt.status === 'SUBMITTED' ? 'Handed in' : 'Opened'}
                 </p>
                 <p className="text-xs text-[var(--color-fg-muted)]">
                   {attempt.solvedCount} of {data.problemCount} solved · {attempt.score}/
                   {attempt.maxScore} points
-                  {attempt.expiresAt && attempt.status === 'IN_PROGRESS'
-                    ? ` · closes ${new Date(attempt.expiresAt).toLocaleTimeString()}`
-                    : ''}
                 </p>
               </div>
-              {attempt.status === 'IN_PROGRESS' ? (
+              {attempt.status !== 'SUBMITTED' ? (
                 <Button variant="primary" loading={submit.isPending} onClick={() => submit.mutate()}>
                   Submit test
                 </Button>

@@ -85,14 +85,6 @@ export class CreateBaselineTestDto {
   @Type(() => BaselineProblemDto)
   problems!: BaselineProblemDto[];
 
-  @ApiPropertyOptional({ default: 60, description: "One student's window, in minutes" })
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(5)
-  @Max(600)
-  durationMinutes?: number;
-
   @ApiPropertyOptional({ description: 'When the test opens (ISO 8601)' })
   @IsOptional()
   @IsISO8601()
@@ -160,14 +152,6 @@ export class UpdateBaselineTestDto {
   @ValidateNested({ each: true })
   @Type(() => BaselineProblemDto)
   problems?: BaselineProblemDto[];
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(5)
-  @Max(600)
-  durationMinutes?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

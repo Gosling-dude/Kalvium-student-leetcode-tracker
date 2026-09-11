@@ -11,12 +11,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assessRisk,
-  attemptExpiry,
   BASELINE_RISK_THRESHOLDS,
   gradeAttempt,
   isTestOpen,
   type BaselineProblemOutcome,
 } from './baseline';
+import * as baseline from './baseline';
 
 const outcome = (over: Partial<BaselineProblemOutcome> = {}): BaselineProblemOutcome => ({
   testProblemId: 'tp-1',
@@ -185,24 +185,31 @@ describe('assessRisk — signals that must NOT fire', () => {
   });
 });
 
-describe('attemptExpiry', () => {
-  const started = new Date('2026-08-22T10:00:00Z');
-
-  it('gives the student their full duration when the test stays open', () => {
-    expect(attemptExpiry(started, 60, new Date('2026-08-22T23:00:00Z')).toISOString()).toBe(
-      '2026-08-22T11:00:00.000Z',
-    );
+describe('grading has no clock', () => {
+  it('exposes no attempt-expiry rule to compute one with', () => {
+    // The 60-minute window is gone, not merely unused: there is no function here that
+    // turns a start time and a duration into a deadline, so no caller can reintroduce
+    // one by accident. A baseline asks whether the student can solve the problem, and a
+    // student who started late or finished late has not become less able.
+    expect('attemptExpiry' in baseline).toBe(false);
   });
 
-  it('clamps to the test close time for a late starter', () => {
-    // Starting ten minutes before close gives ten minutes, not a full hour past it.
-    expect(attemptExpiry(started, 60, new Date('2026-08-22T10:10:00Z')).toISOString()).toBe(
-      '2026-08-22T10:10:00.000Z',
-    );
+  it('keeps participation wording free of attendance language', () => {
+    // "Absent" used to sit one column away from a solved count that contradicted it.
+    const labels = Object.values(baseline.BASELINE_ATTEMPT_STATUS_LABELS);
+    expect(labels.some((label) => /absent/i.test(label))).toBe(false);
+    expect(labels.some((label) => /expired|time up/i.test(label))).toBe(false);
   });
 
-  it('uses the duration alone when the test has no close time', () => {
-    expect(attemptExpiry(started, 30, null).toISOString()).toBe('2026-08-22T10:30:00.000Z');
+  it('folds the historical EXPIRED state away at the display boundary', () => {
+    // The enum value survives so old rows need no rewriting; nothing renders it.
+    expect(baseline.displayAttemptStatus('EXPIRED')).toBe('IN_PROGRESS');
+    expect(baseline.displayAttemptStatus('NOT_STARTED')).toBe('NOT_STARTED');
+    expect(baseline.displayAttemptStatus('SUBMITTED')).toBe('SUBMITTED');
+  });
+
+  it('offers only the reachable states as current participation', () => {
+    expect([...baseline.BASELINE_ACTIVE_ATTEMPT_STATUSES]).not.toContain('EXPIRED');
   });
 });
 

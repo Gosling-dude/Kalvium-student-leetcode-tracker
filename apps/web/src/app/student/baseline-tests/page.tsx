@@ -15,7 +15,7 @@
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { BASELINE_TEST_STATUS_LABELS, type StudentBaselineTest } from '@dsa/shared';
-import { Clock, ListChecks } from 'lucide-react';
+import { ListChecks } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import { Badge, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui';
@@ -74,10 +74,6 @@ function TestCard({ test }: { test: StudentBaselineTest }) {
               <ListChecks className="size-3.5" aria-hidden />
               {test.problemCount} problem{test.problemCount === 1 ? '' : 's'}
             </span>
-            <span className="inline-flex items-center gap-1">
-              <Clock className="size-3.5" aria-hidden />
-              {test.durationMinutes} minutes
-            </span>
             <Badge tone="neutral">{BASELINE_TEST_STATUS_LABELS[test.status]}</Badge>
           </div>
           {test.description ? (
@@ -89,11 +85,7 @@ function TestCard({ test }: { test: StudentBaselineTest }) {
           {attempt ? (
             <>
               <p className="text-sm font-medium">
-                {attempt.status === 'SUBMITTED'
-                  ? 'Submitted'
-                  : attempt.status === 'EXPIRED'
-                    ? 'Time up'
-                    : 'In progress'}
+                {attempt.status === 'SUBMITTED' ? 'Handed in' : 'Opened'}
               </p>
               <p className="text-xs text-[var(--color-fg-muted)]">
                 {solved} of {test.problemCount} solved · {attempt.score}/{attempt.maxScore} points
@@ -102,7 +94,7 @@ function TestCard({ test }: { test: StudentBaselineTest }) {
                 href={`/student/baseline-tests/${test.id}`}
                 className="mt-2 inline-flex rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-sm font-medium text-[var(--color-brand-fg)]"
               >
-                {attempt.status === 'IN_PROGRESS' ? 'Continue' : 'View'}
+                {attempt.status === 'SUBMITTED' ? 'View' : 'Continue'}
               </Link>
             </>
           ) : test.canStart ? (

@@ -160,7 +160,7 @@ export class StudentMetricsService {
       position: link.position,
     }));
 
-    const submissions = await this.loadWindowSubmissions(dayKey, assigned, [studentId]);
+    const submissions = await this.loadAssignedSubmissions(assigned, [studentId]);
     return calculateAssignmentCompletion(
       dayKey,
       assigned,
@@ -255,35 +255,95 @@ export class StudentMetricsService {
   }
 
   /**
-   * Total assigned problems this student has ever completed — the optional
-   * programme-specific metric. Distinct from lifetime LeetCode solved, which counts
-   * everything they solve including problems we never assigned.
+   * Distinct assigned problems this student has solved — the programme-specific metric.
+   *
+   * `COUNT(DISTINCT problemId)`, not a sum over days. The programme reuses problems
+   * across assignments, and summing `DailyStatus.solvedCount` counts Two Sum once for
+   * every assignment that ever contained it: a student who has solved 40 distinct
+   * assigned problems reads as 200 because five assignment sets overlapped. The number a
+   * mentor believes they are reading is the distinct one.
+   *
+   * Distinct from lifetime LeetCode solved, which counts everything the student solves
+   * including problems the programme never assigned.
    */
-  async totalAssignmentProblemsCompleted(studentId: string): Promise<number> {
-    const result = await this.prisma.dailyStatus.aggregate({
-      where: { studentId, assignedCount: { gt: 0 } },
-      _sum: { solvedCount: true },
+  async distinctAssignmentProblemsSolved(studentId: string): Promise<number> {
+    const rows = await this.prisma.$queryRaw<{ count: bigint }[]>`
+      SELECT COUNT(DISTINCT dps."problemId") AS count
+      FROM "daily_problem_statuses" dps
+      JOIN "daily_statuses" ds ON ds."id" = dps."dailyStatusId"
+      WHERE ds."studentId"::text = ${studentId} AND dps."status" = 'ACCEPTED'
+    `;
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  // --- 4. Reconciling the denormalised total -------------------------------
+
+  /**
+   * Compare `Student.totalSolved` against the canonical calculation and repair the drift.
+   *
+   * The stored column exists so list views need no joins; it is refreshed by the nightly
+   * rollup, which means it is stale between runs and silently wrong if a rollup fails.
+   * That staleness is the whole of the "the student list and the student page disagree"
+   * report — the page computes live, the list reads the column.
+   *
+   * Repairs are one-directional in the sense that matters: a student the canonical
+   * calculation has **no evidence** for is left alone rather than zeroed, because an
+   * unreadable profile is not a student who has solved nothing.
+   */
+  async reconcileStoredTotals(studentIds?: string[]): Promise<{
+    checked: number;
+    corrected: { studentId: string; name: string; before: number; after: number }[];
+    skippedNoEvidence: number;
+  }> {
+    const students = await this.prisma.student.findMany({
+      where: studentIds && studentIds.length > 0 ? { id: { in: studentIds } } : {},
+      select: { id: true, name: true, totalSolved: true },
     });
-    return result._sum.solvedCount ?? 0;
+
+    const canonical = await this.lifetimeSolvedByStudent(students.map((s) => s.id));
+
+    const corrected: { studentId: string; name: string; before: number; after: number }[] = [];
+    let skippedNoEvidence = 0;
+
+    for (const student of students) {
+      const truth = canonical.get(student.id);
+      if (truth === undefined) {
+        skippedNoEvidence += 1;
+        continue;
+      }
+      if (truth === student.totalSolved) continue;
+
+      await this.prisma.student.update({
+        where: { id: student.id },
+        data: { totalSolved: truth },
+      });
+      corrected.push({
+        studentId: student.id,
+        name: student.name,
+        before: student.totalSolved,
+        after: truth,
+      });
+    }
+
+    return { checked: students.length, corrected, skippedNoEvidence };
   }
 
   // -------------------------------------------------------------------------
 
-  /** Submissions inside an assignment's lookback window, grouped by student. */
-  private async loadWindowSubmissions(
-    dayKey: DayKey,
+  /**
+   * Every submission for the assigned problems, grouped by student — **not** windowed.
+   *
+   * `calculateAssignmentCompletion` applies the lookback itself, to the `inWindow`
+   * figures only. Filtering by date here instead would cap the ever-solved count back to
+   * the window and silently restore the bug: a student who solved the problem before the
+   * assignment was entered would read as not having solved it.
+   */
+  private async loadAssignedSubmissions(
     assigned: AssignedProblemRef[],
     studentIds?: string[],
   ): Promise<Map<string, CompletionSubmission[]>> {
-    const { startDayKey, endDayKey } = assignmentWindow(dayKey, ASSIGNMENT_LOOKBACK_DAYS);
-
     const rows = await this.prisma.submission.findMany({
       where: {
-        dayKey: { gte: startDayKey, lte: endDayKey },
-        submittedAt: {
-          gte: this.time.bounds(startDayKey).start,
-          lt: this.time.bounds(endDayKey).end,
-        },
         titleSlug: { in: assigned.map((a) => a.titleSlug) },
         ...(studentIds && studentIds.length > 0 ? { studentId: { in: studentIds } } : {}),
       },

@@ -17,7 +17,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Check, Download, Search, X } from "lucide-react";
 import { toast } from "sonner";
-import type { BaselineLeaderboardRow } from "@dsa/shared";
+import {
+  BASELINE_ATTEMPT_STATUS_LABELS,
+  displayAttemptStatus,
+  type BaselineLeaderboardRow,
+} from "@dsa/shared";
 
 import { api, downloadFile } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -38,13 +42,13 @@ import {
 
 type SortKey = "rank" | "name" | "squad" | "solved" | "percent";
 
-/** Participation labels. Deliberately never say "0 solved" — that is a different column. */
-const STATUS_LABELS: Record<string, string> = {
-  IN_PROGRESS: "In progress",
-  SUBMITTED: "Completed",
-  EXPIRED: "Expired",
-  NOT_STARTED: "Absent",
-};
+/**
+ * Participation labels, from the shared domain so the screen and the export cannot drift.
+ *
+ * Deliberately not attendance wording: a baseline is not a register, and the old "Absent"
+ * sat one column away from a solved count that frequently contradicted it.
+ */
+const STATUS_LABELS = BASELINE_ATTEMPT_STATUS_LABELS;
 
 /** Green at the top, amber in the middle, red at the bottom — the usual reading order. */
 function scoreTone(
@@ -59,10 +63,14 @@ function scoreTone(
   return "danger";
 }
 
-/** Participation is a fact about attendance, so it never borrows the score's colours. */
+/**
+ * Participation is an observation about the portal, not a result, so it never borrows the
+ * score's colours — and "not opened" is neutral grey rather than anything that reads as a
+ * failure.
+ */
 function participationTone(status: string): "info" | "success" | "neutral" {
   if (status === "SUBMITTED") return "success";
-  if (status === "IN_PROGRESS" || status === "EXPIRED") return "info";
+  if (status === "IN_PROGRESS") return "info";
   return "neutral";
 }
 
@@ -287,10 +295,9 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
             className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-brand)]"
           >
             <option value="ALL">Everyone</option>
-            <option value="SUBMITTED">Submitted</option>
-            <option value="IN_PROGRESS">In progress</option>
-            <option value="EXPIRED">Expired</option>
-            <option value="NOT_STARTED">Absent</option>
+            <option value="SUBMITTED">Handed in</option>
+            <option value="IN_PROGRESS">Opened</option>
+            <option value="NOT_STARTED">Not opened in portal</option>
           </select>
         </div>
 
@@ -374,8 +381,8 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
                     )}
                   </Td>
                   <Td>
-                    <Badge tone={participationTone(row.status)}>
-                      {STATUS_LABELS[row.status] ?? row.status}
+                    <Badge tone={participationTone(displayAttemptStatus(row.status))}>
+                      {STATUS_LABELS[displayAttemptStatus(row.status)]}
                     </Badge>
                   </Td>
                   <Td className="whitespace-nowrap text-xs text-[var(--color-fg-subtle)]">
@@ -441,25 +448,10 @@ function StudentBreakdown({
           <StatTile label="Score" value={`${row.percent}%`} />
         </div>
 
-        {/* What the sitting itself recorded, beside what the student can do now. Shown only
-            when the two differ — when they agree there is nothing to explain, and a second
-            identical number is just noise. */}
-        {detail.data && detail.data.inWindowSolvedCount !== detail.data.solvedCount ? (
-          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-sunken)] p-3 text-xs">
-            <p>
-              <span className="font-medium">During the test:</span>{" "}
-              {detail.data.inWindowSolvedCount}/{detail.data.totalQuestions} —{" "}
-              <span className="font-medium">now:</span> {detail.data.solvedCount}/
-              {detail.data.totalQuestions}. The recorded test result does not change when a
-              problem is solved later; the current figure does.
-            </p>
-          </div>
-        ) : null}
-
         <p className="text-xs text-[var(--color-fg-muted)]">
           Participation:{" "}
           <span className="font-medium">
-            {STATUS_LABELS[row.status] ?? row.status}
+            {STATUS_LABELS[displayAttemptStatus(row.status)]}
           </span>
           {row.lastSuccessfulSyncAt
             ? ` · last synced ${new Date(row.lastSuccessfulSyncAt).toLocaleString()}`

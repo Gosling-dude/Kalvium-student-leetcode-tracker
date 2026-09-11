@@ -48,7 +48,10 @@ const STREAK_HISTORY_DAYS = 400;
 
 interface StudentDayResult {
   studentId: string;
+  /** Distinct assigned problems solved at any time — the assignment-analysis figure. */
   solvedCount: number;
+  /** The same, restricted to the lookback window — the only one streaks may read. */
+  inWindowSolvedCount: number;
   firstSolvedAt: Date | null;
   lastSolvedAt: Date | null;
   completedAt: Date | null;
@@ -59,6 +62,9 @@ interface StudentDayResult {
     solvedAt: Date | null;
     language: string | null;
     attempts: number;
+    inWindowStatus: ProblemStatus;
+    solvedInWindowAt: Date | null;
+    attemptsInWindow: number;
   }[];
 }
 
@@ -168,7 +174,12 @@ export class RollupService {
     const historyFrom = this.time.addDays(dayKey, -STREAK_HISTORY_DAYS);
     const history = await this.prisma.dailyStatus.findMany({
       where: { dayKey: { gte: historyFrom, lt: dayKey } },
-      select: { studentId: true, dayKey: true, solvedCount: true, assignedCount: true },
+      select: {
+        studentId: true,
+        dayKey: true,
+        inWindowSolvedCount: true,
+        assignedCount: true,
+      },
     });
 
     const historyByStudent = new Map<string, StreakDay[]>();
@@ -176,7 +187,9 @@ export class RollupService {
       const list = historyByStudent.get(row.studentId) ?? [];
       list.push({
         dayKey: row.dayKey,
-        solvedCount: row.solvedCount,
+        // The window count, matching what today's row contributes below. Mixing the two
+        // would make a streak depend on which side of this change a day was written on.
+        solvedCount: row.inWindowSolvedCount,
         assignedCount: row.assignedCount,
       });
       historyByStudent.set(row.studentId, list);
@@ -226,10 +239,17 @@ export class RollupService {
       const result = assignment
         ? resultsByAssignment.get(assignment.id)?.get(student.id)
         : undefined;
+      // Two counts, and which one each consumer gets is the whole point of this change.
+      // `solvedCount` answers "has this student solved the assigned problems" and ignores
+      // when; `inWindowSolvedCount` answers "did they work on them that week".
       const solvedCount = result?.solvedCount ?? 0;
+      const inWindowSolvedCount = result?.inWindowSolvedCount ?? 0;
 
+      // Streaks read the window. A problem solved in June is not a day practised in
+      // September, and crediting it would manufacture a streak out of nothing — the same
+      // class of error, in the opposite direction, as the zero this change removes.
       const days = [...(historyByStudent.get(student.id) ?? [])];
-      days.push({ dayKey, solvedCount, assignedCount });
+      days.push({ dayKey, solvedCount: inWindowSolvedCount, assignedCount });
       // Assignment days before the student joined are not misses — drop them rather
       // than let them zero out a streak the student never had a chance to earn.
       const streaks = computeStreaks(days, dayKey, config, { enrolledFromDayKey });
@@ -238,13 +258,16 @@ export class RollupService {
         ? this.time.minuteOfDay(result.completedAt)
         : null;
 
+      // Scored on the window too, and for the same reason: the daily score is a measure
+      // of that day's work, and the difficulty bonus must follow the problems actually
+      // solved that week rather than everything the student has ever cleared.
       const solvedDifficulties = (result?.problemStatuses ?? [])
-        .filter((p) => p.status === 'ACCEPTED')
+        .filter((p) => p.inWindowStatus === 'ACCEPTED')
         .map((p) => difficultyByProblem.get(p.problemId) ?? 'MEDIUM');
 
       const score = computeDailyScore(
         {
-          solvedCount,
+          solvedCount: inWindowSolvedCount,
           assignedCount,
           completionMinuteOfDay: completionMinute,
           solvedDifficulties,
@@ -255,6 +278,12 @@ export class RollupService {
 
       // "Perfect" is always the whole assignment. It must not follow the streak
       // threshold, which is deliberately lenient (one problem is enough).
+      //
+      // Deliberately the ever-solved count: "perfect" means the assignment is cleared,
+      // and a student who had already solved all four problems has cleared it. This is
+      // the one place the two counts could reasonably go either way, and it follows the
+      // assignment rather than the practice measure because that is what the word means
+      // on the tracker.
       const isPerfect = isPerfectDay(solvedCount, assignedCount);
 
       await this.persistDailyStatus({
@@ -265,6 +294,7 @@ export class RollupService {
         batchId: batchIdOnDay,
         assignedCount,
         solvedCount,
+        inWindowSolvedCount,
         score: score.total,
         scoreBreakdown: score.components,
         completedAt: result?.completedAt ?? null,
@@ -305,7 +335,7 @@ export class RollupService {
     const from = this.time.addDays(today, -STREAK_HISTORY_DAYS);
 
     const students = await this.prisma.student.findMany({
-      select: { id: true, createdAt: true },
+      select: { id: true, createdAt: true, totalSolved: true },
     });
 
     const statuses = await this.prisma.dailyStatus.findMany({
@@ -313,7 +343,9 @@ export class RollupService {
       select: {
         studentId: true,
         dayKey: true,
-        solvedCount: true,
+        // The window count, because this feeds `computeStreaks`. `solvedCount` here would
+        // credit a student with a streak day for a problem they solved months earlier.
+        inWindowSolvedCount: true,
         assignedCount: true,
         score: true,
       },
@@ -337,7 +369,7 @@ export class RollupService {
       const streaks = computeStreaks(
         rows.map((r) => ({
           dayKey: r.dayKey,
-          solvedCount: r.solvedCount,
+          solvedCount: r.inWindowSolvedCount,
           assignedCount: r.assignedCount,
         })),
         today,
@@ -345,13 +377,22 @@ export class RollupService {
         { enrolledFromDayKey: this.time.dayKeyOf(student.createdAt) },
       );
 
+      // A student absent from the canonical map has *no evidence* either way — no
+      // accepted submission mirrored and no provider profile total. That is not a
+      // measurement of zero, and overwriting a previously-known total with 0 is exactly
+      // the "sync failure → 0 solved" conversion the design forbids. Keep what we last
+      // knew; a successful sync will raise it, and a genuine 0 stays 0 because the map
+      // does carry an entry for a student whose profile reports zero solved.
+      const canonicalTotal = totalSolvedMap.get(student.id);
+      const totalSolved = canonicalTotal ?? student.totalSolved;
+
       await this.prisma.student.update({
         where: { id: student.id },
         data: {
           currentStreak: streaks.current,
           longestStreak: Math.max(streaks.longest, streaks.current),
           totalScore: rows.reduce((n, r) => n + r.score, 0),
-          totalSolved: totalSolvedMap.get(student.id) ?? 0,
+          totalSolved,
         },
       });
     }
@@ -703,23 +744,22 @@ export class RollupService {
       problem: { id: string; titleSlug: string };
     }[],
   ): Promise<Map<string, StudentDayResult>> {
-    const { startDayKey, endDayKey } = assignmentWindow(dayKey, ASSIGNMENT_LOOKBACK_DAYS);
-    const windowStart = this.time.bounds(startDayKey).start;
-    const windowEnd = this.time.bounds(endDayKey).end;
-
     const assigned: AssignedProblemRef[] = assignedProblems.map((link) => ({
       problemId: link.problem.id,
       titleSlug: link.problem.titleSlug.toLowerCase(),
       position: link.position,
     }));
 
+    // No date filter. The assignment *date* decides which day a question belongs to; the
+    // student's whole LeetCode history decides whether it is solved. Narrowing this query
+    // to the lookback window is precisely the bug — it caps `solvedCount` back to the
+    // window before `calculateAssignmentCompletion` ever sees the rows, and no amount of
+    // correctness downstream can recover a submission that was never loaded.
+    //
+    // Bounded by the assigned slugs (four per day) on `submissions_titleSlug_idx`, so
+    // this reads a few hundred rows rather than the whole mirror.
     const submissions = await this.prisma.submission.findMany({
       where: {
-        // `dayKey` is the indexed fast path; the timestamp bounds additionally guard
-        // against a stale dayKey written by an earlier run under a different program
-        // timezone. Both are expressed in program-local (Asia/Kolkata) days.
-        dayKey: { gte: startDayKey, lte: endDayKey },
-        submittedAt: { gte: windowStart, lt: windowEnd },
         titleSlug: { in: assigned.map((a) => a.titleSlug) },
       },
       select: {
@@ -753,6 +793,7 @@ export class RollupService {
       results.set(studentId, {
         studentId,
         solvedCount: completion.solvedCount,
+        inWindowSolvedCount: completion.inWindowSolvedCount,
         firstSolvedAt: completion.firstSolvedAt,
         lastSolvedAt: completion.lastSolvedAt,
         completedAt: completion.completedAt,
@@ -763,6 +804,9 @@ export class RollupService {
           solvedAt: p.solvedAt,
           language: p.language,
           attempts: p.attempts,
+          inWindowStatus: p.inWindowStatus as ProblemStatus,
+          solvedInWindowAt: p.solvedInWindowAt,
+          attemptsInWindow: p.attemptsInWindow,
         })),
       });
     }
@@ -780,6 +824,9 @@ export class RollupService {
       solvedAt: null,
       language: null,
       attempts: 0,
+      inWindowStatus: 'NOT_ATTEMPTED' as ProblemStatus,
+      solvedInWindowAt: null,
+      attemptsInWindow: 0,
     }));
   }
 
@@ -791,6 +838,7 @@ export class RollupService {
     batchId: string | null;
     assignedCount: number;
     solvedCount: number;
+    inWindowSolvedCount: number;
     score: number;
     scoreBreakdown: unknown;
     completedAt: Date | null;
@@ -838,6 +886,7 @@ export class RollupService {
       campusId,
       assignedCount: input.assignedCount,
       solvedCount: input.solvedCount,
+      inWindowSolvedCount: input.inWindowSolvedCount,
       score: input.score,
       scoreBreakdown: input.scoreBreakdown as Prisma.InputJsonValue,
       completedAt: input.completedAt,
@@ -886,6 +935,9 @@ export class RollupService {
           solvedAt: problem.solvedAt,
           language: problem.language,
           attempts: problem.attempts,
+          inWindowStatus: problem.inWindowStatus,
+          solvedInWindowAt: problem.solvedInWindowAt,
+          attemptsInWindow: problem.attemptsInWindow,
         },
         update: {
           position: problem.position,
@@ -893,6 +945,9 @@ export class RollupService {
           solvedAt: problem.solvedAt,
           language: problem.language,
           attempts: problem.attempts,
+          inWindowStatus: problem.inWindowStatus,
+          solvedInWindowAt: problem.solvedInWindowAt,
+          attemptsInWindow: problem.attemptsInWindow,
         },
       });
     }

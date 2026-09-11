@@ -1019,7 +1019,22 @@ model DailyStatus {
   batchId  String? @db.Uuid
 
   assignedCount Int @default(0)
+  /// Distinct assigned problems this student has **ever** solved — the figure the
+  /// assignment analysis, the mentor tracker and every report read.
+  ///
+  /// "Ever" is load-bearing. An assignment dated 7 Sep entered into the tracker on the
+  /// 11th must credit a student who solved its problems on the 5th, and it does, because
+  /// no timestamp condition is applied to this number at all (see
+  /// `calculateAssignmentCompletion`).
   solvedCount   Int @default(0)
+  /// The same count restricted to the assignment's lookback window, `[D-2, D]`.
+  ///
+  /// Separate column rather than a derived filter because the two answer different
+  /// questions and the streak may only ever read this one: a problem solved in June is
+  /// not evidence that the student practised in September, and letting it extend a streak
+  /// would fabricate activity exactly as surely as discarding it fabricated a zero.
+  /// Always `<= solvedCount`, enforced by `daily_statuses_in_window_not_above_solved`.
+  inWindowSolvedCount Int @default(0)
 
   score          Int   @default(0)
   /// Labelled `ScoreComponent[]`, so the UI can explain a score without recomputing it.
@@ -1075,12 +1090,24 @@ model DailyProblemStatus {
   dailyStatusId String        @db.Uuid
   problemId     String        @db.Uuid
   position      Int
+  /// Ever-solved outcome: `ACCEPTED` whenever an accepted submission exists for this
+  /// problem at any point in the student's history.
   status        ProblemStatus @default(NOT_ATTEMPTED)
+  /// Earliest accepted submission, at any time. May long predate the assignment day.
   solvedAt      DateTime?
   language      String?
   runtime       String?
   memory        String?
+  /// Submissions seen for this problem at any time, accepted or not.
   attempts      Int           @default(0)
+
+  /// The same outcome restricted to the assignment's lookback window — what the student
+  /// did *around* the day the work was set. `NOT_ATTEMPTED` here alongside `ACCEPTED`
+  /// above is the normal shape for a problem solved months earlier, and a mentor reading
+  /// the two together learns something neither says alone.
+  inWindowStatus   ProblemStatus @default(NOT_ATTEMPTED)
+  solvedInWindowAt DateTime?
+  attemptsInWindow Int           @default(0)
 
   dailyStatus DailyStatus @relation(fields: [dailyStatusId], references: [id], onDelete: Cascade)
   problem     Problem     @relation(fields: [problemId], references: [id], onDelete: Cascade)
@@ -1609,11 +1636,19 @@ model BaselineTest {
   campusId String? @db.Uuid
   batchId  String? @db.Uuid
 
-  /// Wall-clock window. `opensAt`/`closesAt` bound which submissions can count towards
-  /// the test; `durationMinutes` bounds one student's individual attempt from the moment
-  /// they start it. A student who starts late gets their full duration but is still cut
-  /// off at `closesAt`.
+  /// **Legacy. Nothing reads this.** A baseline used to grade only the submissions
+  /// inside `startedAt + durationMinutes`, which discarded solutions students had
+  /// genuinely written and reported a prepared cohort as 0/4. Grading now applies no
+  /// time filter at all, so the duration decides nothing.
+  ///
+  /// The column is kept rather than dropped because it records what the tests that were
+  /// actually sat were configured with, and deleting it would rewrite that history. It
+  /// is not settable through the API and is absent from every screen.
   durationMinutes Int       @default(60)
+  /// When the test opens and closes for *starting* an attempt. Neither bounds which
+  /// submissions count — a solve from before `opensAt` or after `closesAt` is still a
+  /// solve. `opensAt` is used by the `SOLVED_BEFORE_TEST` risk signal, which reports
+  /// when a problem was first solved without changing the score.
   opensAt         DateTime?
   closesAt        DateTime?
 
@@ -1686,9 +1721,10 @@ model BaselineTestAttempt {
 
   startedAt   DateTime  @default(now())
   submittedAt DateTime?
-  /// When the individual window closes: `startedAt + durationMinutes`, clamped to the
-  /// test's `closesAt`. Stored rather than recomputed so a later change to the test's
-  /// duration cannot retroactively shorten or extend an attempt already under way.
+  /// **Legacy. Null on every attempt started since the clock was removed.** It recorded
+  /// when an attempt's grading window closed, back when one existed. Retained so the
+  /// attempts taken under the old rule keep the timestamps they were taken with; nothing
+  /// reads it, and no attempt expires any more.
   expiresAt   DateTime?
 
   solvedCount      Int  @default(0)

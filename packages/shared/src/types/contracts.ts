@@ -809,7 +809,13 @@ export interface StudentMetrics {
   currentDsaStreak: number;
   longestDsaStreak: number;
   /** Assigned problems completed across the whole programme. */
-  totalAssignmentProblemsCompleted: number;
+  /**
+   * Distinct assigned problems this student has solved, counted once each.
+   *
+   * Not a sum over assignment days: the programme reuses problems, so summing would
+   * report a student who solved 40 distinct problems as having solved 200.
+   */
+  distinctAssignmentProblemsSolved: number;
 }
 
 export interface StudentProfile extends StudentSummary {
@@ -1435,12 +1441,6 @@ export interface BaselineLeaderboardRow {
   notSolvedCount: number;
   /** Problems touched without an accepted answer. */
   attemptedCount: number;
-  /**
-   * Problems solved *inside* the student's own attempt window — what the test itself
-   * measured, as opposed to what the student can do. Zero for anyone who never sat it.
-   * Kept beside `solvedCount` rather than replacing it so both questions stay answerable.
-   */
-  inWindowSolvedCount: number;
   /** Weighted points earned — difficulty-scaled, for the mentor report. */
   score: number;
   maxScore: number;
@@ -1522,7 +1522,6 @@ export interface BaselineStudentResult {
   /** Participation. Independent of `solvedCount` — see `BaselineLeaderboardRow.status`. */
   status: BaselineAttemptStatus;
   attempted: boolean;
-  inWindowSolvedCount: number;
   syncStatus: SyncStatus | null;
   lastSuccessfulSyncAt: string | null;
   performanceKnown: boolean;

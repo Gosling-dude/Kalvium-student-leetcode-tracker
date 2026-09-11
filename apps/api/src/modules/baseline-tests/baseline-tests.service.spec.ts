@@ -269,19 +269,22 @@ describe('starting an attempt', () => {
     );
   });
 
-  it('clamps the window to the test close time for a late starter', async () => {
+  it('starts no clock, even on a test with a close time', async () => {
+    // A late starter is not given a shorter test, because there is no test length to
+    // shorten. `expiresAt` is not written at all: nothing expires, and a student who
+    // solves a problem after the test closes is still a student who solved it.
     const { service, prisma } = makeService({
       tests: [baselineTest({ closesAt: new Date('2026-08-22T10:15:00Z') })],
     });
     await service.startAttempt('s-srm', 'test-1');
 
     const call = prisma.baselineTestAttempt.create.mock.calls[0]![0] as {
-      data: { expiresAt: Date };
+      data: Record<string, unknown>;
     };
-    expect(call.data.expiresAt.toISOString()).toBe('2026-08-22T10:15:00.000Z');
+    expect(call.data).not.toHaveProperty('expiresAt');
   });
 
-  it('resumes rather than restarting, so a refresh cannot reset the clock', async () => {
+  it('resumes rather than restarting, so a refresh cannot lose the attempt', async () => {
     const { service, prisma } = makeService({
       attempt: {
         id: 'attempt-1',

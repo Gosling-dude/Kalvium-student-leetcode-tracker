@@ -86,8 +86,22 @@ export class StudentsService {
       this.prisma.student.count({ where }),
     ]);
 
+    // `Student.totalSolved` is a cache the nightly rollup refreshes. Reading it straight
+    // out is how the directory came to disagree with the student page, which computes the
+    // same number live — the two were never different definitions, just different ages.
+    // One grouped query over the page's own ids (at most `pageSize` students) settles it,
+    // so every surface shows the canonical figure.
+    const canonical = await this.metrics.lifetimeSolvedByStudent(rows.map((row) => row.id));
+
     return paginate(
-      rows.map((row) => this.toSummary(row as StudentWithRelations)),
+      rows.map((row) => {
+        const summary = this.toSummary(row as StudentWithRelations);
+        // `undefined` means the canonical calculation holds no evidence for this student
+        // — no mirrored submission, no provider profile. Keep the stored value rather
+        // than displaying a zero we cannot support.
+        const truth = canonical.get(row.id);
+        return truth === undefined ? summary : { ...summary, totalSolved: truth };
+      }),
       total,
       query.page,
       query.pageSize,
@@ -126,7 +140,12 @@ export class StudentsService {
       include: STUDENT_INCLUDE,
     });
     if (!student) throw new NotFoundException(`Student ${id} was not found`);
-    return this.toSummary(student as StudentWithRelations);
+
+    const summary = this.toSummary(student as StudentWithRelations);
+    // Same canonical overlay as the directory, for the same reason: a single-student
+    // fetch and a list row must not report different totals for the same person.
+    const truth = (await this.metrics.lifetimeSolvedByStudent([id])).get(id);
+    return truth === undefined ? summary : { ...summary, totalSolved: truth };
   }
 
   async create(dto: CreateStudentDto): Promise<StudentSummary> {
@@ -458,7 +477,7 @@ export class StudentsService {
         this.metrics.calculateStudentLeetcodeTotalSolved(id),
         this.metrics.assignmentMetricsFor(id, today),
         this.metrics.calculateStudentDsaStreak(id, today),
-        this.metrics.totalAssignmentProblemsCompleted(id),
+        this.metrics.distinctAssignmentProblemsSolved(id),
       ]);
 
     const context = {
@@ -546,7 +565,7 @@ export class StudentsService {
         },
         currentDsaStreak: dsaStreak.current,
         longestDsaStreak: Math.max(student.longestStreak, dsaStreak.longest),
-        totalAssignmentProblemsCompleted: assignmentProblemsCompleted,
+        distinctAssignmentProblemsSolved: assignmentProblemsCompleted,
       },
       heatmap: statuses.map((s) => ({
         dayKey: s.dayKey,

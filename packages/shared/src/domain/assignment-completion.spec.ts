@@ -62,6 +62,15 @@ function solvedOn(dayKey: string, submissions: CompletionSubmission[], assigned 
   return calculateAssignmentCompletion(dayKey, assigned, submissions).solvedCount;
 }
 
+/** The practice measure: solved *inside* `[D-2, D]`. */
+function solvedInWindowOn(
+  dayKey: string,
+  submissions: CompletionSubmission[],
+  assigned = ONE,
+): number {
+  return calculateAssignmentCompletion(dayKey, assigned, submissions).inWindowSolvedCount;
+}
+
 describe('the lookback window', () => {
   it('spans D-2 through D inclusive', () => {
     expect(assignmentWindow('2026-08-10')).toEqual({
@@ -112,12 +121,20 @@ describe('TEST 1-4 — how far back a solve still counts', () => {
     ).toBe(1);
   });
 
-  it('TEST 4: assignment 10 Aug, solved 7 Aug -> NOT completed', () => {
-    expect(
-      solvedOn('2026-08-10', [
-        submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-07'),
-      ]),
-    ).toBe(0);
+  it('TEST 4: assignment 10 Aug, solved 7 Aug -> solved, but not practised that week', () => {
+    // The solve predates the window, which used to erase it. It is still a solve: the
+    // assignment asks whether the student can do the problem, and they demonstrably can.
+    const outside = [submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-08-07')];
+    expect(solvedOn('2026-08-10', outside)).toBe(1);
+    // The window figure is what streaks read, and it stays 0 — solving something on the
+    // 7th is not evidence the student worked on the 10th.
+    expect(solvedInWindowOn('2026-08-10', outside)).toBe(0);
+  });
+
+  it('TEST 4b: a solve from months before the assignment still counts', () => {
+    const longAgo = [submission('two-sum-ii-input-array-is-sorted', 'ACCEPTED', '2026-05-02')];
+    expect(solvedOn('2026-08-10', longAgo)).toBe(1);
+    expect(solvedInWindowOn('2026-08-10', longAgo)).toBe(0);
   });
 
   it('counts a solve at 23:50 IST on 8 Aug, which is still 8 Aug locally but 18:20 UTC', () => {
@@ -126,7 +143,7 @@ describe('TEST 1-4 — how far back a solve still counts', () => {
     expect(solvedOn('2026-08-10', [late])).toBe(1);
   });
 
-  it('excludes a solve at 00:10 IST on 8 Aug when the window opens on 9 Aug', () => {
+  it('keeps a solve at 00:10 IST on 8 Aug out of the 11 Aug *window*', () => {
     // 00:10 IST on 8 Aug is 18:40 UTC on 7 Aug — a UTC-based window would wrongly
     // place this outside 8 Aug, or wrongly include it for an 11 Aug assignment.
     const justAfterMidnight = submission(
@@ -136,8 +153,10 @@ describe('TEST 1-4 — how far back a solve still counts', () => {
       '00:10',
     );
     expect(justAfterMidnight.submittedAt.toISOString()).toBe('2026-08-07T18:40:00.000Z');
-    expect(solvedOn('2026-08-10', [justAfterMidnight])).toBe(1);
-    expect(solvedOn('2026-08-11', [justAfterMidnight])).toBe(0);
+    expect(solvedInWindowOn('2026-08-10', [justAfterMidnight])).toBe(1);
+    expect(solvedInWindowOn('2026-08-11', [justAfterMidnight])).toBe(0);
+    // Outside the 11 Aug window, but still a problem this student has solved.
+    expect(solvedOn('2026-08-11', [justAfterMidnight])).toBe(1);
   });
 });
 
@@ -210,10 +229,14 @@ describe('the worked example from the bug report', () => {
 
   const result = calculateAssignmentCompletion('2026-08-10', ASSIGNED, submissions);
 
-  it('scores 2 of 4', () => {
-    expect(result.solvedCount).toBe(2);
+  it('scores 3 of 4 — the 5 Aug solve counts, the wrong answer does not', () => {
+    expect(result.solvedCount).toBe(3);
     expect(result.assignedCount).toBe(4);
     expect(result.isComplete).toBe(false);
+  });
+
+  it('scores 2 of 4 on the practice measure, which respects the window', () => {
+    expect(result.inWindowSolvedCount).toBe(2);
   });
 
   it('167 is completed from a solve two days earlier', () => {
@@ -232,10 +255,16 @@ describe('the worked example from the bug report', () => {
     );
   });
 
-  it('26 is not completed — solved 5 Aug, outside the window', () => {
+  it('26 is solved — 5 Aug is outside the window but inside the student’s history', () => {
     const p = result.problems.find((x) => x.problemId === 'p26')!;
-    expect(p.status).toBe('NOT_ATTEMPTED');
-    expect(p.attempts).toBe(0);
+    expect(p.status).toBe('ACCEPTED');
+    expect(p.solvedOnDayKey).toBe('2026-08-05');
+    expect(p.attempts).toBe(1);
+    // …and reads as untouched on the practice measure, which is the honest answer to
+    // "did they work on this assignment".
+    expect(p.inWindowStatus).toBe('NOT_ATTEMPTED');
+    expect(p.attemptsInWindow).toBe(0);
+    expect(p.solvedInWindowAt).toBeNull();
   });
 
   it('reports no completedAt, because the day was not fully cleared', () => {
@@ -509,14 +538,19 @@ describe('assignment entered after its own date', () => {
     expect(result.problems[0]!.solvedOnDayKey).toBe('2026-08-18');
   });
 
-  it('does not count a solve from outside the lookback window', () => {
+  it('counts a solve from outside the lookback window, and keeps it out of the window figure', () => {
+    // The rule the programme asked for: the assignment *date* decides which day a
+    // question belongs to, the student's LeetCode history decides whether it is solved.
+    // A submission timestamp is never a condition on either.
     const result = calculateAssignmentCompletion(
       DAY,
       [problem(1)],
       [submission(1, '2026-08-17', '12:00')],
     );
-    expect(result.solvedCount).toBe(0);
-    expect(result.problems[0]!.status).toBe('NOT_ATTEMPTED');
+    expect(result.solvedCount).toBe(1);
+    expect(result.problems[0]!.status).toBe('ACCEPTED');
+    expect(result.inWindowSolvedCount).toBe(0);
+    expect(result.problems[0]!.inWindowStatus).toBe('NOT_ATTEMPTED');
   });
 
   it('keeps a 23:30 IST solve on its own program day rather than sliding it to the next', () => {

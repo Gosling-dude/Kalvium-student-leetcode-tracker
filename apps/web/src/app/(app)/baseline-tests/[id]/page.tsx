@@ -110,7 +110,6 @@ export default function BaselineTestDetailPage({
             <span>·</span>
             <span>{test.audienceLabel}</span>
             <span>·</span>
-            <span>{test.durationMinutes} min</span>
             <Badge tone="neutral">{BASELINE_TEST_STATUS_LABELS[test.status]}</Badge>
           </div>
         </div>

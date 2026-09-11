@@ -8,11 +8,20 @@
  * Three rules encode the business requirement, and each exists because the naive
  * alternative produced wrong numbers in production:
  *
- * 1. **Backwards lookback.** Assignments are frequently published *after* students have
- *    already started working — sometimes a day or two late. Matching a submission's day
- *    against the assignment's day (`submission.dayKey === assignment.dayKey`) therefore
- *    marked genuinely-solved problems as missed. Completion instead looks back over a
- *    window ending on the assignment day: `[D - LOOKBACK_DAYS, D]`.
+ * 1. **Solved is solved, whenever it happened.** An assignment dated D asks whether the
+ *    student can solve its problems; a submission's timestamp is evidence of that
+ *    ability, never a condition on it. So the per-problem outcome this module reports
+ *    carries **no time filter at all** — not the assignment day, not the lookback, and
+ *    emphatically not `assignment.createdAt`. A problem accepted on 5 Sep counts for the
+ *    7 Sep assignment that was entered into the tracker on the 11th.
+ *
+ *    The dated window has not gone away, it has been *separated*: every figure whose
+ *    name starts `inWindow` answers the second question — did the student do this work
+ *    around the day it was set — over `[D - LOOKBACK_DAYS, D]`. Streaks and the daily
+ *    score read those, because solving Two Sum in June cannot make September a day the
+ *    student practised. Both numbers sit on the same row and neither is derivable from
+ *    the other; collapsing them is what made an entire cohort read 0/4 on problems they
+ *    had solved.
  *
  * 2. **Problem identity, not title.** Titles get re-worded and differ in punctuation and
  *    case between the assignment record and the submission mirror. Matching is done on
@@ -68,36 +77,73 @@ export interface CompletionSubmission {
   language?: string | null;
 }
 
-/** Per-problem outcome for one student on one assignment day. */
+/**
+ * Per-problem outcome for one student on one assignment day.
+ *
+ * The unprefixed fields answer "can this student solve this problem", over their whole
+ * submission history. The `inWindow` fields answer "did they do it around the day it was
+ * set", over `[D - LOOKBACK_DAYS, D]`. A problem can be `ACCEPTED` with
+ * `inWindowStatus: 'NOT_ATTEMPTED'` — solved last month, untouched this week — and both
+ * statements are true.
+ */
 export interface ProblemCompletion {
   problemId: string;
   titleSlug: string;
   position: number;
+  /** Ever-solved outcome. `ACCEPTED` whenever an accepted submission exists, at any time. */
   status: CompletionStatus;
-  /** Earliest accepted submission for this problem inside the window. */
+  /** Earliest accepted submission for this problem, at any time. */
   solvedAt: Date | null;
-  /** The program day the accepted submission actually landed on — may precede `D`. */
+  /** The program day that accepted submission landed on — may be long before `D`. */
   solvedOnDayKey: DayKey | null;
   language: string | null;
-  /** Submissions seen for this problem inside the window, accepted or not. */
+  /** Submissions seen for this problem at any time, accepted or not. */
   attempts: number;
+
+  /** The same outcome restricted to the lookback window — the practice measure. */
+  inWindowStatus: CompletionStatus;
+  /** Earliest accepted submission *inside* the window; null when solved only outside it. */
+  solvedInWindowAt: Date | null;
+  /** Submissions seen inside the window, accepted or not. */
+  attemptsInWindow: number;
 }
 
 export interface AssignmentCompletionResult {
   dayKey: DayKey;
-  /** Inclusive window actually searched. */
+  /** Inclusive window the `inWindow` figures were measured over. */
   windowStartDayKey: DayKey;
   windowEndDayKey: DayKey;
   assignedCount: number;
-  /** Distinct assigned problems with an accepted submission in the window. */
+  /**
+   * Distinct assigned problems the student has **ever** solved.
+   *
+   * This is the assignment-analysis figure: a problem accepted before the assignment was
+   * entered into the tracker counts here, which is the entire point.
+   */
   solvedCount: number;
-  /** True only when every assigned problem was solved. Not the streak rule. */
+  /**
+   * Distinct assigned problems solved inside `[D - LOOKBACK_DAYS, D]`.
+   *
+   * The practice measure, and the only one streaks and the daily score may read. Always
+   * `<= solvedCount`.
+   */
+  inWindowSolvedCount: number;
+  /** True when every assigned problem has been solved, at any time. */
   isComplete: boolean;
   problems: ProblemCompletion[];
+  /** Earliest / latest accepted submission inside the window; null when there is none. */
   firstSolvedAt: Date | null;
   lastSolvedAt: Date | null;
-  /** When the *whole* assignment was finished; `null` if it was not. */
+  /**
+   * When the whole assignment was finished **inside the window**; `null` otherwise.
+   *
+   * Deliberately not the ever-solved equivalent: this drives `completionMinute`, the
+   * leaderboard's earliest-finish tiebreak, and a minute-of-day taken from a submission
+   * three months earlier describes nothing about this day.
+   */
   completedAt: Date | null;
+  /** When the whole assignment became complete counting solutions from any time. */
+  everCompletedAt: Date | null;
 }
 
 /**
@@ -156,9 +202,11 @@ function matchesAssigned(submission: CompletionSubmission, assigned: AssignedPro
 /**
  * Evaluate one student's assignment day.
  *
- * `submissions` may contain anything — other problems, other days, other verdicts. This
- * function filters to the window and the assigned set itself, so callers can hand over a
- * batch query result unsorted and unfiltered without risking a double-count.
+ * `submissions` may contain anything — other problems, other days, other verdicts — and
+ * callers are expected to pass the student's **whole** history for the assigned slugs,
+ * not a pre-windowed slice. Anything narrower silently caps `solvedCount` back to the
+ * window and reintroduces the bug this function exists to fix; the window is applied
+ * here, to the `inWindow` figures only.
  */
 export function calculateAssignmentCompletion(
   dayKey: DayKey,
@@ -180,12 +228,15 @@ export function calculateAssignmentCompletion(
       solvedOnDayKey: null,
       language: null,
       attempts: 0,
+      inWindowStatus: 'NOT_ATTEMPTED' as CompletionStatus,
+      solvedInWindowAt: null,
+      attemptsInWindow: 0,
     }));
 
   // Oldest first, so "earliest accepted submission wins" falls out of the iteration
   // order instead of needing a comparison at every step.
   const ordered = submissions
-    .filter((s) => s.dayKey >= startDayKey && s.dayKey <= endDayKey)
+    .slice()
     .sort((a, b) => a.submittedAt.getTime() - b.submittedAt.getTime());
 
   for (const submission of ordered) {
@@ -199,7 +250,10 @@ export function calculateAssignmentCompletion(
     );
     if (!slot) continue;
 
+    const inWindow = submission.dayKey >= startDayKey && submission.dayKey <= endDayKey;
+
     slot.attempts += 1;
+    if (inWindow) slot.attemptsInWindow += 1;
 
     if (submission.status === 'ACCEPTED') {
       // Already solved: a re-solve is the same problem, so it must not move the
@@ -210,21 +264,42 @@ export function calculateAssignmentCompletion(
         slot.solvedOnDayKey = submission.dayKey;
         slot.language = submission.language ?? null;
       }
-    } else if (slot.status === 'NOT_ATTEMPTED') {
-      slot.status = 'ATTEMPTED_NOT_ACCEPTED';
-      slot.language = submission.language ?? null;
+      if (inWindow && slot.inWindowStatus !== 'ACCEPTED') {
+        slot.inWindowStatus = 'ACCEPTED';
+        slot.solvedInWindowAt = submission.submittedAt;
+        // A problem first solved outside the window but re-solved inside it should
+        // report the language the student actually used most recently in the window.
+        slot.language = submission.language ?? slot.language;
+      }
+    } else {
+      if (slot.status === 'NOT_ATTEMPTED') {
+        slot.status = 'ATTEMPTED_NOT_ACCEPTED';
+        slot.language = slot.language ?? submission.language ?? null;
+      }
+      if (inWindow && slot.inWindowStatus === 'NOT_ATTEMPTED') {
+        slot.inWindowStatus = 'ATTEMPTED_NOT_ACCEPTED';
+      }
     }
   }
 
   const accepted = problems.filter((p) => p.status === 'ACCEPTED');
-  const solvedTimes = accepted
+  const acceptedInWindow = problems.filter((p) => p.inWindowStatus === 'ACCEPTED');
+
+  const windowSolveTimes = acceptedInWindow
+    .map((p) => p.solvedInWindowAt)
+    .filter((d): d is Date => d !== null)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  const everSolveTimes = accepted
     .map((p) => p.solvedAt)
     .filter((d): d is Date => d !== null)
     .sort((a, b) => a.getTime() - b.getTime());
 
   const assignedCount = problems.length;
   const solvedCount = accepted.length;
+  const inWindowSolvedCount = acceptedInWindow.length;
   const isComplete = assignedCount > 0 && solvedCount >= assignedCount;
+  const completedInWindow = assignedCount > 0 && inWindowSolvedCount >= assignedCount;
 
   return {
     dayKey,
@@ -232,11 +307,15 @@ export function calculateAssignmentCompletion(
     windowEndDayKey: endDayKey,
     assignedCount,
     solvedCount,
+    inWindowSolvedCount,
     isComplete,
     problems,
-    firstSolvedAt: solvedTimes[0] ?? null,
-    lastSolvedAt: solvedTimes[solvedTimes.length - 1] ?? null,
-    completedAt: isComplete ? (solvedTimes[solvedTimes.length - 1] ?? null) : null,
+    firstSolvedAt: windowSolveTimes[0] ?? null,
+    lastSolvedAt: windowSolveTimes[windowSolveTimes.length - 1] ?? null,
+    completedAt: completedInWindow
+      ? (windowSolveTimes[windowSolveTimes.length - 1] ?? null)
+      : null,
+    everCompletedAt: isComplete ? (everSolveTimes[everSolveTimes.length - 1] ?? null) : null,
   };
 }
 
