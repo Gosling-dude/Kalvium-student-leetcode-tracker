@@ -1280,6 +1280,12 @@ export interface BaselineTestSummary {
   batchCode: string | null;
   /** `SRM University — Foundation Level`. */
   audienceLabel: string;
+  /**
+   * **Legacy. Nothing reads this and nothing may.** Grading applies no time filter: a
+   * baseline asks whether the student can solve the problem, so a solve counts whenever
+   * it was written. The field survives because the column does — it records how the tests
+   * that were actually sat were configured — and is not settable through the API.
+   */
   durationMinutes: number;
   opensAt: string | null;
   closesAt: string | null;
@@ -1321,6 +1327,7 @@ export interface StudentBaselineTest {
   dayKey: DayKey;
   description: string | null;
   instructions: string | null;
+  /** Legacy, and never shown to a student — there is no timer. See `BaselineTestSummary`. */
   durationMinutes: number;
   opensAt: string | null;
   closesAt: string | null;

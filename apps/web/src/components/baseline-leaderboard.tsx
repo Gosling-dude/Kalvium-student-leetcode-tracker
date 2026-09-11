@@ -175,7 +175,7 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
       <Card>
         <CardHeader
           title="Student leaderboard"
-          description="Solved counts every accepted LeetCode solution for these problems, whenever it was written — not only those submitted during the test. Participation is tracked separately: a student can be Absent and still have solved most of the set."
+          description="Solved counts every accepted LeetCode solution for these problems, whenever it was written — before the test, during it, or since. Participation is tracked separately and enters no score: a student who never opened the test can still have solved most of the set."
           action={
             // Fetched with the access token and saved from a blob, not linked. The export
             // endpoint is authenticated, and a plain <a href> carries no Authorization
@@ -191,10 +191,10 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
         />
 
         {board.data ? (
-          // Two blocks, labelled, never interleaved. "Absent" and "solved nothing" are
-          // different facts about different things, and a single row of tiles mixing them
-          // is how a mentor concludes that 64 students failed when 64 students simply did
-          // not open the test.
+          // Two blocks, labelled, never interleaved. "Never opened it" and "solved
+          // nothing" are different facts about different things, and a single row of tiles
+          // mixing them is how a mentor concludes that 64 students failed when 64 students
+          // simply did not open the test.
           <div className="space-y-4 border-b border-[var(--color-border)] p-5">
             <div>
               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-subtle)]">
@@ -202,14 +202,17 @@ export function BaselineLeaderboard({ testId }: { testId: string }) {
               </h3>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatTile label="Eligible" value={board.data.totalStudents} />
-                <StatTile label="Started" value={board.data.attemptedStudents} />
+                <StatTile label="Opened" value={board.data.attemptedStudents} />
                 <StatTile
-                  label="Completed"
+                  label="Handed in"
                   value={
                     board.data.rows.filter((row) => row.status === "SUBMITTED").length
                   }
                 />
-                <StatTile label="Absent" value={board.data.notStartedStudents} />
+                {/* Not "Absent". This counts who did not open the test in the portal,
+                    which says nothing about whether they can solve the problems — the
+                    block below answers that, and the two frequently disagree. */}
+                <StatTile label="Not opened" value={board.data.notStartedStudents} />
               </div>
             </div>
 
