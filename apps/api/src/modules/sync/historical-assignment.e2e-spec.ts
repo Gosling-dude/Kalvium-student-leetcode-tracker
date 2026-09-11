@@ -144,11 +144,12 @@ async function evaluate(
     position: link.position,
   }));
 
-  const { startDayKey, endDayKey } = assignmentWindow(DAY, ASSIGNMENT_LOOKBACK_DAYS);
+  // No date bound, exactly as `RollupService.evaluateDay` loads it. Windowing here would
+  // make the helper disagree with the code it is meant to mirror, and would cap
+  // `solvedCount` back to the window before the rule under test ever saw the rows.
   const submissions = await prisma.submission.findMany({
     where: {
       studentId,
-      dayKey: { gte: startDayKey, lte: endDayKey },
       titleSlug: { in: assigned.map((a) => a.titleSlug) },
     },
   });
@@ -254,14 +255,20 @@ describe('E–K: submission timing against a late-added assignment', () => {
     expect(result.problems[0]!.solvedOnDayKey).toBe('2099-08-18');
   });
 
-  it('H: does not count a solve outside the lookback', async () => {
+  it('H: counts a solve outside the lookback, and keeps it out of the window figure', async () => {
     const audience = audiences.velsFoundation!;
     const student = await makeStudent('h-outside', audience.campusId, audience.batchId);
     await submit(student, audience.slugs[0]!, '2099-08-17', '12:00');
 
     const result = await evaluate(student, audience);
-    expect(result.solvedCount).toBe(0);
-    expect(result.problems[0]!.status).toBe('NOT_ATTEMPTED');
+    // The programme's rule: the assignment date decides which day a question belongs to,
+    // the student's history decides whether it is solved.
+    expect(result.solvedCount).toBe(1);
+    expect(result.problems[0]!.status).toBe('ACCEPTED');
+    // …and the practice measure, which streaks read, still says they did nothing that
+    // week. Both facts, separately reported.
+    expect(result.inWindowSolvedCount).toBe(0);
+    expect(result.problems[0]!.inWindowStatus).toBe('NOT_ATTEMPTED');
   });
 
   it('I: a 23:30 IST solve stays on its own program day', async () => {

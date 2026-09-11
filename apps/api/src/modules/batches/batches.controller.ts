@@ -41,22 +41,41 @@ export class BatchesController {
 
   @Get()
   @ApiOperation({ summary: 'All batches, in display order. Optionally one campus only.' })
-  async findAll(@Query() query: ListBatchesQueryDto) {
+  async findAll(@Query() query: ListBatchesQueryDto, @CurrentUser() user: RequestUser) {
     const campusId = await this.campuses.resolveSelector(query.campus);
-    return this.batches.findAll(query.includeArchived ?? false, campusId);
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    const narrowed = this.mentorScope.narrow(campusId, allowed);
+    // A batch list is a picker. Offering batches the caller cannot open makes the filter
+    // look broken and names another campus's cohorts into the bargain.
+    if (narrowed.deny) return [];
+    return this.batches.findAll(
+      query.includeArchived ?? false,
+      narrowed.campusId ?? null,
+      narrowed.campusIds,
+    );
   }
 
   @Get('stats')
   @ApiOperation({ summary: 'Per-batch student counts, completion, belt average and cohorts' })
-  async stats(@Query() query: BatchStatsQueryDto) {
+  async stats(@Query() query: BatchStatsQueryDto, @CurrentUser() user: RequestUser) {
     const campusId = await this.campuses.resolveSelector(query.campus);
-    return this.batches.getStats(query.dayKey, campusId);
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+    const narrowed = this.mentorScope.narrow(campusId, allowed);
+    if (narrowed.deny) return [];
+    return this.batches.getStats(query.dayKey, narrowed.campusId ?? null, narrowed.campusIds);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'A single batch' })
-  findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.batches.findById(id);
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    const batch = await this.batches.findById(id);
+    // Fetching by id skips the list filter, so the row's own campus is checked here.
+    this.mentorScope.assertCampusAllowed(
+      batch.campusId,
+      await this.mentorScope.allowedCampusIds(user),
+      { entity: 'Batch', id },
+    );
+    return batch;
   }
 
   /**
@@ -175,11 +194,18 @@ export class BatchesController {
 @ApiBearerAuth()
 @Controller('students')
 export class StudentBatchController {
-  constructor(private readonly batches: BatchesService) {}
+  constructor(
+    private readonly batches: BatchesService,
+    private readonly mentorScope: MentorScopeService,
+  ) {}
 
   @Get(':id/batch-history')
   @ApiOperation({ summary: "A student's batch placements over time, newest first" })
-  history(@Param('id', ParseUUIDPipe) id: string) {
+  async history(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    // Keyed by student id, so the directory's campus filter never runs. Placement
+    // history names batches and the dates a student moved between them — a read of
+    // another campus's roster, one student at a time.
+    await this.mentorScope.assertStudentVisible(user, id);
     return this.batches.getHistory(id);
   }
 

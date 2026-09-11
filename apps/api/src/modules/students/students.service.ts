@@ -621,10 +621,28 @@ export class StudentsService {
    * itself when a campus is chosen, rather than offering two identically-named
    * "Foundation Level" options the user cannot tell apart (§10, §13).
    */
-  async getFilterOptions() {
+  /**
+   * The options every filter control on the directory is built from.
+   *
+   * @param viewerCampusIds The campuses the caller may read, or `null` for an admin.
+   *
+   * Scoped for two reasons, and the second is the one that gets reported as a bug. It is
+   * a **leak**: the unscoped version handed a mentor every campus's name, every batch and
+   * squad in the programme, and a live student count against each — enough to reconstruct
+   * the size and shape of cohorts they have no grant on, from a filter dropdown. And it
+   * is **wrong**: a mentor could pick an option that the directory then refuses, so the
+   * filter appeared to do nothing. An option a caller cannot act on does not belong in
+   * their picker.
+   */
+  async getFilterOptions(viewerCampusIds: string[] | null = null) {
+    // `null` is "unrestricted", `[]` is "nothing" — kept apart deliberately, because
+    // collapsing them is how a scoped query becomes an unfiltered one.
+    const campusScope = viewerCampusIds === null ? {} : { id: { in: viewerCampusIds } };
+    const ownedScope = viewerCampusIds === null ? {} : { campusId: { in: viewerCampusIds } };
+
     const [campuses, batches, squads, squadNumbers] = await this.prisma.$transaction([
       this.prisma.campus.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...campusScope },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
         include: {
           _count: {
@@ -636,7 +654,7 @@ export class StudentsService {
         },
       }),
       this.prisma.batch.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: 'ACTIVE', ...ownedScope },
         orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
         include: {
           campus: { select: { name: true, code: true } },
@@ -645,6 +663,10 @@ export class StudentsService {
         },
       }),
       this.prisma.squad.findMany({
+        // A squad with no campus belongs to no mentor's scope, exactly as an unplaced
+        // student does — "nobody is accountable for it" must not become "everybody can
+        // see it".
+        where: ownedScope,
         orderBy: { name: 'asc' },
         include: {
           batch: { select: { name: true } },
@@ -654,7 +676,7 @@ export class StudentsService {
         },
       }),
       this.prisma.squad.findMany({
-        where: { students: { some: { status: 'ACTIVE' } } },
+        where: { students: { some: { status: 'ACTIVE' } }, ...ownedScope },
         select: { name: true, campusId: true },
         orderBy: { name: 'asc' },
       }),

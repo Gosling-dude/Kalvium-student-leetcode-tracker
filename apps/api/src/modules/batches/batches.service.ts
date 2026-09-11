@@ -73,11 +73,26 @@ export class BatchesService {
    * rather than interleaving two campuses' Foundation rows, which is unreadable in a
    * picker and ambiguous in a report.
    */
-  async findAll(includeArchived = false, campusId?: string | null): Promise<BatchSummary[]> {
+  /**
+   * @param campusId One campus, when the caller named one.
+   * @param viewerCampusIds The campuses the caller may read, applied when they named
+   * none. `undefined` is unrestricted; a list narrows to it. Kept separate from
+   * `campusId` because "which campus did you ask for" and "which may you see" are
+   * different questions, and folding them together is how one silently answers the other.
+   */
+  async findAll(
+    includeArchived = false,
+    campusId?: string | null,
+    viewerCampusIds?: string[],
+  ): Promise<BatchSummary[]> {
     const batches = await this.prisma.batch.findMany({
       where: {
         ...(includeArchived ? {} : { status: 'ACTIVE' }),
-        ...(campusId ? { campusId } : {}),
+        ...(campusId
+          ? { campusId }
+          : viewerCampusIds
+            ? { campusId: { in: viewerCampusIds } }
+            : {}),
       },
       orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
       include: {
@@ -489,10 +504,22 @@ export class BatchesService {
    * batch for the client to filter: with two campuses that is a nicety, and by the fifth
    * it is the difference between a card grid that loads and one that does not (§12, §27).
    */
-  async getStats(dayKey?: DayKey, campusId?: string | null): Promise<BatchStats[]> {
+  /** `viewerCampusIds` narrows exactly as it does in {@link findAll}. */
+  async getStats(
+    dayKey?: DayKey,
+    campusId?: string | null,
+    viewerCampusIds?: string[],
+  ): Promise<BatchStats[]> {
     const day = dayKey ?? this.time.today();
     const batches = await this.prisma.batch.findMany({
-      where: { status: 'ACTIVE', ...(campusId ? { campusId } : {}) },
+      where: {
+        status: 'ACTIVE',
+        ...(campusId
+          ? { campusId }
+          : viewerCampusIds
+            ? { campusId: { in: viewerCampusIds } }
+            : {}),
+      },
       orderBy: [{ campus: { sortOrder: 'asc' } }, { sortOrder: 'asc' }, { name: 'asc' }],
       include: { campus: { select: { name: true, code: true } } },
     });

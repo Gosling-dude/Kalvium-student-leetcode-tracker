@@ -11,9 +11,16 @@
  *
  *  * **The batch control follows the campus.** Batches are campus-scoped, and both
  *    campuses have a "Foundation Level"; offering them side by side would give the user
- *    two identical-looking options that mean different things. With no campus selected
- *    the batch control therefore offers only "All" — an unnarrowed campus has no single
- *    batch list, and inventing one would be the ambiguity §8 rules out.
+ *    two identical-looking options that mean different things. With several campuses in
+ *    view and none selected, the batch control therefore offers only "All" — an
+ *    unnarrowed campus has no single batch list, and inventing one would be the
+ *    ambiguity §8 rules out.
+ *
+ *    When exactly *one* campus is in view there is no ambiguity to protect against, and
+ *    the batch list loads for it without the user having to select it. That case is a
+ *    mentor with one campus grant, which is every mentor today: the campus control hides
+ *    itself when there is nothing to choose between, so requiring a selection meant they
+ *    could never make one, and every filtered page rendered with no filters at all.
  *
  *  * **The filter is a request parameter, never a client-side slice.** Every page passes
  *    the selection to the API; nothing here filters rows in the browser. That is what
@@ -81,6 +88,13 @@ export function ScopeFilterProvider({ children }: { children: React.ReactNode })
     if (storedCampus && storedBatch) setBatchState(storedBatch);
   }, []);
 
+  const { data: campuses, isLoading: campusesLoading } = useQuery({
+    queryKey: ['campuses'],
+    queryFn: api.campuses,
+    // Campuses change when an admin onboards one, which is rare.
+    staleTime: 5 * 60_000,
+  });
+
   const setBatch = useCallback((value: BatchSelection) => {
     setBatchState(value);
     if (value === null) window.sessionStorage.removeItem(BATCH_KEY);
@@ -100,17 +114,25 @@ export function ScopeFilterProvider({ children }: { children: React.ReactNode })
     [setBatch],
   );
 
-  const { data: campuses, isLoading: campusesLoading } = useQuery({
-    queryKey: ['campuses'],
-    queryFn: api.campuses,
-    // Campuses change when an admin onboards one, which is rare.
-    staleTime: 5 * 60_000,
-  });
-
-  const selectedCampusId = useMemo(
-    () => campuses?.find((entry) => entry.code === campus)?.id ?? null,
-    [campuses, campus],
-  );
+  /**
+   * The campus every request should be narrowed to.
+   *
+   * Falls back to the sole campus in view when there is exactly one. This is what makes
+   * the batch filter exist for a mentor: the campus control hides itself when there is
+   * nothing to choose between, so a mentor granted one campus could never *select* one,
+   * `selectedCampusId` stayed null, the batch list never loaded, and every page rendered
+   * with no filters at all. The campus was never ambiguous for them — it just had never
+   * been stated.
+   *
+   * It is a UI convenience only. The server pins a mentor to their grants regardless of
+   * what the request carries (`MentorScopeService`), so this widens nothing.
+   */
+  const selectedCampusId = useMemo(() => {
+    const chosen = campuses?.find((entry) => entry.code === campus)?.id;
+    if (chosen) return chosen;
+    if (campus === null && campuses?.length === 1) return campuses[0]!.id;
+    return null;
+  }, [campuses, campus]);
 
   const { data: batches, isLoading: batchesLoading } = useQuery({
     queryKey: ['campus-batches', selectedCampusId],
@@ -159,9 +181,13 @@ export function useScopeFilter(): ScopeFilterContextValue {
 /** The selected audience's display name, for headings and empty states. */
 export function useScopeLabel(): string {
   const { campus, batch, campuses, batches } = useScopeFilter();
+  // With one campus in view, "All campuses" is a true statement that reads as a false
+  // one — it suggests a breadth the viewer does not have. Name the campus instead.
   const campusName = campus
     ? (campuses.find((entry) => entry.code === campus)?.name ?? campus)
-    : 'All campuses';
+    : campuses.length === 1
+      ? campuses[0]!.name
+      : 'All campuses';
   const batchName =
     batch === UNASSIGNED_BATCH_SELECTOR
       ? UNASSIGNED_BATCH_LABEL
@@ -305,7 +331,12 @@ export function ScopeFilter({
         <span className="text-xs text-[var(--color-fg-subtle)]">
           Pick a campus to filter by batch
         </span>
-      ) : null}
+      ) : isLoading ? null : (
+        // Reached when the campus is settled and it genuinely has no batches. Silence
+        // here is what a missing filter looks like, and a missing filter gets reported
+        // as a bug; saying so costs one line and closes the question.
+        <span className="text-xs text-[var(--color-fg-subtle)]">No batches to filter by</span>
+      )}
     </div>
   );
 }

@@ -130,6 +130,26 @@ export class MentorScopeService {
   }
 
   /**
+   * `assertCampusAllowed`, for a lookup that can also say "no such row".
+   *
+   * Takes the `string | null | undefined` that every `findCampusOf`-style helper returns:
+   * `undefined` means the entity does not exist, `null` that it belongs to no campus in
+   * particular. Both end in the same `NotFoundException` as "not yours", so no caller can
+   * distinguish the three — and no caller has to remember to check `undefined` itself,
+   * which is how an export route came to read a test it had never authorised.
+   */
+  assertEntityCampusAllowed(
+    campusId: string | null | undefined,
+    allowed: CampusScope,
+    options: { entity: string; id: string; write?: boolean },
+  ): void {
+    if (campusId === undefined) {
+      throw new NotFoundException(`${options.entity} ${options.id} was not found`);
+    }
+    this.assertCampusAllowed(campusId, allowed, options);
+  }
+
+  /**
    * The campus a mentor's *write* must land on, given what they asked for.
    *
    * Distinct from `reportingScope` because "no campus named" cannot be answered by pinning
@@ -146,6 +166,34 @@ export class MentorScopeService {
     }
     if (!allowed.includes(campusId)) {
       throw new ForbiddenException('You do not have access to that campus.');
+    }
+  }
+
+  /**
+   * Refuse unless this user may read this student.
+   *
+   * The rule for every route keyed by a **student id** rather than by a filter: the id
+   * arrives from outside and skips whatever narrowing the directory applies, so it has to
+   * be checked against the grants directly. Without it, a mentor who can see a student id
+   * anywhere — an export, a leaderboard, a guess — can read that student's placement
+   * history from another campus.
+   *
+   * `NotFoundException` with the message a genuinely-missing student produces, so the
+   * route cannot be used to tell "exists elsewhere" from "does not exist".
+   */
+  async assertStudentVisible(
+    user: { id: string; role: UserRole },
+    studentId: string,
+  ): Promise<void> {
+    const allowed = await this.allowedCampusIds(user);
+    if (allowed === null) return;
+
+    const student = await this.prisma.student.findUnique({
+      where: { id: studentId },
+      select: { campusId: true },
+    });
+    if (!student || !this.canSeeCampus(student.campusId, allowed)) {
+      throw new NotFoundException(`Student ${studentId} was not found`);
     }
   }
 

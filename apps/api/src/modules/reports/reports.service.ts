@@ -6,6 +6,7 @@
  */
 
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import type { DayKey, ExportFormat } from '@dsa/shared';
@@ -14,6 +15,17 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { LeaderboardService } from '../leaderboard/leaderboard.service';
+
+/**
+ * Which slice of the programme a report may read.
+ *
+ * `campusIds: null | undefined` means unrestricted — an admin. A list narrows to those
+ * campuses, and it reaches here from the caller's mentor grants, never from the request.
+ */
+export interface ReportScope {
+  campusIds?: string[] | null;
+  batchId?: string | null;
+}
 
 export interface ExportPayload {
   filename: string;
@@ -111,10 +123,25 @@ export class ReportsService {
     };
   }
 
-  /** Attendance: whether a student engaged at all, per day, over a range. */
-  async attendanceReport(from: DayKey, to: DayKey) {
+  /**
+   * Attendance: whether a student engaged at all, per day, over a range.
+   *
+   * @param scope The campuses the caller may read (`null` = unrestricted) and an optional
+   * batch. Matched against `DailyStatus.campusId` — the campus the student was in *that
+   * day* — rather than their current one, so a transfer cannot move a past day between
+   * two mentors' reports.
+   */
+  async attendanceReport(
+    from: DayKey,
+    to: DayKey,
+    scope: ReportScope = {},
+  ) {
     const statuses = await this.prisma.dailyStatus.findMany({
-      where: { dayKey: { gte: from, lte: to }, student: { status: 'ACTIVE' } },
+      where: {
+        dayKey: { gte: from, lte: to },
+        student: { status: 'ACTIVE' },
+        ...this.scopeWhere(scope),
+      },
       include: { student: { select: { id: true, name: true, email: true } } },
       orderBy: { dayKey: 'asc' },
     });
@@ -151,22 +178,40 @@ export class ReportsService {
     };
   }
 
-  async weeklyReport(dayKey?: DayKey) {
+  async weeklyReport(dayKey?: DayKey, scope: ReportScope = {}) {
     const day = dayKey ?? this.time.today();
     const { from, to } = this.time.weekBounds(day);
-    return this.periodReport(from, to, 'weekly');
+    return this.periodReport(from, to, 'weekly', scope);
   }
 
-  async monthlyReport(dayKey?: DayKey) {
+  async monthlyReport(dayKey?: DayKey, scope: ReportScope = {}) {
     const day = dayKey ?? this.time.today();
     const { from, to } = this.time.monthBounds(day);
-    return this.periodReport(from, to, 'monthly');
+    return this.periodReport(from, to, 'monthly', scope);
   }
 
-  private async periodReport(from: DayKey, to: DayKey, label: string) {
+  /**
+   * The campus/batch predicate every scoped report shares.
+   *
+   * One place, so a report added later cannot quietly omit it — which is exactly how the
+   * weekly, monthly, squad and attendance reports came to answer every campus for a
+   * mentor granted one, while the daily report beside them was scoped correctly.
+   */
+  private scopeWhere(scope: ReportScope): Prisma.DailyStatusWhereInput {
+    return {
+      ...(scope.campusIds ? { campusId: { in: scope.campusIds } } : {}),
+      ...(scope.batchId ? { batchId: scope.batchId } : {}),
+    };
+  }
+
+  private async periodReport(from: DayKey, to: DayKey, label: string, scope: ReportScope = {}) {
     const rows = await this.prisma.dailyStatus.groupBy({
       by: ['studentId'],
-      where: { dayKey: { gte: from, lte: to }, student: { status: 'ACTIVE' } },
+      where: {
+        dayKey: { gte: from, lte: to },
+        student: { status: 'ACTIVE' },
+        ...this.scopeWhere(scope),
+      },
       _sum: { solvedCount: true, assignedCount: true, score: true },
       _count: { _all: true },
     });
@@ -204,9 +249,10 @@ export class ReportsService {
     };
   }
 
-  async squadReport(dayKey?: DayKey) {
+  /** @param viewerCampusIds Campuses the caller may read; `null` is unrestricted. */
+  async squadReport(dayKey?: DayKey, viewerCampusIds: string[] | null = null) {
     const day = dayKey ?? this.time.today();
-    const rows = await this.leaderboard.getSquadLeaderboard('MONTHLY', day);
+    const rows = await this.leaderboard.getSquadLeaderboard('MONTHLY', day, viewerCampusIds);
     return { dayKey: day, rows };
   }
 

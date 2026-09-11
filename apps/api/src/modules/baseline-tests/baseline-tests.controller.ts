@@ -235,9 +235,7 @@ export class BaselineTestsController {
     const allowed = await this.mentorScope.allowedCampusIds(user);
     if (allowed === null) return null;
 
-    const campusId = await this.baseline.findCampusOf(id);
-    if (campusId === undefined) throw new NotFoundException(`Baseline test ${id} was not found`);
-    this.mentorScope.assertCampusAllowed(campusId, allowed, {
+    this.mentorScope.assertEntityCampusAllowed(await this.baseline.findCampusOf(id), allowed, {
       entity: 'Baseline test',
       id,
       write: options.write,

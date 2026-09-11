@@ -17,7 +17,8 @@ import { DashboardModule } from '../dashboard/dashboard.module';
 import { LeaderboardModule } from '../leaderboard/leaderboard.module';
 import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
 import { BaselineTestsService } from '../baseline-tests/baseline-tests.service';
-import { ReportsService } from './reports.service';
+import { MentorScopeService } from '../campuses/mentor-scope.service';
+import { ReportsService, type ReportScope } from './reports.service';
 
 
 @ApiTags('Reports')
@@ -28,7 +29,35 @@ export class ReportsController {
     private readonly reports: ReportsService,
     private readonly campuses: CampusesService,
     private readonly baseline: BaselineTestsService,
+    private readonly mentorScope: MentorScopeService,
   ) {}
+
+  /**
+   * The campus/batch slice this caller's report may cover.
+   *
+   * Every report route goes through this. The daily report and its export already
+   * resolved a scope; the weekly, monthly, squad and attendance reports — and the
+   * exports built from them — did not, so a mentor downloading an attendance matrix
+   * received the whole programme. Routing them all through one helper is what stops the
+   * next report added here from being the next one that forgets.
+   */
+  private async scopeFor(
+    user: RequestUser,
+    query: { campus?: string; batch?: string },
+  ): Promise<ReportScope> {
+    const resolved = await this.campuses.resolveScopeFor(user, {
+      campus: query.campus,
+      batch: query.batch,
+    });
+    const allowed = await this.mentorScope.allowedCampusIds(user);
+
+    return {
+      // A named campus has already been checked against the grants by `resolveScopeFor`;
+      // with none named, a mentor is pinned to their grants rather than widened.
+      campusIds: resolved.campusId ? [resolved.campusId] : allowed,
+      batchId: resolved.batchId,
+    };
+  }
 
   /** Rejects a non-numeric cohort rather than silently exporting every cohort. */
   private parseCohort(cohort?: string): number | null {
@@ -63,28 +92,52 @@ export class ReportsController {
 
   @Get('weekly')
   @ApiOperation({ summary: 'Weekly report data' })
-  weekly(@Query('dayKey') dayKey?: string) {
-    return this.reports.weeklyReport(dayKey);
+  @ApiQuery({ name: 'campus', required: false })
+  @ApiQuery({ name: 'batch', required: false })
+  async weekly(
+    @CurrentUser() user: RequestUser,
+    @Query('dayKey') dayKey?: string,
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
+  ) {
+    return this.reports.weeklyReport(dayKey, await this.scopeFor(user, { campus, batch }));
   }
 
   @Get('monthly')
   @ApiOperation({ summary: 'Monthly report data' })
-  monthly(@Query('dayKey') dayKey?: string) {
-    return this.reports.monthlyReport(dayKey);
+  @ApiQuery({ name: 'campus', required: false })
+  @ApiQuery({ name: 'batch', required: false })
+  async monthly(
+    @CurrentUser() user: RequestUser,
+    @Query('dayKey') dayKey?: string,
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
+  ) {
+    return this.reports.monthlyReport(dayKey, await this.scopeFor(user, { campus, batch }));
   }
 
   @Get('squads')
   @ApiOperation({ summary: 'Squad report data' })
-  squads(@Query('dayKey') dayKey?: string) {
-    return this.reports.squadReport(dayKey);
+  async squads(@CurrentUser() user: RequestUser, @Query('dayKey') dayKey?: string) {
+    // Squads carry their own campus, so this one narrows by grant directly rather than
+    // through `scopeFor` — the squad board has no batch dimension to resolve.
+    return this.reports.squadReport(dayKey, await this.mentorScope.allowedCampusIds(user));
   }
 
   @Get('attendance')
   @ApiOperation({ summary: 'Attendance matrix over a date range' })
   @ApiQuery({ name: 'from', required: true })
   @ApiQuery({ name: 'to', required: true })
-  attendance(@Query('from') from: string, @Query('to') to: string) {
-    return this.reports.attendanceReport(from, to);
+  @ApiQuery({ name: 'campus', required: false })
+  @ApiQuery({ name: 'batch', required: false })
+  async attendance(
+    @CurrentUser() user: RequestUser,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
+  ) {
+    return this.reports.attendanceReport(from, to, await this.scopeFor(user, { campus, batch }));
   }
 
   @Get('export/daily')
@@ -149,11 +202,17 @@ export class ReportsController {
   @Get('export/leaderboard')
   @ApiOperation({ summary: 'Download the daily report grouped by bucket' })
   async exportWeekly(
+    @CurrentUser() user: RequestUser,
     @Res() res: Response,
     @Query('dayKey') dayKey?: string,
     @Query('format') format: ExportFormat = 'XLSX',
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
   ): Promise<void> {
-    const report = await this.reports.weeklyReport(dayKey);
+    const report = await this.reports.weeklyReport(
+      dayKey,
+      await this.scopeFor(user, { campus, batch }),
+    );
     const payload = await this.reports.export(
       format,
       `weekly-report-${report.from}-to-${report.to}`,
@@ -176,12 +235,19 @@ export class ReportsController {
   @Get('export/attendance')
   @ApiOperation({ summary: 'Download the attendance matrix' })
   async exportAttendance(
+    @CurrentUser() user: RequestUser,
     @Res() res: Response,
     @Query('from') from: string,
     @Query('to') to: string,
     @Query('format') format: ExportFormat = 'XLSX',
+    @Query('campus') campus?: string,
+    @Query('batch') batch?: string,
   ): Promise<void> {
-    const report = await this.reports.attendanceReport(from, to);
+    const report = await this.reports.attendanceReport(
+      from,
+      to,
+      await this.scopeFor(user, { campus, batch }),
+    );
     const payload = await this.reports.export(
       format,
       `attendance-${from}-to-${to}`,
@@ -209,12 +275,22 @@ export class ReportsController {
   @ApiQuery({ name: 'format', required: false, enum: EXPORT_FORMATS })
   @ApiQuery({ name: 'squad', required: false })
   async exportBaseline(
+    @CurrentUser() user: RequestUser,
     @Res() res: Response,
     @Query('testId') testId: string,
     @Query('format') format: ExportFormat = 'XLSX',
     @Query('squad') squad?: string,
   ): Promise<void> {
     if (!testId) throw new BadRequestException('testId is required.');
+
+    // An export is a read of the same board, so it needs the same check the board does.
+    // Without it this route was the way to obtain another campus's baseline results in
+    // full — names, emails, per-student scores — by naming its test id.
+    this.mentorScope.assertEntityCampusAllowed(
+      await this.baseline.findCampusOf(testId),
+      await this.mentorScope.allowedCampusIds(user),
+      { entity: 'Baseline test', id: testId },
+    );
 
     const board = await this.baseline.leaderboard(testId, { squad });
     const payload = await this.reports.export(

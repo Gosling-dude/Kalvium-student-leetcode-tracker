@@ -72,8 +72,18 @@ export class CampusesController {
    */
   @Get(':id/batches')
   @ApiOperation({ summary: 'Batches at a campus, in display order' })
-  async batches(@Param('id', ParseUUIDPipe) id: string, @Query() query: ListCampusesQueryDto) {
+  async batches(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: ListCampusesQueryDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     await this.campuses.findById(id);
+    // The campus is named in the path, which is the obvious way around a guard that only
+    // covered the campus list. Same answer as an id that does not exist.
+    this.mentorScope.assertCampusAllowed(id, await this.mentorScope.allowedCampusIds(user), {
+      entity: 'Campus',
+      id,
+    });
     return this.campuses.batchesForCampus(id, query.includeArchived ?? false);
   }
 
@@ -162,11 +172,17 @@ export class CampusesController {
 @ApiBearerAuth()
 @Controller('students')
 export class StudentCampusController {
-  constructor(private readonly campuses: CampusesService) {}
+  constructor(
+    private readonly campuses: CampusesService,
+    private readonly mentorScope: MentorScopeService,
+  ) {}
 
   @Get(':id/campus-history')
   @ApiOperation({ summary: "A student's campus placements over time, newest first" })
-  history(@Param('id', ParseUUIDPipe) id: string) {
+  async history(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: RequestUser) {
+    // Same rule as batch history, and a sharper leak: this route names the campuses a
+    // student has been in, which is precisely the fact the scope exists to partition.
+    await this.mentorScope.assertStudentVisible(user, id);
     return this.campuses.getHistory(id);
   }
 

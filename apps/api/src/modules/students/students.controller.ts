@@ -122,10 +122,15 @@ export class StudentsController {
     return this.students.findAll(query, { campusIds: narrowed.campusIds });
   }
 
+  /**
+   * Narrowed to the caller's campuses. A picker that offers options the directory will
+   * then refuse reads as a broken filter, and the counts attached to each option are
+   * themselves data about campuses the caller may have no grant on.
+   */
   @Get('filters')
   @ApiOperation({ summary: 'Campus, batch, cohort and squad options for filter controls' })
-  filters() {
-    return this.students.getFilterOptions();
+  async filters(@CurrentUser() user: RequestUser) {
+    return this.students.getFilterOptions(await this.mentorScope.allowedCampusIds(user));
   }
 
   @Get('import/template')

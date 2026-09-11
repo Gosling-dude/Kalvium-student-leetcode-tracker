@@ -20,7 +20,6 @@
 import { Injectable } from '@nestjs/common';
 import {
   ASSIGNMENT_LOOKBACK_DAYS,
-  assignmentWindow,
   calculateAssignmentCompletion,
   computeStreaks,
   selectAssignmentForBatch,
