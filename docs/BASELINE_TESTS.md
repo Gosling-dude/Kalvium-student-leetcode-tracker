@@ -32,8 +32,9 @@ DRAFT → SCHEDULED → ACTIVE → CLOSED
 * **DRAFT** — editable, invisible to students.
 * **SCHEDULED** — students see it is coming; the problems stay hidden.
 * **ACTIVE** — attempts may be started and graded.
-* **CLOSED** — terminal for participation. Closing grades every attempt one final time, so
-  a submission that landed after the last sync but before the close time still counts.
+* **CLOSED** — terminal for *starting* an attempt. Closing grades every attempt one final
+  time. It does not close grading: a re-grade after a test has closed still credits a
+  problem solved since, because that is a true statement about the student.
 
 Problems and audience are frozen once the test leaves `DRAFT`: students may already have
 seen the list and started attempts, and swapping a question would invalidate results that
@@ -53,10 +54,17 @@ exist, so the endpoint cannot be used to enumerate what other campuses were set.
 
 ## Grading
 
-Window: `[startedAt, min(expiresAt, submittedAt, now)]`. `expiresAt` is written once at
-first start — `startedAt + durationMinutes`, clamped to the test's `closesAt` — so a later
-change to the test's duration cannot retroactively shorten or extend an attempt already
-under way, and refreshing the page cannot reset the clock.
+**There is no window and no clock.** An accepted solution counts whenever it was written:
+before the test opened, during it, or weeks after it closed. The test asks whether the
+student can solve the problem, and a timestamp is evidence of that ability rather than a
+condition on it.
+
+A student who started late, finished late, or never interacted with a timer is not
+thereby less able, and the previous 60-minute bound turned exactly that into a zero.
+`BaselineTest.durationMinutes` and `BaselineTestAttempt.expiresAt` survive as columns —
+they record how the tests that were actually sat were configured — but nothing reads
+them, neither is settable through the API, no attempt expires, and neither appears on any
+screen.
 
 Points default by difficulty (Easy 10, Medium 20, Hard 30) and are overridable per problem,
 so "2 Easy, 2 Medium" scores sensibly without hand-entering weights every week.
@@ -147,19 +155,22 @@ method, so a route added later is closed until someone deliberately opens it.
 Two decisions are worth knowing about because they are load-bearing:
 
 **The board is built from the eligible roster, not from the attempt rows.** A student who
-never opened the test still gets a line, marked absent. Building it from attempts would
-shrink the denominator and make a test half the cohort skipped look like a test everybody
-took — and "who didn't turn up" is usually the more urgent list. The comparator never ranks
-an absent student above one who sat it and scored nothing: both score 0, and on the
-arithmetic alone the name tiebreak would put the absent student first, which reads as
-though they outperformed someone who showed up.
+never opened the test still gets a line, with their real solved count on it. Building the
+board from attempts would shrink the denominator and make a test half the cohort skipped
+look like a test everybody took.
+
+Participation is reported beside that count and never folded into it. It is also not
+attendance wording: `NOT_STARTED` reads "Not opened in portal", because a baseline is not
+a register and the old "Absent" sat one column away from a solved count that frequently
+contradicted it. A student can be 3 of 4 and have never opened the test; both are true and
+neither is a mark against them.
 
 **Rank is computed across the whole cohort before filtering.** Filter to one squad and its
 members keep their standing among everyone rather than being renumbered 1..n. Rank means
 "how many students did better"; it must not change because someone typed in a search box.
 Summary statistics are cohort-wide for the same reason, and the average is taken over the
-students who actually sat the test — an absent student is not a zero, they are not a
-measurement.
+students we hold a measurement for — a student we have never successfully synced is not a
+zero, they are not a measurement.
 
 `percent` is `solvedCount / totalQuestions`, deliberately *not* the difficulty-weighted
 score. The columns beside it are counts, so a reader computes 3 of 4 and expects 75%; a
@@ -172,15 +183,24 @@ Supporting endpoints:
   per-question ✓/✗ breakdown. Uses the same `percent` definition, so the detail view and
   the board it was opened from cannot disagree.
 * `GET /reports/export/baseline?testId=…&format=CSV` — the board as a file, in board order,
-  absent students included so the export reconciles with the screen it came from.
+  students who never opened it included so the export reconciles with the screen it came
+  from. Scoped to the caller's campuses like every other read of the board.
 
-### Immutability
+### Results move when the student's ability does
 
-Historical results never move. An attempt is graded within its own window
-(`[startedAt, min(expiresAt, submittedAt, now)]`), so a student who solves the fourth
-problem nine days after the test closed still shows 3/4 = 75% — even after a re-grade,
-which is the operation that would rewrite history if the window were not frozen. Their
-current ability is a separate number and belongs on a separate screen.
+A result is not frozen. A student who solves the fourth problem nine days after the test
+closed reads 4 of 4 on the next re-grade, on the board and in the stored attempt alike,
+because "can this student solve it" is a question whose answer genuinely changed.
+
+The previous rule froze the sitting instead and reported two numbers — what the sitting
+measured and what the student can do now. That distinction only existed because grading
+discarded solutions outside a clock. With the clock gone, the "during the test" figure
+reported nothing except whether Start had been pressed, so it has been removed rather than
+left on the row as an attendance fact wearing a score's clothes.
+
+*When* each problem was solved is still reported, per problem, exactly as observed — so a
+mentor can see a solve landed after the test without the score pretending it did not
+happen.
 
 ## Performance vs participation
 
@@ -190,10 +210,11 @@ entire cohort read 0/4 on problems many of them had solved.
 | | Question | Source | Time filter |
 |---|---|---|---|
 | **Performance** | Can this student solve these problems? | submission mirror | **none** |
-| **Participation** | Did they sit the test? | `BaselineTestAttempt` | the attempt window |
+| **Participation** | Did anyone open the test in the portal? | `BaselineTestAttempt` | **none** |
 
-`solvedCount` on the leaderboard is performance. `status` is participation. A student can be
-`NOT_STARTED` *and* 3/4 — both true, neither implying the other.
+`solvedCount` on the leaderboard is performance. `status` is participation, and it enters
+no calculation at all. A student can be `NOT_STARTED` *and* 3/4 — both true, neither
+implying the other.
 
 ### What went wrong
 
@@ -204,21 +225,13 @@ attempts, so every student defaulted to zero:
     eligible 99   attempts 0   problems 4
     students holding an accepted solution: 14   (40 accepted submissions)
 
-The 60-minute duration was a *second* bug underneath — `gradeAttemptById` filters
+The 60-minute duration was a *second* bug underneath — `gradeAttemptById` filtered
 submissions to `[startedAt, min(expiresAt, submittedAt, now)]`, so it would have discarded
-those same solutions the moment attempts existed. Both are fixed; fixing only the visible
-one leaves the other waiting.
+those same solutions the moment attempts existed. Both are fixed, and fixing only the
+visible one would have left the other waiting.
 
-### Why this does not break immutability
-
-"Credit solutions written at any time" and "solving Q3 later must not change the recorded
-3/4" look contradictory and are not — they describe different numbers:
-
-* `inWindowSolvedCount` — what the sitting measured. Frozen. Solving a problem afterwards
-  never moves it, and neither does a re-grade.
-* `solvedCount` — what the student can do now. Rises when they solve something later.
-
-Both are on the row, and the student detail shows the two side by side when they differ.
+The window is now gone from grading entirely, so the two paths agree: the board and the
+stored attempt report the same number, and a solve counts wherever in time it sits.
 
 ### Ranking
 

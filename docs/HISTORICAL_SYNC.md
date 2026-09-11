@@ -5,18 +5,41 @@ sync has to do more than recompute today.
 
 ## The rule
 
-An assignment dated **D** accepts solutions submitted on **D-2 … D** inclusive, in program
-time (`Asia/Kolkata`). Assignments are routinely published late, so matching a submission's
-day against the assignment's day alone marked genuinely-solved problems as missed.
+**An assigned problem the student has solved at any time counts as solved.** No date
+filter applies to that judgement — not the assignment's day, not a lookback window, and
+emphatically not `assignment.createdAt`. An assignment dated 7 Sep, entered into the
+tracker on the 11th, credits a student who solved its problems on the 5th, in June, or
+after the assignment day has passed. The assignment *date* decides which day a question
+belongs to; the student's LeetCode history decides whether it is solved.
 
-`assignment.createdAt` is **never** a lower bound on submissions. A student who solved a
-problem on 20 Aug solved it on 20 Aug, whether the tracker learned about the assignment
-that morning or two days later. Creation time is used in exactly one place — deciding
-*which days to recompute* — and never to decide whether a submission counts.
+The dated window still exists, separated rather than removed. Every figure whose name
+starts `inWindow` is measured over **D-2 … D** inclusive in program time
+(`Asia/Kolkata`), and answers the other question: did the student do this work around the
+day it was set.
+
+| | Question | Time filter | Read by |
+|---|---|---|---|
+| `solvedCount` | Can this student solve the assigned problems? | **none** | dashboard, reports, analytics, the mentor tracker, completion % |
+| `inWindowSolvedCount` | Did they work on them that week? | `[D-2, D]` | streaks, the daily score |
+
+Both sit on `DailyStatus`, neither is derivable from the other, and a database `CHECK`
+(`daily_statuses_in_window_not_above_solved`) keeps the window count from exceeding the
+total. Collapsing them is what made a cohort read 0/4 on problems many had solved; keeping
+only the first would manufacture a September streak out of a June solve, which is the same
+error pointing the other way.
 
 The window is a half-open UTC interval derived from program-local midnights, so a
 submission at `2026-08-20 23:30 IST` (= `18:00 UTC`) belongs to 20 Aug and cannot drift
 into the 21st.
+
+### Where this is enforced
+
+`calculateAssignmentCompletion` in `@dsa/shared` is the rule. The part that was actually
+broken, though, was upstream of it: `RollupService.evaluateDay` and
+`StudentMetricsService` both bounded the **submission query** to the window before the
+rule ever saw the rows. No amount of correctness in a pure function can recover a
+submission that was never loaded, which is why the fix is a query change and the
+regression test drives the rollup rather than the rule.
 
 ## The bug this documents
 
@@ -45,9 +68,20 @@ Three sources, unioned, bounded to 14 days before the job day and never past it:
 
 Days are recomputed oldest-first, because each day's streak reads the one before it.
 
-## Backfilling a specific date
+## Entering an assignment for a past date
 
-After entering an assignment for a past date:
+Nothing further is required: `AssignmentsService.create` and `update` call
+`RollupService.reconcileAssignmentDay`, which recomputes that date — and the days after
+it, because a corrected day changes what every later day's streak reads — before the
+request returns. It reads only the submission mirror, makes no provider calls, and is
+idempotent.
+
+Ranges longer than 30 days are refused inline rather than run to a timeout; use
+`POST /admin/recompute`, which runs in the background.
+
+## Backfilling a specific date manually
+
+If a day needs correcting without touching its assignment:
 
 ```
 POST /sync/backfill { "dayKey": "2026-08-20" }

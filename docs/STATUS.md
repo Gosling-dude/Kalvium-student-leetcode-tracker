@@ -7,9 +7,9 @@ brief asked for, and what has not been exercised.
 
 | Check | Result |
 |---|---|
-| `packages/shared` unit tests | **312 passed** (12 files) |
-| `apps/api` unit tests | **295 passed** (21 files) |
-| `apps/api` integration tests (real Postgres) | **102 passed** (9 files) |
+| `packages/shared` unit tests | **341 passed** (14 files) |
+| `apps/api` unit tests | **302 passed** (21 files) |
+| `apps/api` integration tests (real Postgres) | **234 passed** (20 files) |
 | Type-check (`shared` + `api` + `web`) | pass |
 | `apps/api` build (`nest build` → `dist/main.js`) | pass |
 | `apps/web` build | pass |
@@ -96,8 +96,9 @@ itself rather than only on the schedule.
   scoring or leaderboards, so a baseline score can never reach a streak or a daily rank.
   Student-wise leaderboard with competition ranking, search, squad and participation
   filters, per-question breakdown, and CSV/XLSX export. Every eligible student appears,
-  including those who never started. Historical results are immutable: solving a problem
-  after a test closes does not raise the recorded score.
+  including those who never started. There is no clock: an accepted solution counts
+  whenever it was written, and participation carries no attendance language and enters no
+  calculation.
 - **Access control** — mentors are scoped to the campuses they are granted, enforced
   server-side across every endpoint that carries campus data: the student directory and
   detail, the mentor tracker, dashboard, assignments, baseline tests and their
@@ -148,8 +149,8 @@ itself rather than only on the schedule.
   writes and cannot complete inside an HTTP request. Unlike `POST /sync` it has no job
   row, so progress is not trackable — watch the system log for the completion entry.
   Giving it a `SyncJob`-style record is the natural next improvement.
-- **Tests.** The domain core, provider layer, services and guards are covered by 607 unit
-  tests, and 102 integration tests run against a real Postgres. What is still absent is
+- **Tests.** The domain core, provider layer, services and guards are covered by 643 unit
+  tests, and 234 integration tests run against a real Postgres. What is still absent is
   browser-level E2E: the frontend has been verified by hand, not by an automated suite.
 - **Company tags.** Verified premium-gated: the public endpoint returns `null`. The
   column exists and stays empty rather than being filled with invented data.
