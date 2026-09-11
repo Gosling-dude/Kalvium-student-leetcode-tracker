@@ -164,6 +164,23 @@ itself rather than only on the schedule.
 
 The system is already deployed and syncing. The outstanding actions are:
 
+0. **Run `POST /admin/recompute { from, to }` over the assignment history, once.**
+   Required, and it is the one step a deploy cannot do for you.
+
+   The migration that introduced `inWindowSolvedCount` backfills it from the stored
+   `solvedCount`, which is correct and lossless — every existing row *was* computed under
+   the window, so its count is already the in-window count. What the migration cannot do
+   is raise `solvedCount` to the new ever-solved definition, because that needs the
+   submission mirror re-read per day.
+
+   Nothing does it automatically: the nightly rollup recomputes **yesterday only**, and
+   `findStaleAssignmentDays` will not report these days either — their assignments have
+   not changed, only the rule has. So until this is run, historical days keep reporting
+   the old windowed figure. Nothing is *wrong* meanwhile; it is simply not yet better.
+
+   Assignments created from now on reconcile their own date at create time and need no
+   action.
+
 1. **Set `EMAIL_FROM` and `EMAIL_DEFAULT_TO`** on the backend so the nightly report
    generates. Add `EMAIL_PROVIDER` and `EMAIL_API_KEY` to enable sending an approved one.
 2. **Grant each mentor their campuses** via `PUT /admin/mentors/:id/campuses`. Existing
@@ -171,5 +188,10 @@ The system is already deployed and syncing. The outstanding actions are:
    them is a deliberate choice.
 3. **Decide on `SEED_STUDENT_PASSWORD`** before provisioning student logins. Leave it unset
    for per-student random passwords, or set one shared value to read out to a cohort.
-4. Watch the **Production Smoke Test** workflow. It fails on any non-zero data-integrity
+4. Optionally run **`POST /admin/reconcile-solved-totals`** to repair any drift between
+   the cached `Student.totalSolved` and the canonical calculation. The directory and the
+   student page now both read the canonical value, so drift is cosmetic rather than
+   visible, but the endpoint reports the before and after for every student it changes and
+   is the auditable way to confirm the cache agrees.
+5. Watch the **Production Smoke Test** workflow. It fails on any non-zero data-integrity
    invariant, so a red run names the problem rather than needing to be investigated.
