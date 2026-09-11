@@ -95,6 +95,33 @@ export function ScopeFilterProvider({ children }: { children: React.ReactNode })
     staleTime: 5 * 60_000,
   });
 
+  // Shares `['me']` with the app shell, so this is the same cached response rather than a
+  // second request. Only the role is read.
+  const { data: viewer } = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: 5 * 60_000 });
+
+  /**
+   * A mentor holding several campuses is pinned to one of them until they choose.
+   *
+   * The aggregate endpoints — dashboard, leaderboard, the reports — take a single
+   * `campusId` where null means *the whole programme*, so a mentor naming none cannot be
+   * answered with null. `MentorScopeService.reportingScope` correctly refuses instead,
+   * and the routes answer a refusal with an empty result. The effect on screen is a
+   * mentor with two campuses opening the tracker to a blank page and no explanation —
+   * reported, reasonably, as "the filters don't work".
+   *
+   * Choosing the first campus makes those pages answer. It hides nothing: the campus
+   * control is visible in this case (there is more than one to choose between), so the
+   * selection is on screen and one click away from the other. An admin is deliberately
+   * excluded — "All campuses" is a real and useful answer for them, and pinning them to
+   * one would be the actual data loss.
+   */
+  useEffect(() => {
+    if (campus !== null) return;
+    if (viewer?.role !== 'MENTOR') return;
+    if (!campuses || campuses.length < 2) return;
+    setCampusState(campuses[0]!.code);
+  }, [campus, campuses, viewer]);
+
   const setBatch = useCallback((value: BatchSelection) => {
     setBatchState(value);
     if (value === null) window.sessionStorage.removeItem(BATCH_KEY);
