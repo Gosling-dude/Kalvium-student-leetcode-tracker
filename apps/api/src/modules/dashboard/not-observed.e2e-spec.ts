@@ -25,6 +25,7 @@ import { BatchesService } from '../batches/batches.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
+import { EnrolmentService } from '../../common/services/enrolment.service';
 
 const prisma = new PrismaClient();
 
@@ -260,7 +261,15 @@ beforeAll(async () => {
     findAllByDay: async (day: string) => assignmentSummaries(day),
   } as never;
 
-  dashboard = new DashboardService(prisma as never, noCache, time, assignments, campuses, batches);
+  dashboard = new DashboardService(
+    prisma as never,
+    noCache,
+    time,
+    assignments,
+    campuses,
+    batches,
+    new EnrolmentService(prisma as never, time),
+  );
 });
 
 afterAll(async () => {

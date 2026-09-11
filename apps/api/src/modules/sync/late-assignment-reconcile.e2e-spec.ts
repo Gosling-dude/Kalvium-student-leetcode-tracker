@@ -24,7 +24,7 @@
  */
 
 import { PrismaClient } from '@prisma/client';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { RollupService } from '../scoring/rollup.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
@@ -33,6 +33,7 @@ import { BatchesService } from '../batches/batches.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
+import { EnrolmentService } from '../../common/services/enrolment.service';
 
 const prisma = new PrismaClient();
 
@@ -77,6 +78,7 @@ const rollup = new RollupService(
   metrics,
   batches,
   campuses,
+  new EnrolmentService(prisma as never, time),
 );
 
 let campusId: string;
@@ -208,7 +210,14 @@ beforeAll(async () => {
   for (const day of ASSIGNMENT_DAYS) await rollup.recomputeDay(day);
 });
 
+afterEach(() => {
+  // Restore the real clock between tests: a leaked fake timer would silently move the
+  // "today" every other suite in this file depends on.
+  vi.useRealTimers();
+});
+
 afterAll(async () => {
+  vi.useRealTimers();
   const ids = Object.values(studentIds);
   await prisma.dailyProblemStatus.deleteMany({
     where: { dailyStatus: { studentId: { in: ids } } },
@@ -346,6 +355,72 @@ describe('reconciliation is idempotent', () => {
       // service that computes the pair inconsistently before Postgres has to.
       expect(row.inWindowSolvedCount).toBeLessThanOrEqual(row.solvedCount);
     }
+  });
+});
+
+describe('creating the assignment reconciles its date there and then', () => {
+  it('recomputes the original date at create time, not on the next sync', async () => {
+    // The reported workflow, end to end through `AssignmentsService.create`: a date in
+    // the past, entered today, against a student who solved it before it existed. Until
+    // this call was added the day stayed stale until a sync noticed — up to three hours
+    // after the admin finished typing.
+    const day = '2099-09-03';
+    const slug = `${RUN}-created-late`.toLowerCase();
+
+    const problem = await prisma.problem.create({
+      data: {
+        titleSlug: slug,
+        title: slug.toUpperCase(),
+        difficulty: 'EASY',
+        url: `https://leetcode.com/problems/${slug}/`,
+      },
+    });
+    problemIds.push(problem.id);
+
+    // Solved three weeks before the assignment date — outside any window.
+    await submit(studentIds.early!, slug, '2099-08-12', '11:00');
+
+    const assignment = await prisma.assignment.create({
+      data: {
+        dayKey: day,
+        campusId,
+        batchId,
+        originalCampusId: campusId,
+        originalBatchId: batchId,
+        title: `${RUN} created late`,
+        createdAt: ist(ENTERED_ON, '12:00'),
+        problems: { create: [{ problemId: problem.id, position: 1 }] },
+      },
+    });
+    assignmentIds.push(assignment.id);
+
+    // The fixtures live in 2099 so they cannot collide with real programme data, which
+    // makes them *future* dates against the real clock. Pin "today" just past the
+    // assignment so the historical branch — the one under test — is the one that runs.
+    vi.useFakeTimers();
+    vi.setSystemTime(ist('2099-09-11', '09:00'));
+
+    const result = await rollup.reconcileAssignmentDay(day);
+    expect(result).not.toBeNull();
+    // It reconciles the day *and* the days after it, because a corrected day changes
+    // what every later day's streak reads.
+    expect(result!.days[0]).toBe(day);
+    expect(result!.days).toContain('2099-09-11');
+    expect(result!.days.length).toBeGreaterThan(1);
+
+    const row = await stored('early', day);
+    expect(row.assignedCount).toBe(1);
+    expect(row.solvedCount).toBe(1);
+    expect(row.inWindowSolvedCount).toBe(0);
+  });
+
+  it('refuses to rewrite a span too long to run inside a request', async () => {
+    // A year of history is not something to attempt inline: it would time out halfway
+    // and leave the range half-rewritten. The caller is told, and pointed at the
+    // background operation instead.
+    vi.useFakeTimers();
+    vi.setSystemTime(ist('2099-09-11', '09:00'));
+    expect(await rollup.reconcileAssignmentDay('2099-09-03', { maxSyncDays: 2 })).toBeNull();
   });
 });
 

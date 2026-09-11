@@ -42,9 +42,20 @@ import { ScoringConfigService } from './scoring-config.service';
 import { StudentMetricsService } from './student-metrics.service';
 import { BatchesService } from '../batches/batches.service';
 import { CampusesService } from '../campuses/campuses.service';
+import { EnrolmentService } from '../../common/services/enrolment.service';
 
 /** How far back streak computation looks. Beyond this, a streak is not meaningfully "current". */
 const STREAK_HISTORY_DAYS = 400;
+
+/**
+ * The longest span `reconcileAssignmentDay` will rewrite inside the request that
+ * triggered it.
+ *
+ * Thirty days covers every realistic "I forgot to enter last week's assignments" while
+ * staying well inside an HTTP timeout at cohort size. Anything longer is a deliberate
+ * admin operation with its own progress reporting (`POST /admin/recompute`).
+ */
+const MAX_INLINE_RECONCILE_DAYS = 30;
 
 interface StudentDayResult {
   studentId: string;
@@ -80,6 +91,7 @@ export class RollupService {
     private readonly metrics: StudentMetricsService,
     private readonly batches: BatchesService,
     private readonly campuses: CampusesService,
+    private readonly enrolment: EnrolmentService,
   ) {}
 
   /**
@@ -127,9 +139,12 @@ export class RollupService {
     // one per dimension, both batched across the whole roster. A per-student lookup here
     // would turn one day's recompute into hundreds of round trips (§27).
     const studentIds = students.map((student) => student.id);
-    const [historicalBatch, historicalCampus] = await Promise.all([
+    const [historicalBatch, historicalCampus, observedFromDay] = await Promise.all([
       this.batches.batchOnDayForStudents(studentIds, dayKey),
       this.campuses.campusOnDayForStudents(studentIds, dayKey),
+      // Resolved once for the whole roster, so this skip and the dashboard's
+      // "not observed" list cannot disagree about the same student.
+      this.enrolment.observedFromDayByStudent(studentIds),
     ]);
 
     // Which assignment each student was already evaluated against for this exact day, if
@@ -205,11 +220,13 @@ export class RollupService {
       // those rows carry a null `campusId` — which reads as *every* campus, putting a
       // student on the global board for weeks their campus did not yet exist (§17).
       //
-      // Enrolment is `createdAt`, the same definition `computeStreaks` already uses below
-      // and the daily report uses for the same reason. Skipping here rather than
-      // filtering the query keeps the historical-placement lookups batched across the
-      // whole roster.
-      const enrolledFromDayKey = this.time.dayKeyOf(student.createdAt);
+      // A day before the student's record existed is not a day they scored zero on — it
+      // is a day nobody measured. `EnrolmentService` is the single definition, shared with
+      // the dashboard's "not observed" list; `resolveObservedFromDay` records why neither
+      // placement history nor a surviving submission is allowed to widen it, since both
+      // look like fixes for the late-assignment problem and both fabricate results.
+      const enrolledFromDayKey =
+        observedFromDay.get(student.id) ?? this.time.dayKeyOf(student.createdAt);
       if (enrolledFromDayKey > dayKey) continue;
 
       // The batch that was true on this day. A student with no recorded placement by
@@ -337,6 +354,9 @@ export class RollupService {
     const students = await this.prisma.student.findMany({
       select: { id: true, createdAt: true, totalSolved: true },
     });
+    const observedFromDay = await this.enrolment.observedFromDayByStudent(
+      students.map((student) => student.id),
+    );
 
     const statuses = await this.prisma.dailyStatus.findMany({
       where: { dayKey: { gte: from, lte: today } },
@@ -374,7 +394,10 @@ export class RollupService {
         })),
         today,
         config,
-        { enrolledFromDayKey: this.time.dayKeyOf(student.createdAt) },
+        {
+          enrolledFromDayKey:
+            observedFromDay.get(student.id) ?? this.time.dayKeyOf(student.createdAt),
+        },
       );
 
       // A student absent from the canonical map has *no evidence* either way — no
@@ -638,6 +661,57 @@ export class RollupService {
         })),
       }),
     ]);
+  }
+
+  /**
+   * Bring one assignment day's stored results up to date, the moment the assignment
+   * changes.
+   *
+   * The supported answer to "I have just entered an assignment for a date in the past".
+   * Creating a historical assignment used to leave the tracker showing nothing for that
+   * date until the next sync happened to notice the day was stale — correct eventually,
+   * but "eventually" is three hours, and the person who just typed the assignment in is
+   * looking at the screen now.
+   *
+   * Three properties:
+   *
+   *  * **It fetches nothing.** Recomputation reads the submission mirror, so it cannot
+   *    create, move or overwrite a submission. Re-running it is always safe.
+   *  * **It recomputes `dayKey` through `today`, not just `dayKey`.** A day's
+   *    `streakAtDay` is a function of the days before it: correcting 7 Sep from "solved
+   *    nothing" to "solved everything" changes what the 8th and 9th say. Leaving them
+   *    would trade one visibly-wrong number for several quietly-wrong ones.
+   *  * **It is bounded.** A range longer than `maxSyncDays` is refused rather than run
+   *    inline — recomputing a year of history inside an HTTP request would time out
+   *    halfway and leave the range half-rewritten. The caller is told to use
+   *    `POST /admin/recompute`, which runs in the background and says so.
+   *
+   * @returns the days actually recomputed, or `null` when the range was too long to run
+   * inline — the caller decides whether that is an error or a note.
+   */
+  async reconcileAssignmentDay(
+    dayKey: DayKey,
+    options: { maxSyncDays?: number } = {},
+  ): Promise<{ days: DayKey[] } | null> {
+    const today = this.time.today();
+    // A future-dated assignment has no history to reconcile; recompute the day itself so
+    // the row exists, and stop there.
+    const to = dayKey > today ? dayKey : today;
+    const days = this.time.range(dayKey, to);
+
+    const limit = options.maxSyncDays ?? MAX_INLINE_RECONCILE_DAYS;
+    if (days.length > limit) return null;
+
+    // Oldest first: each day's streak reads the corrected version of the one before it
+    // rather than a stale one.
+    for (const day of days) await this.recomputeDay(day);
+    await this.recomputeStudentAggregates();
+    for (const day of days) await this.rebuildLeaderboards(day);
+
+    this.logger.log(
+      `Reconciled assignment day ${dayKey}: recomputed ${days.length} day(s) through ${to}`,
+    );
+    return { days };
   }
 
   /** Full recompute over a range — the admin panel's "recalculate scores". */

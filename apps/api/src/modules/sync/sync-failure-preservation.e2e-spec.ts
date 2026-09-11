@@ -28,6 +28,7 @@ import { BatchesService } from '../batches/batches.service';
 import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { CampusesService } from '../campuses/campuses.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
+import { EnrolmentService } from '../../common/services/enrolment.service';
 
 const prisma = new PrismaClient();
 
@@ -55,6 +56,7 @@ const rollup = new RollupService(
   metrics,
   batches,
   campuses,
+  new EnrolmentService(prisma as never, time),
 );
 
 let campusId: string;

@@ -70,6 +70,14 @@ function makeService(students: Student[]) {
     {} as never, // metrics — only reached by recomputeStudentAggregates
     { batchOnDayForStudents: vi.fn(async () => new Map()) } as never,
     { campusOnDayForStudents: vi.fn(async () => new Map()) } as never,
+    {
+      // The real service resolves the earliest of `createdAt` and the first mirrored
+      // submission. These fixtures hold no submissions, so `createdAt` is the answer —
+      // which keeps this suite testing the cutoff rather than the resolution.
+      observedFromDayByStudent: vi.fn(
+        async () => new Map(students.map((s) => [s.id, time.dayKeyOf(s.createdAt)])),
+      ),
+    } as never,
   );
 
   // The write itself is not under test — which students reach it is.

@@ -131,3 +131,37 @@ export function describeNotObserved(observedFromDayKey: DayKey): string {
     `LeetCode does not expose submission history far enough back to reconstruct earlier days.`
   );
 }
+
+/**
+ * The first day the tracker can honestly state a complete number for a student.
+ *
+ * It is the day their record was created, and the two tempting widenings are both wrong
+ * in ways worth recording, because each looks like a fix for the late-assignment problem:
+ *
+ *  * **Not enrolment.** Placement history can prove a student was in the programme on a
+ *    day — first placements are back-dated to enrolment precisely so it can. It cannot
+ *    make LeetCode return submissions its ~20-row public window has already dropped.
+ *    Scoring an enrolled-but-unobserved student writes `solvedCount: 0` for a day nobody
+ *    measured, which is the fabricated history this module exists to prevent.
+ *
+ *  * **Not "the mirror holds something from that day".** A surviving submission proves we
+ *    could see *that* submission; it does not prove we saw everything. A student whose
+ *    one mirrored row is an accepted Two Sum may have solved the day's other three
+ *    problems in rows the window dropped. Scoring them 1 of 4 asserts three failures that
+ *    were never observed. Partial evidence has its own representation — `provenSolvedFloor`
+ *    on the `NOT_OBSERVED` row, which says "at least one, and we cannot say more" — and
+ *    that is the honest shape for it.
+ *
+ * So the rule is deliberately narrow, and the interesting work happens on the *other*
+ * side of it: `NOT_OBSERVED` rows are reported separately, never summed into a
+ * denominator, and carry the floor the evidence supports.
+ *
+ * Pure, so the rollup (which skips) and the dashboard (which explains the skip) cannot
+ * reach different conclusions about the same student.
+ */
+export function resolveObservedFromDay(input: {
+  /** Program day of `Student.createdAt` — when the tracker first held a row. */
+  createdAtDayKey: DayKey;
+}): DayKey {
+  return input.createdAtDayKey;
+}

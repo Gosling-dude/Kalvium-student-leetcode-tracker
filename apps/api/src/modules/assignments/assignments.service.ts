@@ -162,6 +162,13 @@ export class AssignmentsService {
     );
 
     await this.invalidate(dto.dayKey);
+    // Reconcile the date the assignment is *for*, not the date it was entered on.
+    //
+    // This is the whole of "I added September 7th's assignment on the 11th and the
+    // tracker showed nothing". The day was genuinely stale, and `findStaleAssignmentDays`
+    // would have caught it — on the next sync, up to three hours later. The person who
+    // just typed the assignment in is looking at the screen now.
+    await this.reconcile(dto.dayKey);
     const counter = await this.audienceCounter();
     return created.map((assignment) => this.toSummary(assignment, counter));
   }
@@ -253,7 +260,38 @@ export class AssignmentsService {
     });
 
     await this.invalidate(existing.dayKey);
+    // An edited problem list changes who solved what on that day, so the same
+    // reconciliation a create needs, an update needs too.
+    await this.reconcile(existing.dayKey);
     return this.toSummary(assignment, await this.audienceCounter());
+  }
+
+  /**
+   * Recompute the day an assignment applies to, and the days after it.
+   *
+   * Failure is logged and swallowed rather than propagated: the assignment *was* created,
+   * and turning a successful write into an error because the recompute that follows it
+   * stumbled would leave the admin re-submitting a form that already worked — producing
+   * the "an assignment already exists for this date" clash on the retry. A day that is
+   * still stale is picked up by the next sync, which is exactly the safety net that
+   * existed before this call was added.
+   */
+  private async reconcile(dayKey: DayKey): Promise<void> {
+    try {
+      const result = await this.rollup.reconcileAssignmentDay(dayKey);
+      if (result === null) {
+        this.logger.warn(
+          `${dayKey} is too far back to reconcile inline. The results for that date are ` +
+            'stale until POST /admin/recompute is run, or the next sync reaches it.',
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Assignment for ${dayKey} was saved, but recomputing that date failed: ` +
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          'The next sync will pick the day up as stale.',
+      );
+    }
   }
 
   /**

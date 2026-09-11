@@ -6,6 +6,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
 import { CONFIG_TOKEN, loadConfiguration, type AppConfig } from './config/configuration';
 import { ProgramTimeService } from './common/services/program-time.service';
+import { EnrolmentService } from './common/services/enrolment.service';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -49,8 +50,9 @@ import { StudentPortalModule } from './modules/student-portal/student-portal.mod
   providers: [
     { provide: CONFIG_TOKEN, useFactory: (): AppConfig => loadConfiguration() },
     ProgramTimeService,
+    EnrolmentService,
   ],
-  exports: [CONFIG_TOKEN, ProgramTimeService],
+  exports: [CONFIG_TOKEN, ProgramTimeService, EnrolmentService],
 })
 class CoreModule {}
 

@@ -32,6 +32,7 @@ import { CacheService } from '../../infra/cache/cache.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { AssignmentsService } from '../assignments/assignments.service';
 import { BatchesService } from '../batches/batches.service';
+import { EnrolmentService } from '../../common/services/enrolment.service';
 import { CampusesService } from '../campuses/campuses.service';
 
 /**
@@ -101,6 +102,7 @@ export class DashboardService {
     private readonly assignments: AssignmentsService,
     private readonly campuses: CampusesService,
     private readonly batches: BatchesService,
+    private readonly enrolment: EnrolmentService,
   ) {}
 
   /**
@@ -522,6 +524,13 @@ export class DashboardService {
 
     // Only students whose enrolment postdates the day can be unobserved, so the
     // `createdAt` bound does the heavy filtering in SQL rather than in memory.
+    //
+    // It is deliberately the *wider* of the two conditions: `createdAt` can only be later
+    // than the day `EnrolmentService` resolves (an earlier mirrored submission moves it
+    // back, never forward), so this over-selects and the authoritative rule below
+    // narrows. Filtering on the resolved day in SQL is not possible — it is a join of two
+    // sources — and filtering on the *narrower* one would drop students the real rule
+    // would have kept.
     const dayEnd = this.time.bounds(dayKey).end;
     const candidates = await this.prisma.student.findMany({
       where: {
@@ -541,6 +550,13 @@ export class DashboardService {
 
     const unseen = candidates.filter((student) => !observedStudentIds.has(student.id));
     if (unseen.length === 0) return byScope;
+
+    // The authoritative observed-from day, from the same service the rollup skips on. If
+    // the two disagreed, this list would name students the rollup had in fact scored —
+    // the mentor would see the same person in a bucket *and* under "not observed".
+    const observedFromDay = await this.enrolment.observedFromDayByStudent(
+      unseen.map((student) => student.id),
+    );
 
     // Where they were on the day — from placement history, not their campus now. A late
     // import back-dated to the cohort's enrolment resolves here; one with no placement
@@ -569,8 +585,11 @@ export class DashboardService {
 
       // The SQL bound above already narrows to `createdAt > dayKey`, but the authoritative
       // rule lives in `@dsa/shared`. Re-asserting it here means a timezone edge in the
-      // timestamp bound can only ever drop a row, never invent an unobserved one.
-      const observedFromDayKey = this.time.dayKeyOf(student.createdAt);
+      // timestamp bound can only ever drop a row, never invent an unobserved one — and a
+      // student whose mirror holds a submission from before this day is dropped here,
+      // because the rollup scored them and they are not unobserved at all.
+      const observedFromDayKey =
+        observedFromDay.get(student.id) ?? this.time.dayKeyOf(student.createdAt);
       if (resolveObservability({ observedFromDayKey, dayKey }) === 'OBSERVED') continue;
 
       const key = scopeKey(campusId, batchId);

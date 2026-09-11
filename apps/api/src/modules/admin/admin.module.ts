@@ -45,6 +45,7 @@ import { ScoringModule } from '../scoring/scoring.module';
 import { BatchesModule } from '../batches/batches.module';
 import { BatchesService } from '../batches/batches.service';
 import { RollupService } from '../scoring/rollup.service';
+import { StudentMetricsService } from '../scoring/student-metrics.service';
 import { ScoringConfigService } from '../scoring/scoring-config.service';
 import { AuditService } from '../audit/audit.service';
 import { AuthModule } from '../auth/auth.module';
@@ -125,6 +126,7 @@ export class AdminController {
     private readonly cache: CacheService,
     private readonly time: ProgramTimeService,
     private readonly rollup: RollupService,
+    private readonly metrics: StudentMetricsService,
     private readonly scoringConfig: ScoringConfigService,
     private readonly audit: AuditService,
     private readonly batches: BatchesService,
@@ -527,6 +529,46 @@ export class AdminController {
       );
 
     return { accepted: true, from, to, force: dto.force ?? false, note: 'Running in the background.' };
+  }
+
+  /**
+   * Compare every student's stored `totalSolved` against the canonical calculation and
+   * repair the drift.
+   *
+   * The column is a cache the nightly rollup refreshes, so it is stale between runs and
+   * silently wrong if a rollup fails — which is the whole of "the student list and the
+   * student page show different totals". This is the deliberate, auditable way to close
+   * that gap without waiting for the next rollup, and the response names every student it
+   * changed and by how much, so the repair can be checked rather than trusted.
+   *
+   * A student the canonical calculation holds **no evidence** for is skipped, never
+   * zeroed: an unreadable profile is not a student who has solved nothing.
+   */
+  @Post('reconcile-solved-totals')
+  @Audit('SOLVED_TOTALS_RECONCILED', 'System')
+  @ApiOperation({
+    summary: "Repair drift between the stored solved total and the canonical calculation",
+    description:
+      'Returns the before/after for every student it corrected. Students with no ' +
+      'evidence either way are reported separately and left untouched — a profile we ' +
+      'could not read is not a student who solved nothing.',
+  })
+  async reconcileSolvedTotals() {
+    const result = await this.metrics.reconcileStoredTotals();
+
+    await this.audit.log(
+      'INFO',
+      'AdminController',
+      `Solved-total reconciliation: ${result.corrected.length} corrected of ${result.checked} ` +
+        `checked, ${result.skippedNoEvidence} skipped for lack of evidence`,
+    );
+
+    return {
+      checked: result.checked,
+      correctedCount: result.corrected.length,
+      skippedNoEvidence: result.skippedNoEvidence,
+      corrected: result.corrected,
+    };
   }
 
   @Post('leaderboard/reset')
