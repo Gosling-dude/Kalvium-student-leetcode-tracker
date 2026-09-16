@@ -54,6 +54,7 @@ export default function CampusAnalysisPage() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [open, setOpen] = useState<{ campusId: string; category: CampusCategory } | null>(null);
+  const [openWeek, setOpenWeek] = useState<{ campusId: string; weekNumber: number } | null>(null);
   const [student, setStudent] = useState<string | null>(null);
 
   const range = { from: from || undefined, to: to || undefined };
@@ -128,13 +129,28 @@ export default function CampusAnalysisPage() {
           <CardHeader
             title={campus.campusName}
             description={
-              `${campus.activeStudents} active students · ${campus.solved} of ${campus.assigned} ` +
-              `assigned questions solved (${percent(campus.solvePercent)})` +
+              `${campus.activeStudents} active students` +
               (campus.studentsWithUsableData < campus.activeStudents
                 ? ` · ${campus.activeStudents - campus.studentsWithUsableData} without readable data`
                 : '')
             }
           />
+
+          {/*
+            Questions, not student-question pairs. These are distinct LeetCode problems
+            over the whole period, so a problem set in two weeks counts once here and once
+            in each of those weeks — the weekly column does not add up to this, correctly.
+          */}
+          <div className="grid grid-cols-2 gap-x-8 gap-y-3 border-b border-[var(--color-border)] px-5 py-4 sm:grid-cols-4">
+            <Figure label="Questions assigned" value={campus.assigned} />
+            <Figure label="Questions solved" value={campus.solved} />
+            <Figure label="Solve rate" value={percent(campus.solvePercent)} />
+            <Figure
+              label="Avg student completion"
+              value={percent(campus.studentCompletionPercent)}
+              hint="Share of set work the average student completed"
+            />
+          </div>
 
           <div className="px-5 py-4">
             <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-muted)]">
@@ -144,12 +160,16 @@ export default function CampusAnalysisPage() {
               <thead>
                 <tr>
                   <Th>Week</Th>
-                  <Th className="text-right">Assigned</Th>
+                  <Th className="text-right">Questions assigned</Th>
                   <Th className="text-right">Solved</Th>
                   <Th className="text-right">Attempted, not solved</Th>
                   <Th className="text-right">Not attempted</Th>
-                  <Th className="text-right">Solved %</Th>
+                  <Th className="text-right">Solve %</Th>
+                  <Th className="text-right">Attempt %</Th>
+                  <Th className="text-right">Not attempted %</Th>
+                  <Th className="text-right">Avg student completion</Th>
                   <Th className="text-right">Students active</Th>
+                  <Th />
                 </tr>
               </thead>
               <tbody>
@@ -166,13 +186,37 @@ export default function CampusAnalysisPage() {
                     <Td className="text-right tabular-nums">{week.attemptedNotSolved}</Td>
                     <Td className="text-right tabular-nums">{week.notAttempted}</Td>
                     <Td className="text-right tabular-nums">{percent(week.solvePercent)}</Td>
+                    <Td className="text-right tabular-nums">{percent(week.attemptPercent)}</Td>
+                    <Td className="text-right tabular-nums">{percent(week.notAttemptedPercent)}</Td>
+                    <Td className="text-right tabular-nums">{percent(week.studentCompletionPercent)}</Td>
                     <Td className="text-right tabular-nums">
                       {week.studentsActive} / {week.studentsObserved}
+                    </Td>
+                    <Td className="w-px">
+                      <Button
+                        variant="ghost"
+                        disabled={week.assigned === 0}
+                        onClick={() =>
+                          setOpenWeek(
+                            openWeek?.campusId === campus.campusId && openWeek.weekNumber === week.weekNumber
+                              ? null
+                              : { campusId: campus.campusId, weekNumber: week.weekNumber },
+                          )
+                        }
+                      >
+                        {openWeek?.campusId === campus.campusId && openWeek.weekNumber === week.weekNumber
+                          ? 'Hide'
+                          : 'Questions'}
+                      </Button>
                     </Td>
                   </tr>
                 ))}
               </tbody>
             </TableShell>
+
+            {openWeek?.campusId === campus.campusId ? (
+              <QuestionDetail campusId={campus.campusId} weekNumber={openWeek.weekNumber} range={range} />
+            ) : null}
           </div>
 
           <div className="border-t border-[var(--color-border)] px-5 py-4">
@@ -251,6 +295,95 @@ export default function CampusAnalysisPage() {
       {student ? (
         <StudentDetail studentId={student} range={range} onClose={() => setStudent(null)} />
       ) : null}
+    </div>
+  );
+}
+
+/** A single figure with its label. Used for the four numbers in the campus header. */
+function Figure({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
+  return (
+    <div>
+      <div className="text-xs text-[var(--color-fg-muted)]">{label}</div>
+      <div className="mt-0.5 text-lg font-semibold tabular-nums">{value}</div>
+      {hint ? <div className="mt-0.5 text-xs text-[var(--color-fg-muted)]">{hint}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * The questions behind one week's row.
+ *
+ * Where the student numbers live. The week says "20 questions, 20 solved"; this says how
+ * many of the students each question was set for actually solved it, which is the
+ * difference between a campus that handled the week and one where a different single
+ * student cleared each question.
+ */
+function QuestionDetail({
+  campusId,
+  weekNumber,
+  range,
+}: {
+  campusId: string;
+  weekNumber: number;
+  range: { from?: string; to?: string };
+}) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['campus-analysis-questions', campusId, weekNumber, range.from, range.to],
+    queryFn: () => api.campusAnalysisQuestions(campusId, { ...range, weekNumber }),
+  });
+
+  if (isLoading) return <Skeleton className="mt-4 h-40 w-full" />;
+  if (error) return <div className="mt-4"><ErrorState error={error} onRetry={() => void refetch()} /></div>;
+  if (!data) return null;
+
+  return (
+    <div className="mt-4 border-t border-[var(--color-border)] pt-4">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-muted)]">
+        Week {weekNumber} — every question set
+      </h4>
+      <TableShell>
+        <thead>
+          <tr>
+            <Th>Question</Th>
+            <Th>Set on</Th>
+            <Th>Outcome</Th>
+            <Th className="text-right">Students set</Th>
+            <Th className="text-right">Solved</Th>
+            <Th className="text-right">Attempted, not solved</Th>
+            <Th className="text-right">Not attempted</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.questions.map((q) => (
+            <tr key={q.slug}>
+              <Td>
+                <a
+                  href={`https://leetcode.com/problems/${q.slug}/`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:underline"
+                >
+                  {q.title}
+                </a>
+              </Td>
+              <Td className="whitespace-nowrap text-xs text-[var(--color-fg-muted)]">
+                {q.dayKeys.join(', ')}
+              </Td>
+              <Td className="whitespace-nowrap text-xs">
+                {q.outcome === 'SOLVED'
+                  ? 'Solved'
+                  : q.outcome === 'ATTEMPTED_NOT_SOLVED'
+                    ? 'Attempted, not solved'
+                    : 'Not attempted'}
+              </Td>
+              <Td className="text-right tabular-nums">{q.studentsAssigned}</Td>
+              <Td className="text-right tabular-nums">{q.studentsSolved}</Td>
+              <Td className="text-right tabular-nums">{q.studentsAttemptedNotSolved}</Td>
+              <Td className="text-right tabular-nums">{q.studentsNotAttempted}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </TableShell>
     </div>
   );
 }

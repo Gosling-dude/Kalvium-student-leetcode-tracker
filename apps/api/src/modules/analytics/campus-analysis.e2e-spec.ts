@@ -79,9 +79,17 @@ async function makeStudent(
   return row.id;
 }
 
-/** Write the scored day directly: this suite tests the reading, not the rollup. */
+/**
+ * Write the scored day directly: this suite tests the reading, not the rollup.
+ *
+ * Both levels are written, because the two summaries read different rows and a fixture
+ * that sets only one cannot tell a correct reading from a broken one: the day-level
+ * `solvedCount` feeds the student categories, the per-problem rows feed the question
+ * counts. The rollup always writes them together, so a fixture that does not is testing
+ * a state production never has.
+ */
 async function scoreDay(studentId: string, dayKey: string, assignmentId: string, solved: number): Promise<void> {
-  await prisma.dailyStatus.create({
+  const status = await prisma.dailyStatus.create({
     data: {
       studentId,
       dayKey,
@@ -91,6 +99,18 @@ async function scoreDay(studentId: string, dayKey: string, assignmentId: string,
       inWindowSolvedCount: 0,
       computedVersion: 2,
     },
+  });
+  const links = await prisma.assignmentProblem.findMany({
+    where: { assignmentId },
+    orderBy: { position: 'asc' },
+  });
+  await prisma.dailyProblemStatus.createMany({
+    data: links.map((link, i) => ({
+      dailyStatusId: status.id,
+      problemId: link.problemId,
+      position: link.position,
+      status: i < solved ? ('ACCEPTED' as const) : ('NOT_ATTEMPTED' as const),
+    })),
   });
 }
 
@@ -213,19 +233,28 @@ describe('campus analysis', () => {
       }
     });
 
-    it('and the campus totals are the sum of its students', async () => {
+    it('and the campus totals are questions, deliberately not the sum of its students', async () => {
       const result = await service.summary(admin, { ...period, campusId: campusA });
       const campus = campusOf(result, campusA);
-      let solved = 0;
-      let assigned = 0;
+
+      let studentAssigned = 0;
       for (const category of CAMPUS_CATEGORIES) {
         for (const student of (await service.drillDown(admin, campusA, category, period)).students) {
-          solved += student.solved;
-          assigned += student.assigned;
+          studentAssigned += student.assigned;
         }
       }
-      expect(solved).toBe(campus.solved);
-      expect(assigned).toBe(campus.assigned);
+
+      // Six days, two problems each: twelve distinct questions, whatever the cohort size.
+      expect(campus.assigned).toBe(DAYS.length * 2);
+      // The student sum is four times larger here, and would grow with every enrolment.
+      // Asserting they differ is the regression guard: this is the exact substitution
+      // that put "1,960 questions assigned" in front of a manager.
+      expect(studentAssigned).toBeGreaterThan(campus.assigned);
+
+      // The question drill-down is the thing that must agree with the card.
+      const detail = await service.questions(admin, campusA, period);
+      expect(detail.questions.length).toBe(campus.assigned);
+      expect(detail.totals.solved).toBe(campus.solved);
     });
   });
 

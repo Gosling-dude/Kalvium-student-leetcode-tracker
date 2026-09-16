@@ -308,17 +308,99 @@ export interface StudentAnalysis {
   verdict: CategoryVerdict;
 }
 
+/**
+ * One assigned question, at a campus, in a week.
+ *
+ * The unit the campus summary counts. A LeetCode problem is one question however many
+ * students received it, and a question is *solved* when at least one of the students it
+ * was set for has an accepted solution for it — the three outcomes are properties of the
+ * question, not sums over students.
+ *
+ * The student figures riding alongside are supporting detail, never the headline. They
+ * are what tells "one of ninety-eight students solved it" apart from "ninety-five did",
+ * which the question-level verdict alone cannot say.
+ */
+export interface CampusQuestion {
+  /** Canonical identity. Lowercased LeetCode slug — the only thing deduplication uses. */
+  slug: string;
+  title: string;
+  weekNumber: number;
+  /** Assignment dates this question was set on inside the week; usually one. */
+  dayKeys: DayKey[];
+  outcome: 'SOLVED' | 'ATTEMPTED_NOT_SOLVED' | 'NOT_ATTEMPTED';
+  /** Students this question was actually set for — the denominator of the three below. */
+  studentsAssigned: number;
+  studentsSolved: number;
+  studentsAttemptedNotSolved: number;
+  studentsNotAttempted: number;
+}
+
+/**
+ * A campus's week, counted in questions.
+ *
+ * `assigned = solved + attemptedNotSolved + notAttempted` holds by construction: the
+ * three outcomes partition the distinct questions set that week, so the identity is not
+ * something a caller has to check. `assertQuestionTotalsReconcile` checks it anyway,
+ * because "by construction" is a claim about the code as written, not as edited.
+ */
+export interface CampusQuestionWeek {
+  weekNumber: number;
+  from: DayKey;
+  to: DayKey;
+  /** Distinct LeetCode problems set for this campus this week. Never students x questions. */
+  assigned: number;
+  solved: number;
+  attemptedNotSolved: number;
+  notAttempted: number;
+  solvePercent: number | null;
+  /** (solved + attemptedNotSolved) / assigned — how much of the week was engaged with. */
+  attemptPercent: number | null;
+  notAttemptedPercent: number | null;
+  /**
+   * Share of the week's set work the campus actually completed, per student.
+   *
+   * Question-level solve% answers "did anyone get this?", which at a 98-student campus is
+   * yes for almost every question — 20 of 20 solved, while the best-answered question
+   * reached 15 students and the worst 3. True, and nearly content-free.
+   *
+   * This is the number that separates those: total student-solves over total
+   * student-assignments, which is the mean share of targeted students solving each
+   * question. It is deliberately the same figure the old summary reported as its solve
+   * percentage — that percentage was always meaningful; what was wrong was the counts
+   * beside it, which presented student-question pairs as questions. Keeping it under an
+   * honest name preserves the signal instead of throwing it out with the inflated counts.
+   */
+  studentCompletionPercent: number | null;
+
+  /** Supporting, and kept separate from the question counts on purpose. */
+  studentsActive: number;
+  studentsObserved: number;
+}
+
 export interface CampusAnalysisSummary {
   campusId: string;
   campusCode: string;
   campusName: string;
   activeStudents: number;
   studentsWithUsableData: number;
+
+  /**
+   * Distinct questions across the whole period, not the sum of the weekly figures.
+   *
+   * A problem set in two different weeks is one question here and one in each of those
+   * weeks, so the weekly column does not add up to this — correctly. Adding them would
+   * re-introduce the double counting at a different scale.
+   */
   assigned: number;
   solved: number;
   attemptedNotSolved: number;
   notAttempted: number;
   solvePercent: number | null;
+  attemptPercent: number | null;
+  notAttemptedPercent: number | null;
+  /** See `CampusQuestionWeek.studentCompletionPercent`. */
+  studentCompletionPercent: number | null;
+
   categories: {
     category: CampusCategory;
     label: string;
@@ -328,17 +410,23 @@ export interface CampusAnalysisSummary {
     /** A category of zero is shown, not hidden — "nobody is consistent" is a finding. */
     isPerformanceCategory: boolean;
   }[];
-  weeks: {
-    weekNumber: number;
-    from: DayKey;
-    to: DayKey;
-    assigned: number;
-    solved: number;
-    attemptedNotSolved: number;
-    notAttempted: number;
-    solvePercent: number | null;
-    /** Students with at least one solve — the honest "participated" count. */
-    studentsActive: number;
-    studentsObserved: number;
-  }[];
+  weeks: CampusQuestionWeek[];
+}
+
+/**
+ * Check the partition actually partitions, for one campus-week.
+ *
+ * Returns the complaint rather than throwing: a reconciliation failure is a finding to
+ * report on, and an analysis screen that 500s tells a mentor less than one that renders
+ * with the discrepancy named.
+ */
+export function assertQuestionTotalsReconcile(
+  week: Pick<CampusQuestionWeek, 'weekNumber' | 'assigned' | 'solved' | 'attemptedNotSolved' | 'notAttempted'>,
+): string | null {
+  const parts = week.solved + week.attemptedNotSolved + week.notAttempted;
+  if (parts === week.assigned) return null;
+  return (
+    `Week ${week.weekNumber}: ${week.solved} solved + ${week.attemptedNotSolved} attempted ` +
+    `+ ${week.notAttempted} not attempted = ${parts}, but ${week.assigned} were assigned.`
+  );
 }

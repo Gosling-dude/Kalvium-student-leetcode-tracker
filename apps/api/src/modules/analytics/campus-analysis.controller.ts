@@ -79,6 +79,37 @@ export class CampusAnalysisController {
   }
 
   /**
+   * Every question set for one campus, with the student counts behind each.
+   *
+   * The supporting view: the campus card says how many questions, this says how many
+   * students got each one. Optional `weekNumber` narrows to one row of that card.
+   */
+  @Get(':campusId/questions')
+  @Roles('ADMIN', 'MENTOR', 'VIEWER')
+  @ApiOperation({
+    summary: 'Question-by-question detail for one campus',
+    description:
+      'One row per distinct LeetCode problem, never per student-question pair. The ' +
+      'student counts beside each question are supporting detail, not the headline.',
+  })
+  @ApiQuery({ name: 'from', required: false })
+  @ApiQuery({ name: 'to', required: false })
+  @ApiQuery({ name: 'weekNumber', required: false, description: 'Narrow to one week of the period.' })
+  campusQuestions(
+    @CurrentUser() user: RequestUser,
+    @Param('campusId', ParseUUIDPipe) campusId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('weekNumber') weekNumber?: string,
+  ) {
+    const week = weekNumber === undefined ? undefined : Number.parseInt(weekNumber, 10);
+    if (week !== undefined && !Number.isFinite(week)) {
+      throw new BadRequestException(`"${weekNumber}" is not a week number.`);
+    }
+    return this.analysis.questions(user, campusId, { from, to, weekNumber: week });
+  }
+
+  /**
    * One student, day by day and question by question.
    *
    * Open to students for their own record — the only role that may reach it without a

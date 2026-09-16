@@ -14,6 +14,7 @@ import type {
   CampusAnalysisPeriod,
   CampusAnalysisSummary,
   CampusCategory,
+  CampusQuestion,
   StudentAnalysis,
   AssignmentAudienceChangeEntry,
   AssignmentSummary,
@@ -383,6 +384,26 @@ export const api = {
       rule: string;
       students: StudentAnalysis[];
     }>(`/campus-analysis/${campusId}/categories/${category}${qs(params)}`),
+
+  /** One row per distinct LeetCode problem, never per student-question pair. */
+  campusAnalysisQuestions: (
+    campusId: string,
+    params: { from?: string; to?: string; weekNumber?: number } = {},
+  ) =>
+    apiFetch<{
+      period: CampusAnalysisPeriod;
+      campusId: string;
+      totals: {
+        assigned: number;
+        solved: number;
+        attemptedNotSolved: number;
+        notAttempted: number;
+        solvePercent: number | null;
+        attemptPercent: number | null;
+        notAttemptedPercent: number | null;
+      };
+      questions: CampusQuestion[];
+    }>(`/campus-analysis/${campusId}/questions${qs(params)}`),
 
   campusAnalysisStudent: (studentId: string, params: { from?: string; to?: string } = {}) =>
     apiFetch<{
