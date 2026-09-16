@@ -373,8 +373,15 @@ export class IntegrityService {
       // applied for eight days: the deploy was green, the API was healthy, every other
       // invariant was zero, and 229 student-days were reporting a number the application
       // had stopped meaning. Nothing was broken in a way anything could see.
+      // Scoped to students still in the programme, which is the same population the
+      // rollup rewrites. An archived student's rows can never be restamped, so counting
+      // them here would hold the check red for ever over work that cannot be done.
       this.prisma.dailyStatus.count({
-        where: { computedVersion: { lt: COMPLETION_RULES_VERSION }, assignedCount: { gt: 0 } },
+        where: {
+          computedVersion: { lt: COMPLETION_RULES_VERSION },
+          assignedCount: { gt: 0 },
+          student: { status: 'ACTIVE' },
+        },
       }),
     ]);
 

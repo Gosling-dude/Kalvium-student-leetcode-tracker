@@ -3,6 +3,8 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger'
 
 import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { AnalyticsService } from './analytics.service';
+import { CampusAnalysisController } from './campus-analysis.controller';
+import { CampusAnalysisService } from './campus-analysis.service';
 import { BatchesModule } from '../batches/batches.module';
 import { CampusesModule } from '../campuses/campuses.module';
 import { CampusesService } from '../campuses/campuses.service';
@@ -55,8 +57,8 @@ export class AnalyticsController {
 
 @Module({
   imports: [BatchesModule, CampusesModule],
-  controllers: [AnalyticsController],
-  providers: [AnalyticsService],
-  exports: [AnalyticsService],
+  controllers: [AnalyticsController, CampusAnalysisController],
+  providers: [AnalyticsService, CampusAnalysisService],
+  exports: [AnalyticsService, CampusAnalysisService],
 })
 export class AnalyticsModule {}

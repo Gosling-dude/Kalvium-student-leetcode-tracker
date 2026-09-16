@@ -805,17 +805,25 @@ export class RollupService {
           AND d."assignedCount" > 0
         ORDER BY d."dayKey"
       `,
-      // Rows written by a superseded rule set. Restricted to days that were actually
-      // scored against an assignment: a day with nothing assigned has no completion
-      // figure for a rule change to have invalidated, and sweeping those in would make
-      // every empty weekend look stale for ever.
+      // Rows written by a superseded rule set. Two restrictions, and both are the
+      // difference between a check that clears and one that is red for ever:
+      //
+      //  * days actually scored against an assignment — a day with nothing assigned has
+      //    no completion figure for a rule change to have invalidated;
+      //  * students the rollup will actually rewrite. It skips anyone who has left the
+      //    programme, so an archived student's historical rows can never be restamped.
+      //    Reporting them as outstanding work would mean reporting work that cannot be
+      //    done, every night, for ever — and a check that is always red is one nobody
+      //    reads. Their rows are frozen history and are left as the history they are.
       this.prisma.$queryRaw<{ dayKey: string }[]>`
         SELECT DISTINCT d."dayKey"
         FROM "daily_statuses" d
+        JOIN "students" s ON s.id = d."studentId"
         WHERE d."dayKey" >= ${from}
           AND d."dayKey" <= ${to}
           AND d."computedVersion" < ${COMPLETION_RULES_VERSION}
           AND d."assignedCount" > 0
+          AND s."status" = 'ACTIVE'
         ORDER BY d."dayKey"
       `,
     ]);
@@ -842,22 +850,43 @@ export class RollupService {
     const rows = await this.prisma.$queryRaw<{ dayKey: string }[]>`
       SELECT DISTINCT d."dayKey"
       FROM "daily_statuses" d
+      JOIN "students" s ON s.id = d."studentId"
       WHERE d."computedVersion" < ${COMPLETION_RULES_VERSION}
         AND d."assignedCount" > 0
+        AND s."status" = 'ACTIVE'
       ORDER BY d."dayKey"
     `;
     return rows.map((row) => row.dayKey as DayKey);
   }
 
-  /** How much work `healSupersededDays` has outstanding — days and rows. */
-  async countSupersededRows(): Promise<{ days: number; rows: number }> {
-    const [row] = await this.prisma.$queryRaw<{ days: bigint; rows: bigint }[]>`
-      SELECT COUNT(DISTINCT d."dayKey") AS days, COUNT(*) AS rows
+  /**
+   * How much work `healSupersededDays` has outstanding.
+   *
+   * `rows` counts only what a recompute can actually rewrite. `archivedRows` counts the
+   * rest — rows belonging to students who have since left the programme, which the rollup
+   * skips by design and which therefore keep whatever rule set last wrote them. Reported
+   * rather than hidden, because "frozen at the old definition" is a true and useful thing
+   * to know about a past report, and silently excluding it would make the zero above look
+   * like a stronger claim than it is.
+   *
+   * The consequence for an operator: recompute *before* archiving a student, not after,
+   * if their history is to be corrected at all.
+   */
+  async countSupersededRows(): Promise<{ days: number; rows: number; archivedRows: number }> {
+    const [row] = await this.prisma.$queryRaw<{ days: bigint; rows: bigint; archived: bigint }[]>`
+      SELECT COUNT(DISTINCT d."dayKey") FILTER (WHERE s."status" = 'ACTIVE') AS days,
+             COUNT(*) FILTER (WHERE s."status" = 'ACTIVE') AS rows,
+             COUNT(*) FILTER (WHERE s."status" <> 'ACTIVE') AS archived
       FROM "daily_statuses" d
+      JOIN "students" s ON s.id = d."studentId"
       WHERE d."computedVersion" < ${COMPLETION_RULES_VERSION}
         AND d."assignedCount" > 0
     `;
-    return { days: Number(row?.days ?? 0), rows: Number(row?.rows ?? 0) };
+    return {
+      days: Number(row?.days ?? 0),
+      rows: Number(row?.rows ?? 0),
+      archivedRows: Number(row?.archived ?? 0),
+    };
   }
 
   /**

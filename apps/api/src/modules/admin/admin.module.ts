@@ -548,7 +548,7 @@ export class AdminController {
       'to do — the stored figures answer a question the application no longer asks.',
   })
   async recomputePending() {
-    const [{ days, rows }, dayKeys] = await Promise.all([
+    const [{ days, rows, archivedRows }, dayKeys] = await Promise.all([
       this.rollup.countSupersededRows(),
       this.rollup.findSupersededDays(),
     ]);
@@ -556,6 +556,10 @@ export class AdminController {
       currentRulesVersion: COMPLETION_RULES_VERSION,
       staleDays: days,
       staleRows: rows,
+      // Rows belonging to students who have left. The rollup skips them by design, so
+      // these keep whatever rule set last wrote them — recompute before archiving if a
+      // departing student's history is to be corrected.
+      frozenArchivedRows: archivedRows,
       from: dayKeys[0] ?? null,
       to: dayKeys[dayKeys.length - 1] ?? null,
       dayKeys,
