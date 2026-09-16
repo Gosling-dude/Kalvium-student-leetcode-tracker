@@ -49,6 +49,31 @@ import { addDays, type DayKey } from './time';
  */
 export const ASSIGNMENT_LOOKBACK_DAYS = 2;
 
+/**
+ * The version of the completion *rules* that produced a stored result.
+ *
+ * `computedAt` answers "when was this row written"; it cannot answer "was it written by
+ * the rules we run today". Those are different questions, and conflating them is what
+ * left 229 production student-days reporting a windowed `solvedCount` for eight days
+ * after the ever-solved rule shipped: the rows were recent, their assignments had not
+ * changed, so nothing marked them stale and no recompute was scheduled. The gap needed a
+ * human to remember a documented post-deploy step, and the report went out before anyone
+ * did.
+ *
+ * Stamping the version onto every row closes that by construction. A row computed under
+ * an older version is stale by definition, `findStaleAssignmentDays` reports it, and the
+ * ordinary recompute path heals it — no migration can backfill a rule change, but it does
+ * not have to, because the system now knows it is owed one.
+ *
+ * Bump this in the same commit as any change to what `calculateAssignmentCompletion`
+ * returns. Do not bump it for refactors that cannot change a stored figure.
+ *
+ * History:
+ *  * `1` — original: `solvedCount` measured over the lookback window only.
+ *  * `2` — ever-solved `solvedCount`, windowed figures separated into `inWindow*`.
+ */
+export const COMPLETION_RULES_VERSION = 2;
+
 /** Verdicts that count as solving a problem. Everything else is an attempt. */
 export type CompletionStatus =
   | 'ACCEPTED'

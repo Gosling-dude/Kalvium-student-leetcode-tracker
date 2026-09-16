@@ -16,6 +16,7 @@ import {
   ASSIGNMENT_LOOKBACK_DAYS,
   assignmentWindow,
   calculateAssignmentCompletion,
+  COMPLETION_RULES_VERSION,
   computeDailyScore,
   computeStreaks,
   isCurrentStudent,
@@ -764,13 +765,26 @@ export class RollupService {
    * Also self-clearing: the recompute finds no assignment, writes `assignedCount = 0`, and
    * the day stops matching.
    *
+   * The third query covers the case neither of the others can see: the **rules** changed
+   * while the data did not. When `solvedCount` was redefined from "solved in the window"
+   * to "ever solved", every historical row was left holding the old figure — and was
+   * invisible to the first query, because no assignment had been touched. That is the
+   * shape of the reported bug: an assignment entered on the 11th for the 7th, whose
+   * students had solved the problems on the 5th, going on reporting zero. Rows stamped
+   * with a superseded `computedVersion` are stale by definition, so the ordinary
+   * recompute path now heals a rule change without anyone remembering to ask it to.
+   *
+   * Self-clearing in the same way: the recompute stamps the current version and the day
+   * stops matching, which is what makes running this five times produce one change and
+   * four no-ops.
+   *
    * `assignment.createdAt` is never used to filter *submissions* — that would discard
    * genuine work done before the assignment was entered, which is the very thing the
    * lookback window exists to allow. It is only ever used here, to decide *which days to
    * recompute*.
    */
   async findStaleAssignmentDays(from: DayKey, to: DayKey): Promise<DayKey[]> {
-    const [edited, orphaned] = await Promise.all([
+    const [edited, orphaned, superseded] = await Promise.all([
       this.prisma.$queryRaw<{ dayKey: string }[]>`
         SELECT DISTINCT a."dayKey"
         FROM "assignments" a
@@ -791,9 +805,95 @@ export class RollupService {
           AND d."assignedCount" > 0
         ORDER BY d."dayKey"
       `,
+      // Rows written by a superseded rule set. Restricted to days that were actually
+      // scored against an assignment: a day with nothing assigned has no completion
+      // figure for a rule change to have invalidated, and sweeping those in would make
+      // every empty weekend look stale for ever.
+      this.prisma.$queryRaw<{ dayKey: string }[]>`
+        SELECT DISTINCT d."dayKey"
+        FROM "daily_statuses" d
+        WHERE d."dayKey" >= ${from}
+          AND d."dayKey" <= ${to}
+          AND d."computedVersion" < ${COMPLETION_RULES_VERSION}
+          AND d."assignedCount" > 0
+        ORDER BY d."dayKey"
+      `,
     ]);
 
-    return [...new Set([...edited, ...orphaned].map((row) => row.dayKey))].sort();
+    return [
+      ...new Set([...edited, ...orphaned, ...superseded].map((row) => row.dayKey)),
+    ].sort();
+  }
+
+  /**
+   * Every scored day still holding results from a superseded rule set, over all history.
+   *
+   * Separate from `findStaleAssignmentDays` because it deliberately takes no date range.
+   * A routine sync is bounded to a fortnight so it can never turn into a full rebuild,
+   * and that bound is right — but a rule change reaches back to the first day of the
+   * programme, and a fortnight-wide broom will never sweep it. This is what the operator
+   * and the integrity check need to see: not "is recent data current" but "is any stored
+   * figure still answering the old question".
+   *
+   * Cheap: `daily_statuses_computedVersion_dayKey_idx` makes it an index-only scan of the
+   * rows below the current version, which is zero rows in the steady state.
+   */
+  async findSupersededDays(): Promise<DayKey[]> {
+    const rows = await this.prisma.$queryRaw<{ dayKey: string }[]>`
+      SELECT DISTINCT d."dayKey"
+      FROM "daily_statuses" d
+      WHERE d."computedVersion" < ${COMPLETION_RULES_VERSION}
+        AND d."assignedCount" > 0
+      ORDER BY d."dayKey"
+    `;
+    return rows.map((row) => row.dayKey as DayKey);
+  }
+
+  /** How much work `healSupersededDays` has outstanding — days and rows. */
+  async countSupersededRows(): Promise<{ days: number; rows: number }> {
+    const [row] = await this.prisma.$queryRaw<{ days: bigint; rows: bigint }[]>`
+      SELECT COUNT(DISTINCT d."dayKey") AS days, COUNT(*) AS rows
+      FROM "daily_statuses" d
+      WHERE d."computedVersion" < ${COMPLETION_RULES_VERSION}
+        AND d."assignedCount" > 0
+    `;
+    return { days: Number(row?.days ?? 0), rows: Number(row?.rows ?? 0) };
+  }
+
+  /**
+   * Recompute every day still on a superseded rule set, oldest first.
+   *
+   * The operation the ever-solved change needed and did not have. It is idempotent by
+   * construction rather than by promise: a day it recomputes is stamped with the current
+   * version and no longer selected, so the second run finds nothing and the fifth run
+   * finds nothing. Re-running it is a no-op, not a second correction.
+   *
+   * Oldest first so each day's streak reads the corrected version of the day before it,
+   * and leaderboards are rebuilt afterwards rather than per day, because a day's rank
+   * depends on every student's corrected figure for that day, not just the one being
+   * written.
+   */
+  async healSupersededDays(
+    options: { limit?: number } = {},
+  ): Promise<{ days: DayKey[]; from: DayKey | null; to: DayKey | null; remaining: number }> {
+    const all = await this.findSupersededDays();
+    // Oldest first, so a bounded run always makes progress from the far end of the
+    // backlog rather than re-treading the same recent days every night.
+    const days = options.limit !== undefined ? all.slice(0, Math.max(0, options.limit)) : all;
+    if (days.length === 0) return { days: [], from: null, to: null, remaining: 0 };
+
+    for (const day of days) await this.recomputeDay(day);
+    await this.recomputeStudentAggregates();
+    for (const day of days) await this.rebuildLeaderboards(day);
+    await this.cache.flush();
+
+    const remaining = all.length - days.length;
+    this.logger.log(
+      `Healed ${days.length} day(s) computed under a superseded rule set ` +
+        `(${days[0]}…${days[days.length - 1]}); now at version ${COMPLETION_RULES_VERSION}` +
+        (remaining > 0 ? `; ${remaining} day(s) still outstanding` : ''),
+    );
+    return { days, from: days[0], to: days[days.length - 1], remaining };
   }
 
   // -------------------------------------------------------------------------
@@ -971,6 +1071,9 @@ export class RollupService {
       streakAtDay: input.streakAtDay,
       syncStatus: input.syncStatus,
       computedAt: new Date(),
+      // Stamped on every write, never conditionally: a row is only as current as the
+      // rules that produced it, and this row was just produced by these ones.
+      computedVersion: COMPLETION_RULES_VERSION,
     };
 
     const status = await this.prisma.dailyStatus.upsert({

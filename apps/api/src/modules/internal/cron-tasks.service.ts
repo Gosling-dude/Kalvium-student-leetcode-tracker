@@ -38,7 +38,21 @@ export interface RollupResult {
   prunedTokens: number;
   prunedAuditLogs: number;
   prunedSystemLogs: number;
+  /** Days re-derived because their stored figures came from a superseded rule set. */
+  supersededDaysHealed: number;
+  /** How many such days are still outstanding after this run. */
+  supersededDaysRemaining: number;
 }
+
+/**
+ * How many superseded days one nightly rollup will re-derive.
+ *
+ * Small enough that the nightly job keeps its shape — a day-close, not a rebuild — and
+ * large enough to clear a six-week programme's backlog within a week of a rule change.
+ * `POST /admin/recompute/stale` clears the whole backlog at once when somebody wants it
+ * now rather than by the weekend.
+ */
+const SUPERSEDED_DAYS_PER_NIGHT = 7;
 
 @Injectable()
 export class CronTasksService {
@@ -88,6 +102,22 @@ export class CronTasksService {
     await this.rollup.recomputeStudentAggregates();
     await this.rollup.rebuildLeaderboards(yesterday);
 
+    // Work off any backlog left by a rule change, oldest first and a few days per night.
+    //
+    // Bounded on purpose. A rule change invalidates every day back to the start of the
+    // programme, and rebuilding all of them in one nightly job on a small instance is the
+    // kind of operation that times out halfway and leaves the history in two different
+    // states. A handful a night converges within a week, costs about as much as the
+    // day-close it runs beside, and is safe to interrupt: each day is stamped as it is
+    // written, so the next run resumes exactly where this one stopped.
+    const healed = await this.rollup.healSupersededDays({ limit: SUPERSEDED_DAYS_PER_NIGHT });
+    if (healed.days.length > 0) {
+      this.logger.log(
+        `Re-derived ${healed.days.length} day(s) left on a superseded rule set ` +
+          `(${healed.from}…${healed.to}); ${healed.remaining} remaining`,
+      );
+    }
+
     const prunedTokens = await this.auth.pruneExpiredTokens();
     const prunedLogs = await this.audit.pruneOlderThan(180);
 
@@ -95,6 +125,8 @@ export class CronTasksService {
       prunedTokens,
       prunedAuditLogs: prunedLogs.audit,
       prunedSystemLogs: prunedLogs.system,
+      supersededDaysHealed: healed.days.length,
+      supersededDaysRemaining: healed.remaining,
     });
 
     this.logger.log(`Nightly rollup for ${yesterday} complete`);
@@ -103,6 +135,8 @@ export class CronTasksService {
       prunedTokens,
       prunedAuditLogs: prunedLogs.audit,
       prunedSystemLogs: prunedLogs.system,
+      supersededDaysHealed: healed.days.length,
+      supersededDaysRemaining: healed.remaining,
     };
   }
 

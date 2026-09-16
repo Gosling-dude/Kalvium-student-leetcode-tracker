@@ -1056,6 +1056,17 @@ model DailyStatus {
   overriddenById String?    @db.Uuid
 
   computedAt DateTime @default(now())
+  /// Which version of the completion rules wrote this row — `COMPLETION_RULES_VERSION`.
+  ///
+  /// `computedAt` says *when* a row was written, which is not the same question as
+  /// *under which rules*. A day whose assignment never changed is never reported stale,
+  /// so after a rule change its stored figures stay on the old definition until somebody
+  /// remembers a manual recompute. Stamping the version makes "computed under superseded
+  /// rules" a state the system can see and heal on its own.
+  ///
+  /// `0` on every row written before the column existed, which is correct: those rows
+  /// predate versioning and are stale by definition.
+  computedVersion Int @default(0)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -1079,6 +1090,9 @@ model DailyStatus {
   /// entered after its own date and the day was never re-evaluated. Descending so the
   /// planner takes the newest row per day and stops instead of aggregating the whole day.
   @@index([dayKey, computedAt(sort: Desc)])
+  /// "Which days were computed under superseded rules?" — the version-staleness scan,
+  /// which would otherwise be a sequential scan of every row ever scored.
+  @@index([computedVersion, dayKey])
   @@map("daily_statuses")
 }
 

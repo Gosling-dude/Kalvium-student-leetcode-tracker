@@ -35,7 +35,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import type { ScoringConfig } from '@dsa/shared';
+import { COMPLETION_RULES_VERSION, type ScoringConfig } from '@dsa/shared';
 
 import { Audit, CurrentUser, Roles, type RequestUser } from '../../common/decorators';
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -529,6 +529,81 @@ export class AdminController {
       );
 
     return { accepted: true, from, to, force: dto.force ?? false, note: 'Running in the background.' };
+  }
+
+  /**
+   * What the tracker knows it still owes: days whose stored figures were written under a
+   * superseded set of completion rules.
+   *
+   * Read-only, and cheap enough to poll. Zero is the steady state; a non-zero answer
+   * means a rule change has shipped and the history has not been re-derived under it yet,
+   * which is exactly the condition that let a report go out reading windowed counts as
+   * though they were ever-solved counts.
+   */
+  @Get('recompute/pending')
+  @ApiOperation({
+    summary: 'Days still holding results from a superseded completion rule set',
+    description:
+      'Zero in the steady state. Non-zero means POST /admin/recompute/stale has work ' +
+      'to do — the stored figures answer a question the application no longer asks.',
+  })
+  async recomputePending() {
+    const [{ days, rows }, dayKeys] = await Promise.all([
+      this.rollup.countSupersededRows(),
+      this.rollup.findSupersededDays(),
+    ]);
+    return {
+      currentRulesVersion: COMPLETION_RULES_VERSION,
+      staleDays: days,
+      staleRows: rows,
+      from: dayKeys[0] ?? null,
+      to: dayKeys[dayKeys.length - 1] ?? null,
+      dayKeys,
+    };
+  }
+
+  /**
+   * Re-derive every day left on a superseded rule set — the whole history, not a window.
+   *
+   * Distinct from `POST /admin/recompute` because it needs no date range to be chosen
+   * correctly: the rows themselves say which days are owed, so there is no way to run it
+   * over the wrong range. Safe to run repeatedly — the second run finds nothing.
+   */
+  @Post('recompute/stale')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Audit('SCORES_RECOMPUTED', 'System')
+  @ApiOperation({
+    summary: 'Recompute every day still on a superseded completion rule set',
+    description:
+      'Runs in the background. Idempotent: each day it corrects is stamped with the ' +
+      'current rules version and is not selected again, so re-running is a no-op.',
+  })
+  async recomputeStale() {
+    const pending = await this.rollup.countSupersededRows();
+    if (pending.days === 0) {
+      return { accepted: false, staleDays: 0, note: 'Nothing to do — all history is on the current rules.' };
+    }
+
+    void this.rollup
+      .healSupersededDays()
+      .then((result) =>
+        this.audit.log(
+          'INFO',
+          'AdminController',
+          `Healed ${result.days.length} superseded day(s) ${result.from}…${result.to}`,
+          { days: result.days.length },
+        ),
+      )
+      .catch((error: Error) =>
+        this.audit.log('ERROR', 'AdminController', `Superseded-day recompute failed: ${error.message}`),
+      );
+
+    return {
+      accepted: true,
+      staleDays: pending.days,
+      staleRows: pending.rows,
+      note: 'Running in the background.',
+    };
   }
 
   /**

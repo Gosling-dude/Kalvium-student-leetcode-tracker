@@ -15,6 +15,7 @@
  */
 
 import { Inject, Injectable } from '@nestjs/common';
+import { COMPLETION_RULES_VERSION } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
@@ -341,6 +342,7 @@ export class IntegrityService {
       orphanedActiveStudents,
       mentorsWithoutCampus,
       baselineResultsWithoutAttempt,
+      supersededRows,
     ] = await Promise.all([
       // The spreadsheet-import bug: `Student.batchId` set, no placement ever recorded.
       // Every historical query reads the history table, so these students resolve to "no
@@ -366,6 +368,14 @@ export class IntegrityService {
       // The FK cascade should make this impossible; counted because "should be impossible"
       // is exactly the class of thing worth checking in production.
       this.prisma.baselineTestProblemResult.count({ where: { attempt: { is: undefined } } }),
+      // Scored days still holding figures from a superseded completion rule set. This
+      // check exists because its absence is what let the ever-solved change sit half
+      // applied for eight days: the deploy was green, the API was healthy, every other
+      // invariant was zero, and 229 student-days were reporting a number the application
+      // had stopped meaning. Nothing was broken in a way anything could see.
+      this.prisma.dailyStatus.count({
+        where: { computedVersion: { lt: COMPLETION_RULES_VERSION }, assignedCount: { gt: 0 } },
+      }),
     ]);
 
     return [
@@ -408,6 +418,17 @@ export class IntegrityService {
         detail:
           'A day claiming assigned problems while naming no assignment — the count cannot ' +
           'be reconciled against a problem set.',
+      },
+      {
+        check: 'scored_days_on_superseded_completion_rules',
+        count: supersededRows,
+        shouldBeZero: true,
+        severity: 'data',
+        detail:
+          `Student-days whose stored figures were computed under completion rules older ` +
+          `than version ${COMPLETION_RULES_VERSION}. They answer the question the ` +
+          `application used to ask, so any report reading them understates solved work. ` +
+          `POST /admin/recompute/stale clears it; re-running is a no-op.`,
       },
       {
         check: 'active_students_without_a_campus',
