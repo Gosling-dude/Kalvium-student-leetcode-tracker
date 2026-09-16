@@ -218,6 +218,27 @@ export class InternalController {
   }
 
   /**
+   * Clear the backlog of days still holding figures from a superseded rule set.
+   *
+   * Reachable with `CRON_SECRET` rather than only an admin login, because the thing that
+   * detects this backlog is the unattended smoke test. A remedy that needs a human in a
+   * browser leaves the check red until somebody happens to look — which is the exact
+   * failure the versioning was added to stop.
+   *
+   * Bounded per call and resumable: the response carries `remaining`, and the caller
+   * loops until it is zero. Safe to over-call — a day it has already corrected is stamped
+   * with the current version and is not selected again.
+   *
+   * Recomputes only. It calls no provider, writes no submission and deletes nothing.
+   */
+  @Post('recompute-stale')
+  @HttpCode(200)
+  async recomputeStale(@Body() body: { maxDays?: number }) {
+    const result = await this.tasks.runSupersededRecompute(body?.maxDays);
+    return { ok: true, ...result };
+  }
+
+  /**
    * Daily report automation (§28). Optionally accepts `{ dayKey }` so a manual
    * `workflow_dispatch` run (or a support script) can (re)generate a specific date
    * instead of "yesterday". Always stops at `PENDING_APPROVAL` — see

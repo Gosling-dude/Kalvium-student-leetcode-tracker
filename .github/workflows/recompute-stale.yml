@@ -1,0 +1,126 @@
+name: Clear Superseded Recompute Backlog
+
+# Re-derives every day still holding figures from a superseded completion rule set.
+#
+# Runs when the Production Smoke Test fails on
+# `scored_days_on_superseded_completion_rules`. That check is the one that notices a rule
+# change has shipped without the history being re-derived under it; this is the remedy,
+# reachable with the same CRON_SECRET the check itself uses. Putting the remedy behind an
+# admin browser login is how a red check stays red for a week.
+#
+# Safe to re-run at any time. The work is idempotent: a day it corrects is stamped with
+# the current rules version and is never selected again, so a second run finds nothing.
+# It recomputes derived state only — no provider call, no submission written, nothing
+# deleted.
+on:
+  workflow_dispatch:
+    inputs:
+      max_days_per_call:
+        description: 'Days to re-derive per request. Lower this if a call times out.'
+        required: false
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two of these interleaving would recompute the same days twice — harmless, but it
+  # doubles the load on a free-tier instance for no gain.
+  group: recompute-stale
+  cancel-in-progress: false
+
+jobs:
+  recompute:
+    name: Re-derive superseded days
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check secrets are present
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -z "${BACKEND_URL:-}" ] && { echo "::error::BACKEND_URL is not set"; missing=1; }
+          [ -z "${CRON_SECRET:-}" ] && { echo "::error::CRON_SECRET is not set"; missing=1; }
+          [ "$missing" -eq 1 ] && exit 1
+          echo "Secrets present."
+
+      - name: Loop until the backlog is empty
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          MAX_DAYS: ${{ inputs.max_days_per_call || '10' }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+          url="${base}/api/v1/internal/recompute-stale"
+
+          # A cap rather than `while true`: if `remaining` ever stops falling the run
+          # should end and say so, not spin for the full timeout.
+          for attempt in $(seq 1 20); do
+            echo "--- call ${attempt} ---"
+            http_code=$(curl -sS -o /tmp/body.json -w '%{http_code}' \
+              --connect-timeout 30 --max-time 900 \
+              -X POST "${url}" \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H 'Content-Type: application/json' \
+              -d "{\"maxDays\": ${MAX_DAYS}}" || echo "000")
+
+            if [ "${http_code}" != "200" ]; then
+              echo "::error::recompute-stale returned ${http_code}"
+              cat /tmp/body.json || true
+              exit 1
+            fi
+
+            cat /tmp/body.json
+            echo
+
+            remaining=$(python3 -c "import json;print(json.load(open('/tmp/body.json'))['remaining'])")
+            healed=$(python3 -c "import json;print(json.load(open('/tmp/body.json'))['healed'])")
+            echo "healed ${healed}, remaining ${remaining}"
+
+            if [ "${remaining}" -eq 0 ]; then
+              echo "Backlog clear."
+              break
+            fi
+            # Nothing healed but work remains: looping again would repeat the same no-op.
+            if [ "${healed}" -eq 0 ]; then
+              echo "::error::${remaining} day(s) outstanding but none were re-derived. Check the server log."
+              exit 1
+            fi
+          done
+
+      - name: Confirm the integrity check now passes
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+          curl -sS -o /tmp/integrity.json --max-time 120 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${base}/api/v1/internal/integrity"
+
+          python3 - <<'PY'
+          import json, sys
+
+          with open('/tmp/integrity.json') as handle:
+              report = json.load(handle)
+
+          finding = next(
+              (f for f in report['findings']
+               if f['check'] == 'scored_days_on_superseded_completion_rules'),
+              None,
+          )
+          if finding is None:
+              print('::warning::check not present — the deployed build predates it')
+              sys.exit(0)
+
+          print(f"scored_days_on_superseded_completion_rules = {finding['count']}")
+          if finding['count'] != 0:
+              print(f"::error::{finding['count']} row(s) still on a superseded rule set")
+              sys.exit(1)
+          print('Every scored day is on the current completion rules.')
+          PY

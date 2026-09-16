@@ -54,6 +54,18 @@ export interface RollupResult {
  */
 const SUPERSEDED_DAYS_PER_NIGHT = 7;
 
+/**
+ * How many superseded days one *explicit* backlog run will re-derive.
+ *
+ * Larger than the nightly budget because this is somebody deliberately clearing a
+ * backlog, and smaller than "all of them" because the free-tier instance and the HTTP
+ * request in front of it both have limits, and a run that dies halfway through a
+ * 40-day rebuild is worse than four runs that each finish. The caller loops on
+ * `remaining`; each day is stamped as it is written, so a killed run loses only the day
+ * it was on.
+ */
+const SUPERSEDED_DAYS_PER_BATCH = 10;
+
 @Injectable()
 export class CronTasksService {
   private readonly logger = new Logger(CronTasksService.name);
@@ -137,6 +149,51 @@ export class CronTasksService {
       prunedSystemLogs: prunedLogs.system,
       supersededDaysHealed: healed.days.length,
       supersededDaysRemaining: healed.remaining,
+    };
+  }
+
+  /**
+   * Work off the backlog of days still computed under a superseded rule set.
+   *
+   * Exists as a task rather than only as an admin endpoint because of who can reach it.
+   * `POST /admin/recompute/stale` needs an admin session in a browser; the thing that
+   * actually notices the backlog is the Production Smoke Test, which runs unattended and
+   * holds `CRON_SECRET`. Leaving the only remedy behind a human login is how a red check
+   * stays red for a week — which is the failure mode this whole mechanism exists to
+   * prevent, reintroduced one level up.
+   *
+   * Bounded and resumable: returns `remaining` so the caller loops until it reaches zero.
+   * Idempotent, so an extra call is a no-op rather than a second correction.
+   */
+  async runSupersededRecompute(maxDays?: number): Promise<{
+    healed: number;
+    remaining: number;
+    from: DayKey | null;
+    to: DayKey | null;
+  }> {
+    const limit = Math.min(Math.max(1, maxDays ?? SUPERSEDED_DAYS_PER_BATCH), 40);
+    const before = await this.rollup.countSupersededRows();
+    if (before.days === 0) {
+      this.logger.log('No days left on a superseded rule set.');
+      return { healed: 0, remaining: 0, from: null, to: null };
+    }
+
+    this.logger.log(`Re-deriving up to ${limit} of ${before.days} superseded day(s)`);
+    const result = await this.rollup.healSupersededDays({ limit });
+
+    await this.audit.log(
+      'INFO',
+      'CronTasks',
+      `Re-derived ${result.days.length} superseded day(s) ${result.from}…${result.to}; ` +
+        `${result.remaining} remaining`,
+      { healed: result.days.length, remaining: result.remaining },
+    );
+
+    return {
+      healed: result.days.length,
+      remaining: result.remaining,
+      from: result.from,
+      to: result.to,
     };
   }
 
