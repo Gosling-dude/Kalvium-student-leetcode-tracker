@@ -30,9 +30,11 @@ import {
   CAMPUS_CATEGORY_MEANINGS,
   CAMPUS_CATEGORY_RULES,
   resolveObservedFromDay,
+  type CampusAnalysisPeriod,
+  type CampusAnalysisSummary,
   type CampusCategory,
-  type CategoryVerdict,
   type DayKey,
+  type StudentAnalysis,
   type StudentWeek,
 } from '@dsa/shared';
 
@@ -51,69 +53,6 @@ import type { RequestUser } from '../../common/decorators';
  */
 const UNRELIABLE_SYNC_STATES = new Set(['NEVER_SYNCED', 'USER_NOT_FOUND', 'PROFILE_PRIVATE', 'RATE_LIMITED', 'PROVIDER_ERROR', 'TIMEOUT']);
 
-export interface Period {
-  from: DayKey;
-  to: DayKey;
-}
-
-export interface StudentAnalysis {
-  studentId: string;
-  name: string;
-  campusId: string | null;
-  campusCode: string | null;
-  squad: string | null;
-  batch: string | null;
-  leetcodeUsername: string | null;
-  leetcodeUrl: string | null;
-  /** Distinct assigned problems ever solved across the whole period. */
-  solved: number;
-  assigned: number;
-  attemptedNotSolved: number;
-  notAttempted: number;
-  /** The tracker's canonical lifetime distinct-solved figure, not a per-period one. */
-  totalSolvedAllTime: number;
-  dataAvailable: boolean;
-  /** Named when `dataAvailable` is false, so the drill-down can say *why*. */
-  dataIssue: string | null;
-  weeks: StudentWeek[];
-  verdict: CategoryVerdict;
-}
-
-export interface CampusSummary {
-  campusId: string;
-  campusCode: string;
-  campusName: string;
-  activeStudents: number;
-  studentsWithUsableData: number;
-  assigned: number;
-  solved: number;
-  attemptedNotSolved: number;
-  notAttempted: number;
-  solvePercent: number | null;
-  categories: {
-    category: CampusCategory;
-    label: string;
-    meaning: string;
-    rule: string;
-    students: number;
-    /** A category of zero is shown, not hidden — "nobody is consistent" is a finding. */
-    isPerformanceCategory: boolean;
-  }[];
-  weeks: {
-    weekNumber: number;
-    from: DayKey;
-    to: DayKey;
-    assigned: number;
-    solved: number;
-    attemptedNotSolved: number;
-    notAttempted: number;
-    solvePercent: number | null;
-    /** Students with at least one solve — the honest "participated" count. */
-    studentsActive: number;
-    studentsObserved: number;
-  }[];
-}
-
 @Injectable()
 export class CampusAnalysisService {
   constructor(
@@ -129,7 +68,7 @@ export class CampusAnalysisService {
    * so the analysis does not silently start reporting from a hard-coded August after the
    * programme moves on.
    */
-  async resolvePeriod(from?: string, to?: string): Promise<Period> {
+  async resolvePeriod(from?: string, to?: string): Promise<CampusAnalysisPeriod> {
     const today = this.time.today();
     const end = (to && this.time.isValid(to) ? to : today) as DayKey;
     if (from && this.time.isValid(from)) return { from: from as DayKey, to: end };
@@ -150,7 +89,7 @@ export class CampusAnalysisService {
    * per-problem rows to count categories and the difference is seconds per request.
    */
   private async weeklyRowsFor(
-    period: Period,
+    period: CampusAnalysisPeriod,
     scope: { campusIds?: string[]; studentIds?: string[] },
   ): Promise<StudentAnalysis[]> {
     const weeks = analysisWeeks(period.from, period.to);
@@ -301,7 +240,7 @@ export class CampusAnalysisService {
   async summary(
     user: RequestUser,
     options: { from?: string; to?: string; campusId?: string } = {},
-  ): Promise<{ period: Period; campuses: CampusSummary[] }> {
+  ): Promise<{ period: CampusAnalysisPeriod; campuses: CampusAnalysisSummary[] }> {
     const period = await this.resolvePeriod(options.from, options.to);
     const campusIds = await this.scopeFor(user, options.campusId);
 
@@ -378,7 +317,7 @@ export class CampusAnalysisService {
     category: CampusCategory,
     options: { from?: string; to?: string } = {},
   ): Promise<{
-    period: Period;
+    period: CampusAnalysisPeriod;
     campusId: string;
     category: CampusCategory;
     label: string;
@@ -415,7 +354,7 @@ export class CampusAnalysisService {
     studentId: string,
     options: { from?: string; to?: string } = {},
   ): Promise<{
-    period: Period;
+    period: CampusAnalysisPeriod;
     student: StudentAnalysis;
     days: {
       dayKey: DayKey;

@@ -31,6 +31,8 @@
  * last month's has to keep meaning the same thing.
  */
 
+import type { DayKey } from './time';
+
 /** Share of a week's assigned questions that must be solved to count as a strong week. */
 export const STRONG_WEEK_THRESHOLD = 0.6;
 /** At or below this share, every week, is what the sheet calls not participating. */
@@ -267,4 +269,76 @@ export function analysisWeeks(from: string, to: string): { weekNumber: number; f
     n += 1;
   }
   return weeks;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Response shapes.
+ *
+ * Declared here rather than in the API module so the web client and the server
+ * are typed from one definition. A summary card and its drill-down disagreeing
+ * is the failure this feature exists to prevent; two copies of the shape they
+ * are rendered from is how that starts.
+ * ------------------------------------------------------------------------- */
+
+export interface CampusAnalysisPeriod {
+  from: DayKey;
+  to: DayKey;
+}
+
+export interface StudentAnalysis {
+  studentId: string;
+  name: string;
+  campusId: string | null;
+  campusCode: string | null;
+  squad: string | null;
+  batch: string | null;
+  leetcodeUsername: string | null;
+  leetcodeUrl: string | null;
+  /** Distinct assigned problems ever solved across the whole period. */
+  solved: number;
+  assigned: number;
+  attemptedNotSolved: number;
+  notAttempted: number;
+  /** The tracker's canonical lifetime distinct-solved figure, not a per-period one. */
+  totalSolvedAllTime: number;
+  dataAvailable: boolean;
+  /** Named when `dataAvailable` is false, so the drill-down can say *why*. */
+  dataIssue: string | null;
+  weeks: StudentWeek[];
+  verdict: CategoryVerdict;
+}
+
+export interface CampusAnalysisSummary {
+  campusId: string;
+  campusCode: string;
+  campusName: string;
+  activeStudents: number;
+  studentsWithUsableData: number;
+  assigned: number;
+  solved: number;
+  attemptedNotSolved: number;
+  notAttempted: number;
+  solvePercent: number | null;
+  categories: {
+    category: CampusCategory;
+    label: string;
+    meaning: string;
+    rule: string;
+    students: number;
+    /** A category of zero is shown, not hidden — "nobody is consistent" is a finding. */
+    isPerformanceCategory: boolean;
+  }[];
+  weeks: {
+    weekNumber: number;
+    from: DayKey;
+    to: DayKey;
+    assigned: number;
+    solved: number;
+    attemptedNotSolved: number;
+    notAttempted: number;
+    solvePercent: number | null;
+    /** Students with at least one solve — the honest "participated" count. */
+    studentsActive: number;
+    studentsObserved: number;
+  }[];
 }

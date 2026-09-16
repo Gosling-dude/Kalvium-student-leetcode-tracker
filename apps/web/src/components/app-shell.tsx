@@ -16,6 +16,7 @@ import { Command } from 'cmdk';
 import { toast } from 'sonner';
 import {
   BarChart3,
+  Building2,
   CalendarDays,
   ClipboardCheck,
   LayoutDashboard,
@@ -47,6 +48,9 @@ const NAV = [
   { href: '/baseline-tests', label: 'Baseline Tests', icon: ClipboardCheck },
   { href: '/email-reports', label: 'Email Reports', icon: Mail },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+  // Separate from Analytics: that page answers "how is the programme trending", this one
+  // answers "which students at which campus need a conversation, and on what evidence".
+  { href: '/campus-analysis', label: 'Campus Analysis', icon: Building2 },
   { href: '/admin', label: 'Admin', icon: Settings },
 ];
 

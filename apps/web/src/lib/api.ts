@@ -11,6 +11,10 @@
 
 import type {
   AnalyticsOverview,
+  CampusAnalysisPeriod,
+  CampusAnalysisSummary,
+  CampusCategory,
+  StudentAnalysis,
   AssignmentAudienceChangeEntry,
   AssignmentSummary,
   AuthUser,
@@ -353,6 +357,52 @@ export const api = {
 
   analytics: (from?: string, to?: string, campus?: string, batch?: string) =>
     apiFetch<AnalyticsOverview>(`/analytics/overview${qs({ from, to, campus, batch })}`),
+
+  /**
+   * Campus cards with their category counts.
+   *
+   * Scope is the server's answer, not a parameter: what comes back is exactly the
+   * campuses this account may read. There is no "all campuses" flag to get wrong.
+   */
+  campusAnalysis: (params: { from?: string; to?: string; campusId?: string } = {}) =>
+    apiFetch<{ period: CampusAnalysisPeriod; campuses: CampusAnalysisSummary[] }>(
+      `/campus-analysis/summary${qs(params)}`,
+    ),
+
+  campusAnalysisCategory: (
+    campusId: string,
+    category: CampusCategory,
+    params: { from?: string; to?: string } = {},
+  ) =>
+    apiFetch<{
+      period: CampusAnalysisPeriod;
+      campusId: string;
+      category: CampusCategory;
+      label: string;
+      meaning: string;
+      rule: string;
+      students: StudentAnalysis[];
+    }>(`/campus-analysis/${campusId}/categories/${category}${qs(params)}`),
+
+  campusAnalysisStudent: (studentId: string, params: { from?: string; to?: string } = {}) =>
+    apiFetch<{
+      period: CampusAnalysisPeriod;
+      student: StudentAnalysis;
+      days: {
+        dayKey: string;
+        assigned: number;
+        solved: number;
+        problems: {
+          titleSlug: string;
+          title: string;
+          position: number;
+          status: string;
+          solvedAt: string | null;
+          solvedBeforeAssignmentDate: boolean;
+          attempts: number;
+        }[];
+      }[];
+    }>(`/campus-analysis/students/${studentId}${qs(params)}`),
 
   /** `studentIds` narrows the run to those students — used to re-sync one row on demand. */
   startSync: (body: { mode?: string; dayKey?: string; studentIds?: string[] } = {}) =>
