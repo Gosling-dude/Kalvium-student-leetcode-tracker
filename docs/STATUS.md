@@ -162,24 +162,70 @@ itself rather than only on the schedule.
 
 ## Recommended first steps
 
-The system is already deployed and syncing. The outstanding actions are:
+### 0. Deploy. Nothing below this line is true of production until you do.
 
-0. **Run `POST /admin/recompute { from, to }` over the assignment history, once.**
-   Required, and it is the one step a deploy cannot do for you.
+Checked on 16 September 2026 via **Deployment Diagnostic**, which asks the running
+process what it is:
 
-   The migration that introduced `inWindowSolvedCount` backfills it from the stored
-   `solvedCount`, which is correct and lossless — every existing row *was* computed under
-   the window, so its count is already the in-window count. What the migration cannot do
-   is raise `solvedCount` to the new ever-solved definition, because that needs the
-   submission mirror re-read per day.
+```
+deployed commit : 63ab4a51e343c8dcec15cab558b7c514b68a18f4   (8 September, 15:26)
+repo HEAD       : 1f739f1809e91ea95177cefcb0c9fe1a7f4badcb   (11 September, 13:13)
+match           : False
+```
 
-   Nothing does it automatically: the nightly rollup recomputes **yesterday only**, and
-   `findStaleAssignmentDays` will not report these days either — their assignments have
-   not changed, only the rule has. So until this is run, historical days keep reporting
-   the old windowed figure. Nothing is *wrong* meanwhile; it is simply not yet better.
+Production has been serving an 8 September build for over a week. Seven commits have never
+reached it, and they are the ones that matter here:
 
-   Assignments created from now on reconcile their own date at create time and need no
-   action.
+| commit | what it fixes |
+| --- | --- |
+| `67c21aa` | an assigned problem solved at any time counts — **the ever-solved rule** |
+| `2ff6654` | filters that were invisible, unscoped, or both |
+| `eeac45f` | an assignment reconciles its own date when created, not three hours later |
+| `7936a10` | the last three places the baseline board said "Absent" |
+| `3d46716` | a mentor with two campuses opening the tracker to a blank page |
+
+Migrations run on container boot, so the ever-solved migration has not been applied either:
+production's `daily_statuses` still has no `inWindowSolvedCount`, and the API still
+computes `solvedCount` over the two-day lookback window only. **That is the whole
+explanation for a weekly report showing 0 for a student who solved the question before the
+assignment was entered.** No code change fixes it; a deploy does.
+
+The smoke test does not catch this. It waits forty attempts for the commit to match, warns
+when it does not, and then runs its integrity checks against whatever is there — all of
+which pass, because the old build is internally consistent. Green, and a week behind.
+
+Why the deploy is not happening cannot be read from here: the repository holds no Render
+credentials, so "is the build failing or is it not being triggered" is a question for the
+Render dashboard.
+
+### 1. Then run `POST /admin/recompute/stale`, once.
+
+Deploying applies the migration but cannot finish the job: `inWindowSolvedCount` is
+backfilled losslessly from the stored `solvedCount` — every existing row *was* computed
+under the window, so its count is already the in-window count — but raising `solvedCount`
+to the ever-solved definition needs the submission mirror re-read per day.
+
+Measured against the 8 September production snapshot, across the 219 active students that
+recompute changes **214 student-days currently recorded as 0 solved for a student who had
+in fact solved at least one of that day's assigned problems**, and 265 understated in
+total. Nothing is overstated.
+
+Since `20260916090000_completion_rules_version` this no longer depends on anyone
+remembering. Every row carries the version of the rules that wrote it, so:
+
+- `GET /admin/recompute/pending` reports what is outstanding;
+- the `scored_days_on_superseded_completion_rules` integrity check **fails** while any
+  remain, so the smoke test goes red instead of green;
+- the nightly rollup works seven days off per night, oldest first;
+- `POST /admin/recompute/stale` clears the whole backlog at once.
+
+It is idempotent by construction: a healed day is stamped with the current version and is
+no longer selected, so the fifth run finds nothing. Rows belonging to students who have
+since been archived are reported separately as `frozenArchivedRows` and left alone — the
+rollup skips departed students by design, so **recompute before archiving somebody**, not
+after, if their history is to be corrected.
+
+### 2. Everything else
 
 1. **Set `EMAIL_FROM` and `EMAIL_DEFAULT_TO`** on the backend so the nightly report
    generates. Add `EMAIL_PROVIDER` and `EMAIL_API_KEY` to enable sending an approved one.
