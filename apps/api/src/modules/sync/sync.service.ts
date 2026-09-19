@@ -488,7 +488,13 @@ export class SyncService implements OnModuleInit {
     }
 
     const students = await this.prisma.student.findMany({
-      where: { status: 'ACTIVE' },
+      // A student archived out of Coding Hours who is still enrolled in Infosys
+      // Preparation must keep being synced — Infosys reads the same raw `Submission`
+      // mirror this job populates, and has no sync engine of its own (see the schema
+      // section banner above `InfosysEnrollment`). Archiving someone out of Coding
+      // Hours is a Coding-Hours decision; it must not silently stop their Infosys data
+      // from updating.
+      where: { OR: [{ status: 'ACTIVE' }, { infosysEnrollment: { isNot: null } }] },
       select: { id: true },
     });
     return students.map((s) => s.id);
