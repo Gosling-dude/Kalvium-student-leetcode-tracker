@@ -248,6 +248,7 @@ model User {
   mentoredSquads            Squad[]                    @relation("SquadMentor")
   mentorCampuses            MentorCampus[]
   assignments               Assignment[]               @relation("AssignmentAuthor")
+  infosysAssignments        InfosysAssignment[]        @relation("InfosysAssignmentAuthor")
   notes                     MentorNote[]
   auditLogs                 AuditLog[]
   refreshTokens             RefreshToken[]
@@ -355,21 +356,25 @@ model Campus {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batches             Batch[]
-  squads              Squad[]
-  students            Student[]
-  mentors             MentorCampus[]
-  assignments         Assignment[]
-  assignmentsOriginal Assignment[]               @relation("AssignmentOriginalCampus")
-  dailyStatuses       DailyStatus[]
-  leaderboardEntries  LeaderboardEntry[]
-  emailReports        EmailReport[]
-  baselineTests       BaselineTest[]
-  baselineAttempts    BaselineTestAttempt[]
-  movementsFrom       StudentCampusHistory[]     @relation("CampusMovedFrom")
-  movementsTo         StudentCampusHistory[]     @relation("CampusMovedTo")
-  audienceChangesFrom AssignmentAudienceChange[] @relation("AssignmentAudienceCampusFrom")
-  audienceChangesTo   AssignmentAudienceChange[] @relation("AssignmentAudienceCampusTo")
+  batches              Batch[]
+  squads               Squad[]
+  students             Student[]
+  mentors              MentorCampus[]
+  assignments          Assignment[]
+  assignmentsOriginal  Assignment[]               @relation("AssignmentOriginalCampus")
+  dailyStatuses        DailyStatus[]
+  leaderboardEntries   LeaderboardEntry[]
+  emailReports         EmailReport[]
+  baselineTests        BaselineTest[]
+  baselineAttempts     BaselineTestAttempt[]
+  movementsFrom        StudentCampusHistory[]     @relation("CampusMovedFrom")
+  movementsTo          StudentCampusHistory[]     @relation("CampusMovedTo")
+  audienceChangesFrom  AssignmentAudienceChange[] @relation("AssignmentAudienceCampusFrom")
+  audienceChangesTo    AssignmentAudienceChange[] @relation("AssignmentAudienceCampusTo")
+  /// Infosys Prep reuses this same `Campus` row — a campus is one real institution,
+  /// not a per-program label. See the schema section banner above `InfosysEnrollment`.
+  infosysEnrollments   InfosysEnrollment[]
+  infosysDailyStatuses InfosysDailyStatus[]
 
   @@index([status])
   @@index([sortOrder])
@@ -602,24 +607,28 @@ model Student {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  batch            Batch?                 @relation(fields: [batchId], references: [id], onDelete: SetNull)
-  campus           Campus?                @relation(fields: [campusId], references: [id], onDelete: SetNull)
-  squad            Squad?                 @relation(fields: [squadId], references: [id], onDelete: SetNull)
-  campusHistory    StudentCampusHistory[]
-  baselineAttempts BaselineTestAttempt[]
-  submissions      Submission[]
-  dailyStatuses    DailyStatus[]
-  syncState        StudentSyncState?
-  notes            MentorNote[]
-  achievements     StudentAchievement[]
-  entries          LeaderboardEntry[]
-  notifications    NotificationLog[]
-  blockers         Blocker[]
-  batchHistory     StudentBatchHistory[]
+  batch                Batch?                 @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  campus               Campus?                @relation(fields: [campusId], references: [id], onDelete: SetNull)
+  squad                Squad?                 @relation(fields: [squadId], references: [id], onDelete: SetNull)
+  campusHistory        StudentCampusHistory[]
+  baselineAttempts     BaselineTestAttempt[]
+  submissions          Submission[]
+  dailyStatuses        DailyStatus[]
+  syncState            StudentSyncState?
+  notes                MentorNote[]
+  achievements         StudentAchievement[]
+  entries              LeaderboardEntry[]
+  notifications        NotificationLog[]
+  blockers             Blocker[]
+  batchHistory         StudentBatchHistory[]
   /// The student's own login, if one has been provisioned (§ student portal). Optional —
   /// a student can exist on the roster for a long time before anyone provisions their
   /// portal access, exactly like `leetcodeUsername`.
-  user             User?
+  user                 User?
+  /// Infosys Prep membership — see the schema section banner above `InfosysEnrollment`.
+  /// Independent of every Coding-Hours field on this row.
+  infosysEnrollment    InfosysEnrollment?
+  infosysDailyStatuses InfosysDailyStatus[]
 
   @@index([squadId])
   @@index([batchId])
@@ -755,11 +764,13 @@ model Problem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  assignmentProblems   AssignmentProblem[]
-  submissions          Submission[]
-  problemStatuses      DailyProblemStatus[]
-  baselineTestProblems BaselineTestProblem[]
-  baselineResults      BaselineTestProblemResult[]
+  assignmentProblems        AssignmentProblem[]
+  submissions               Submission[]
+  problemStatuses           DailyProblemStatus[]
+  baselineTestProblems      BaselineTestProblem[]
+  baselineResults           BaselineTestProblemResult[]
+  infosysAssignmentProblems InfosysAssignmentProblem[]
+  infosysProblemStatuses    InfosysDailyProblemStatus[]
 
   @@index([difficulty])
   @@map("problems")
@@ -1018,7 +1029,7 @@ model DailyStatus {
   campusId String? @db.Uuid
   batchId  String? @db.Uuid
 
-  assignedCount Int @default(0)
+  assignedCount       Int @default(0)
   /// Distinct assigned problems this student has **ever** solved — the figure the
   /// assignment analysis, the mentor tracker and every report read.
   ///
@@ -1026,7 +1037,7 @@ model DailyStatus {
   /// 11th must credit a student who solved its problems on the 5th, and it does, because
   /// no timestamp condition is applied to this number at all (see
   /// `calculateAssignmentCompletion`).
-  solvedCount   Int @default(0)
+  solvedCount         Int @default(0)
   /// The same count restricted to the assignment's lookback window, `[D-2, D]`.
   ///
   /// Separate column rather than a derived filter because the two answer different
@@ -1055,7 +1066,7 @@ model DailyStatus {
   overrideNote   String?
   overriddenById String?    @db.Uuid
 
-  computedAt DateTime @default(now())
+  computedAt      DateTime @default(now())
   /// Which version of the completion rules wrote this row — `COMPLETION_RULES_VERSION`.
   ///
   /// `computedAt` says *when* a row was written, which is not the same question as
@@ -1066,9 +1077,9 @@ model DailyStatus {
   ///
   /// `0` on every row written before the column existed, which is correct: those rows
   /// predate versioning and are stale by definition.
-  computedVersion Int @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  computedVersion Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   student         Student              @relation(fields: [studentId], references: [id], onDelete: Cascade)
   assignment      Assignment?          @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
@@ -1813,4 +1824,180 @@ model BaselineTestProblemResult {
   @@index([problemId])
   @@index([status])
   @@map("baseline_test_problem_results")
+}
+
+// =============================================================================
+// Infosys Preparation — a second, fully separate program.
+//
+// A student may be in Coding Hours, Infosys Prep, both, or neither. Nothing in this
+// section reads or writes `Student.campusId`/`batchId`/`squadId`/`cohort`,
+// `DailyStatus`, `Assignment`, or any of Coding Hours' aggregate columns
+// (`totalSolved`, `currentStreak`, etc.) — those are Coding Hours' current-placement
+// and rollup state and must stay exactly as Coding Hours left them. The two programs
+// share only genuinely program-agnostic infrastructure: `Student` (identity),
+// `Campus` (a campus is a real institution, not a per-program label), `Problem`
+// (canonical LeetCode catalog by `titleSlug`), and the raw `Submission` mirror.
+//
+// The defining rule (do not weaken this in code review): Infosys activity counts
+// only from the Infosys tracking start date onward. That date is not a column
+// anywhere — it is `MIN(InfosysAssignment.dayKey)`, computed live
+// (`InfosysRollupService.trackingStartDate()`), because the date something was
+// *entered* into the tool must never be confused with the date it was *assigned*,
+// and the only honest source for "assigned" is the earliest assignment row itself.
+// Coding Hours' `solvedCount` ("ever solved", see the `assignment_solved_ever`
+// migration) is deliberately not reproduced here: there is no "ever" column on
+// `InfosysDailyProblemStatus`, so crediting a pre-window solve is not a policy that
+// can be forgotten, it is a fact this table cannot represent.
+// =============================================================================
+
+/// Per-question outcome for one Infosys student. `PROFILE_NOT_LINKED` and
+/// `DATA_UNAVAILABLE` are real, distinct states — never collapse either into
+/// `NOT_ATTEMPTED`, which would silently report a missing profile as a solved-zero.
+enum InfosysQuestionStatus {
+  SOLVED
+  ATTEMPTED_NOT_SOLVED
+  NOT_ATTEMPTED
+  PROFILE_NOT_LINKED
+  DATA_UNAVAILABLE
+}
+
+/// A student's membership in Infosys Prep, deliberately separate from `Student`'s
+/// Coding-Hours placement columns (see the section banner above). One row per
+/// student: the roster gives one campus per student and the spec never describes an
+/// Infosys transfer, so there is no history table here the way
+/// `StudentCampusHistory` exists for Coding Hours — if that need appears later it is
+/// additive, not a redesign.
+model InfosysEnrollment {
+  id        String @id @default(uuid()) @db.Uuid
+  studentId String @unique @db.Uuid
+  campusId  String @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  campus  Campus  @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  @@index([campusId])
+  @@map("infosys_enrollments")
+}
+
+/// One day's Infosys problem set. Global, not campus/batch-scoped — every Infosys
+/// student is given the same problems on the same day, so unlike Coding Hours'
+/// `Assignment` there is no audience-targeting machinery here to fork.
+model InfosysAssignment {
+  id String @id @default(uuid()) @db.Uuid
+
+  /// `YYYY-MM-DD`, the date the questions were actually given to students — see
+  /// `createdAt` for when this row was entered into the tool. Entering an assignment
+  /// late (§4 of the spec) never changes this; the UI sets it explicitly rather than
+  /// defaulting to "today".
+  dayKey String  @unique
+  notes  String?
+
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy     User?                      @relation("InfosysAssignmentAuthor", fields: [createdById], references: [id], onDelete: SetNull)
+  problems      InfosysAssignmentProblem[]
+  dailyStatuses InfosysDailyStatus[]
+
+  @@index([dayKey])
+  @@map("infosys_assignments")
+}
+
+model InfosysAssignmentProblem {
+  id                  String @id @default(uuid()) @db.Uuid
+  infosysAssignmentId String @db.Uuid
+  problemId           String @db.Uuid
+  /// 1-based display slot (Question 1…4). Not a count assumption — see the model
+  /// comment on `InfosysAssignment`; a day could carry 3 or 5 rows and nothing
+  /// downstream hardcodes 4.
+  position            Int
+
+  infosysAssignment InfosysAssignment @relation(fields: [infosysAssignmentId], references: [id], onDelete: Cascade)
+  problem           Problem           @relation(fields: [problemId], references: [id], onDelete: Restrict)
+
+  @@unique([infosysAssignmentId, position])
+  /// Also forbids assigning the same canonical problem twice on the same day —
+  /// the duplicate-assignment case in spec §7.
+  @@unique([infosysAssignmentId, problemId])
+  @@index([problemId])
+  @@map("infosys_assignment_problems")
+}
+
+/// Per-student, per-day rollup — the materialised, cached answer so the dashboard
+/// never live-fetches LeetCode on page load (§21). Recomputed by
+/// `InfosysRollupService`, idempotently, from `InfosysAssignment` +
+/// `InfosysAssignmentProblem` + the shared `Submission` mirror, filtered to
+/// `submittedAt >= trackingStartDate`.
+///
+/// There is deliberately no "ever solved" column here — see the section banner.
+model InfosysDailyStatus {
+  id                  String  @id @default(uuid()) @db.Uuid
+  studentId           String  @db.Uuid
+  dayKey              String
+  infosysAssignmentId String? @db.Uuid
+
+  /// The student's Infosys campus *at the time this row was computed*, frozen the
+  /// same way `DailyStatus.campusId` is frozen for Coding Hours — mirrored here
+  /// (rather than always joining live through `InfosysEnrollment`) so a future
+  /// Infosys campus correction cannot rewrite how a past day is reported.
+  campusId String? @db.Uuid
+
+  assignedCount           Int @default(0)
+  solvedCount             Int @default(0)
+  attemptedNotSolvedCount Int @default(0)
+  notAttemptedCount       Int @default(0)
+  /// Assigned questions this student could not be evaluated on because no LeetCode
+  /// profile is linked. Counted separately from `notAttemptedCount` — see §6 and §13
+  /// of the spec: never converted into a zero.
+  profileNotLinkedCount   Int @default(0)
+  /// Assigned questions this student could not be evaluated on because the profile
+  /// exists but data could not be reliably fetched (private/rate-limited/provider
+  /// error — read from the shared `StudentSyncState.status`).
+  dataUnavailableCount    Int @default(0)
+
+  computedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  student           Student                     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  infosysAssignment InfosysAssignment?          @relation(fields: [infosysAssignmentId], references: [id], onDelete: SetNull)
+  campus            Campus?                     @relation(fields: [campusId], references: [id], onDelete: SetNull)
+  problemStatuses   InfosysDailyProblemStatus[]
+
+  @@unique([studentId, dayKey])
+  @@index([dayKey])
+  @@index([dayKey, campusId])
+  @@index([studentId])
+  @@map("infosys_daily_statuses")
+}
+
+/// Per-problem outcome within an `InfosysDailyStatus` row — the drill-down target
+/// for every summary card (§12: every category must open into this same data, never
+/// a hardcoded count).
+model InfosysDailyProblemStatus {
+  id                   String @id @default(uuid()) @db.Uuid
+  infosysDailyStatusId String @db.Uuid
+  problemId            String @db.Uuid
+  position             Int
+
+  status   InfosysQuestionStatus @default(NOT_ATTEMPTED)
+  /// Earliest accepted submission **at or after the Infosys tracking start date**.
+  /// Never populated from a submission before it, even when one exists — that
+  /// submission is real, it is simply out of scope for Infosys (§2, §13).
+  solvedAt DateTime?
+  /// Submissions observed for this problem at or after the tracking start date,
+  /// accepted or not.
+  attempts Int                   @default(0)
+
+  infosysDailyStatus InfosysDailyStatus @relation(fields: [infosysDailyStatusId], references: [id], onDelete: Cascade)
+  problem            Problem            @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@unique([infosysDailyStatusId, problemId])
+  @@index([problemId])
+  @@index([status])
+  @@map("infosys_daily_problem_statuses")
 }
