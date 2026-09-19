@@ -1,43 +1,51 @@
 /**
- * Infosys student/campus analysis — read-only, computed live from `InfosysDailyStatus` +
- * `InfosysDailyProblemStatus` (the materialised rows `InfosysRollupService` writes, so
- * this never live-fetches LeetCode, §21) and scoped through the exact same
- * `MentorScopeService` every other campus-aware endpoint in this codebase uses. A mentor's
- * existing `MentorCampus` grants apply to Infosys data too — see the schema.prisma
- * section banner above `InfosysEnrollment` for why that reuse is deliberate.
+ * Infosys student/dashboard analysis — read-only, computed live from
+ * `InfosysDailyStatus` + `InfosysDailyProblemStatus` (the materialised rows
+ * `InfosysRollupService` writes, so this never live-fetches LeetCode, §13 of the
+ * simplification brief).
+ *
+ * One cohort, not campus-divided — see the header comment on
+ * `packages/shared/src/domain/infosys-analysis.ts`. There is deliberately no
+ * `MentorScopeService` here and no campus filter parameter: ADMIN, MENTOR and VIEWER
+ * all see the same, whole Infosys cohort (enforced by the controller's `@Roles`
+ * decorator, not by a scoping query here — there is nothing left to scope by).
  */
 
 import { Injectable } from '@nestjs/common';
-import type { UserRole } from '@dsa/shared';
 import {
   analysisWeeks,
   categoriseInfosysStudent,
-  type InfosysCampusSummary,
   type InfosysCategory,
+  type InfosysCohortWeek,
+  type InfosysDashboardSummary,
   type InfosysProfileState,
   type InfosysStudentAnalysis,
   type InfosysStudentWeek,
 } from '@dsa/shared';
 
 import { PrismaService } from '../../infra/prisma/prisma.service';
-import { MentorScopeService } from '../campuses/mentor-scope.service';
 import { InfosysRollupService } from './infosys-rollup.service';
 
-interface RequestUser {
-  id: string;
-  role: UserRole;
-}
+const ALL_CATEGORIES: InfosysCategory[] = [
+  'CONSISTENT_SOLVER',
+  'INCONSISTENT',
+  'TRYING_BUT_STRUGGLING',
+  'IMPROVING',
+  'DECLINING',
+  'NOT_PARTICIPATING',
+  'PROFILE_NOT_LINKED',
+  'DATA_UNAVAILABLE',
+];
 
 @Injectable()
 export class InfosysAnalyticsService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly scope: MentorScopeService,
     private readonly rollup: InfosysRollupService,
   ) {}
 
-  /** The program window every Infosys analysis call is measured over: the tracking start
-   * date through today, or `null` when no assignment has ever been entered. */
+  /** The program window every Infosys analysis call is measured over: the tracking
+   * start date through today, or `null` when no assignment has ever been entered. */
   private async period(): Promise<{ from: string; to: string } | null> {
     const from = await this.rollup.trackingStartDate();
     if (!from) return null;
@@ -46,123 +54,152 @@ export class InfosysAnalyticsService {
   }
 
   /**
-   * One card per campus the caller may see. Reuses the identical scoping contract as
-   * `CampusAnalysisService.summary` — `null` = every campus, `[]` = none, a list = exactly
-   * those.
+   * One dashboard for the whole Infosys cohort — no campus breakdown.
+   *
+   * `assigned`/`solved`/`attemptedNotSolved`/`notAttempted` here count **distinct
+   * questions**, never student-question pairs (§10 of the brief: the same problem
+   * assigned to 205 students is 1 question, not 205 — the exact bug already found and
+   * fixed once for Coding Hours' campus-analysis, commit acd7a67). A question's
+   * cohort-wide outcome is SOLVED if any enrolled student solved it in the period,
+   * ATTEMPTED_NOT_SOLVED if not but someone attempted it, else NOT_ATTEMPTED. This is
+   * deliberately a different question from "how many students solved it" — that
+   * figure lives on the student list (`studentAnalysis()`), never here.
    */
-  async campusSummary(user: RequestUser, campusId?: string): Promise<InfosysCampusSummary[]> {
-    const allowed = await this.scope.allowedCampusIds(user);
-    const narrowed = this.scope.narrow(campusId, allowed);
-    if (narrowed.deny) return [];
-
-    const period = await this.period();
-    if (!period) return [];
-    const weeks = analysisWeeks(period.from, period.to);
-
-    const campusWhere = narrowed.campusId
-      ? { id: narrowed.campusId }
-      : narrowed.campusIds
-        ? { id: { in: narrowed.campusIds } }
-        : {};
-
-    const enrollments = await this.prisma.infosysEnrollment.findMany({
-      where: { campus: campusWhere },
-      select: {
-        campusId: true,
-        campus: { select: { id: true, name: true } },
-        studentId: true,
-      },
+  async dashboard(): Promise<InfosysDashboardSummary> {
+    const totalStudents = await this.prisma.infosysEnrollment.count();
+    const profilesLinked = await this.prisma.student.count({
+      where: { infosysEnrollment: { isNot: null }, leetcodeUsername: { not: null } },
     });
 
-    const campusIds = [...new Set(enrollments.map((e) => e.campusId))];
-    const summaries: InfosysCampusSummary[] = [];
-
-    for (const campusId of campusIds) {
-      const campus = enrollments.find((e) => e.campusId === campusId)!.campus;
-      const studentIds = enrollments.filter((e) => e.campusId === campusId).map((e) => e.studentId);
-      const analyses = await this.studentAnalyses(studentIds, weeks, period);
-
-      let assigned = 0;
-      let solved = 0;
-      let attemptedNotSolved = 0;
-      let notAttempted = 0;
-      let studentsImproving = 0;
-      let studentsStruggling = 0;
-      let studentsNotParticipating = 0;
-      let profilesNotLinked = 0;
-      let dataUnavailable = 0;
-      const categoryCounts = new Map<InfosysCategory, number>();
-
-      for (const analysis of analyses) {
-        assigned += analysis.assigned;
-        solved += analysis.solved;
-        attemptedNotSolved += analysis.attemptedNotSolved;
-        notAttempted += analysis.notAttempted;
-        categoryCounts.set(analysis.verdict.category, (categoryCounts.get(analysis.verdict.category) ?? 0) + 1);
-        if (analysis.verdict.category === 'IMPROVING') studentsImproving += 1;
-        if (analysis.verdict.category === 'TRYING_BUT_STRUGGLING') studentsStruggling += 1;
-        if (analysis.verdict.category === 'NOT_PARTICIPATING') studentsNotParticipating += 1;
-        if (analysis.verdict.category === 'PROFILE_NOT_LINKED') profilesNotLinked += 1;
-        if (analysis.verdict.category === 'DATA_UNAVAILABLE') dataUnavailable += 1;
-      }
-
-      summaries.push({
-        campusId,
-        campusName: campus.name,
-        students: analyses.length,
-        assigned,
-        solved,
-        attemptedNotSolved,
-        notAttempted,
-        solvePercent: assigned === 0 ? null : solved / assigned,
-        attemptPercent: assigned === 0 ? null : (solved + attemptedNotSolved) / assigned,
-        studentsImproving,
-        studentsStruggling,
-        studentsNotParticipating,
-        profilesNotLinked,
-        dataUnavailable,
-        categories: (
-          ['CONSISTENT_SOLVER', 'INCONSISTENT', 'TRYING_BUT_STRUGGLING', 'IMPROVING', 'DECLINING', 'NOT_PARTICIPATING', 'PROFILE_NOT_LINKED', 'DATA_UNAVAILABLE'] as InfosysCategory[]
-        ).map((category) => ({
-          category,
-          label: category,
-          rule: '',
-          students: categoryCounts.get(category) ?? 0,
-        })),
+    const period = await this.period();
+    if (!period) {
+      return {
+        totalStudents,
+        profilesLinked,
+        assigned: 0,
+        solved: 0,
+        attemptedNotSolved: 0,
+        notAttempted: 0,
+        solvePercent: null,
+        attemptPercent: null,
+        categories: ALL_CATEGORIES.map((category) => ({ category, label: category, rule: '', students: 0 })),
         weeks: [],
+      };
+    }
+
+    const weeks = analysisWeeks(period.from, period.to);
+
+    const cohortWeeks: InfosysCohortWeek[] = [];
+    for (const week of weeks) {
+      const stats = await this.questionStats(week.from, week.to);
+      cohortWeeks.push({
+        weekNumber: week.weekNumber,
+        from: week.from,
+        to: week.to,
+        ...stats,
+        solvePercent: stats.assigned === 0 ? null : stats.solved / stats.assigned,
+        attemptPercent: stats.assigned === 0 ? null : (stats.solved + stats.attemptedNotSolved) / stats.assigned,
       });
     }
 
-    return summaries;
+    const overall = await this.questionStats(period.from, period.to);
+
+    const enrollments = await this.prisma.infosysEnrollment.findMany({ select: { studentId: true } });
+    const analyses = await this.studentAnalyses(
+      enrollments.map((e) => e.studentId),
+      weeks,
+      period,
+    );
+    const categoryCounts = new Map<InfosysCategory, number>();
+    for (const analysis of analyses) {
+      categoryCounts.set(analysis.verdict.category, (categoryCounts.get(analysis.verdict.category) ?? 0) + 1);
+    }
+
+    return {
+      totalStudents,
+      profilesLinked,
+      assigned: overall.assigned,
+      solved: overall.solved,
+      attemptedNotSolved: overall.attemptedNotSolved,
+      notAttempted: overall.notAttempted,
+      solvePercent: overall.assigned === 0 ? null : overall.solved / overall.assigned,
+      attemptPercent: overall.assigned === 0 ? null : (overall.solved + overall.attemptedNotSolved) / overall.assigned,
+      categories: ALL_CATEGORIES.map((category) => ({
+        category,
+        label: category,
+        rule: '',
+        students: categoryCounts.get(category) ?? 0,
+      })),
+      weeks: cohortWeeks,
+    };
   }
 
-  /** Every student the caller may see, with their weekly rows and category verdict — the
-   * same rows every summary card's drill-down must open into (§12). */
-  async studentAnalysis(user: RequestUser, campusId?: string): Promise<InfosysStudentAnalysis[]> {
-    const allowed = await this.scope.allowedCampusIds(user);
-    const narrowed = this.scope.narrow(campusId, allowed);
-    if (narrowed.deny) return [];
+  /** Distinct-question outcome counts for `[from, to]` — the one place "assigned"
+   * means a count of `Problem` rows, never students × problems. */
+  private async questionStats(
+    from: string,
+    to: string,
+  ): Promise<{ assigned: number; solved: number; attemptedNotSolved: number; notAttempted: number }> {
+    const assignedProblems = await this.prisma.infosysAssignmentProblem.findMany({
+      where: { infosysAssignment: { dayKey: { gte: from, lte: to } } },
+      select: { problemId: true },
+      distinct: ['problemId'],
+    });
+    const problemIds = assignedProblems.map((p) => p.problemId);
+    if (problemIds.length === 0) {
+      return { assigned: 0, solved: 0, attemptedNotSolved: 0, notAttempted: 0 };
+    }
 
+    const statuses = await this.prisma.infosysDailyProblemStatus.findMany({
+      where: {
+        problemId: { in: problemIds },
+        infosysDailyStatus: { dayKey: { gte: from, lte: to } },
+      },
+      select: { problemId: true, status: true },
+    });
+
+    const statusesByProblem = new Map<string, Set<string>>();
+    for (const row of statuses) {
+      const set = statusesByProblem.get(row.problemId) ?? new Set<string>();
+      set.add(row.status);
+      statusesByProblem.set(row.problemId, set);
+    }
+
+    let solved = 0;
+    let attemptedNotSolved = 0;
+    let notAttempted = 0;
+    for (const problemId of problemIds) {
+      const outcomes = statusesByProblem.get(problemId) ?? new Set<string>();
+      if (outcomes.has('SOLVED')) solved += 1;
+      else if (outcomes.has('ATTEMPTED_NOT_SOLVED')) attemptedNotSolved += 1;
+      else notAttempted += 1;
+    }
+
+    return { assigned: problemIds.length, solved, attemptedNotSolved, notAttempted };
+  }
+
+  /** Every Infosys student, whole cohort, no campus filter. */
+  async studentAnalysis(): Promise<InfosysStudentAnalysis[]> {
     const period = await this.period();
     if (!period) return [];
     const weeks = analysisWeeks(period.from, period.to);
 
-    const campusWhere = narrowed.campusId
-      ? { id: narrowed.campusId }
-      : narrowed.campusIds
-        ? { id: { in: narrowed.campusIds } }
-        : {};
-
-    const enrollments = await this.prisma.infosysEnrollment.findMany({
-      where: { campus: campusWhere },
-      select: { studentId: true },
-    });
-
+    const enrollments = await this.prisma.infosysEnrollment.findMany({ select: { studentId: true } });
     return this.studentAnalyses(
       enrollments.map((e) => e.studentId),
       weeks,
       period,
     );
+  }
+
+  /** One Infosys student, for a STUDENT-role caller viewing their own data, or an
+   * ADMIN/MENTOR looking one up directly. `null` if they are not Infosys-enrolled. */
+  async studentAnalysisFor(studentId: string): Promise<InfosysStudentAnalysis | null> {
+    const period = await this.period();
+    if (!period) return null;
+    const weeks = analysisWeeks(period.from, period.to);
+    const [analysis] = await this.studentAnalyses([studentId], weeks, period);
+    return analysis ?? null;
   }
 
   private async studentAnalyses(
@@ -179,7 +216,7 @@ export class InfosysAnalyticsService {
         name: true,
         email: true,
         leetcodeUsername: true,
-        infosysEnrollment: { select: { campus: { select: { id: true, name: true } } } },
+        infosysEnrollment: { select: { campus: { select: { name: true } } } },
       },
     });
 
@@ -222,14 +259,11 @@ export class InfosysAnalyticsService {
 
       const totalProfileNotLinked = rows.reduce((s, r) => s + r.profileNotLinkedCount, 0);
       const totalDataUnavailable = rows.reduce((s, r) => s + r.dataUnavailableCount, 0);
-      const profileState: InfosysProfileState =
-        totalProfileNotLinked > 0 && totalDataUnavailable === 0
-          ? 'PROFILE_NOT_LINKED'
-          : !student.leetcodeUsername
-            ? 'PROFILE_NOT_LINKED'
-            : totalDataUnavailable > 0
-              ? 'DATA_UNAVAILABLE'
-              : 'OK';
+      const profileState: InfosysProfileState = !student.leetcodeUsername
+        ? 'PROFILE_NOT_LINKED'
+        : totalDataUnavailable > 0 && totalDataUnavailable >= totalProfileNotLinked
+          ? 'DATA_UNAVAILABLE'
+          : 'OK';
 
       const verdict = categoriseInfosysStudent({ weeks: weeklyRows, profileState });
 
@@ -242,7 +276,6 @@ export class InfosysAnalyticsService {
         studentId: student.id,
         name: student.name,
         email: student.email,
-        campusId: student.infosysEnrollment?.campus.id ?? null,
         campusName: student.infosysEnrollment?.campus.name ?? null,
         leetcodeUsername: student.leetcodeUsername,
         profileState,

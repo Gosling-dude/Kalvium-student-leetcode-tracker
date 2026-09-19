@@ -24,6 +24,18 @@
  * who attempts most assigned questions but rarely gets an accepted submission is a
  * materially different case from one who does not attempt at all, and the brief asks
  * for both to be visible rather than folded into one "Not Participating" bucket.
+ *
+ * **One cohort, not campus-divided.** Every Infosys-enrolled student is one flat
+ * cohort — there is no campus-wise Infosys dashboard, leaderboard, filter, or
+ * category, and nothing in this file groups by campus. `InfosysEnrollment.campusId`
+ * still exists in the schema and still shows up as an informational field on a
+ * student's row (the roster happens to record it), but it never drives a calculation,
+ * a filter, or an authorization decision here — that would re-couple Infosys to
+ * Coding Hours' campus-organised world, which is exactly what keeping it a genuinely
+ * separate program is meant to avoid. An earlier version of this feature built a full
+ * campus-wise analysis layer mirroring `campus-analysis.ts`; it was deliberately
+ * removed because Infosys does not need it and campus-wise Infosys reporting was
+ * never asked for.
  */
 
 import type { DayKey } from './time';
@@ -234,7 +246,10 @@ export interface InfosysStudentAnalysis {
   studentId: string;
   name: string;
   email: string | null;
-  campusId: string | null;
+  /** Informational only — carried through from `InfosysEnrollment.campusId` because
+   * the roster happens to record it, exactly like a phone number or a squad name would
+   * be. Never used to filter, scope, authorize, or aggregate Infosys data; see the
+   * "one cohort" note at the top of this file. */
   campusName: string | null;
   leetcodeUsername: string | null;
   profileState: InfosysProfileState;
@@ -249,31 +264,16 @@ export interface InfosysStudentAnalysis {
 }
 
 /**
- * One Infosys question, at a campus (or program-wide), in a week — the unit the
- * summary counts. See `CampusQuestion` in campus-analysis.ts: a question is one
- * question however many students received it (§9 of the brief — never students x
- * questions).
+ * `assigned = solved + attemptedNotSolved + notAttempted` holds by construction: the
+ * three outcomes partition the cohort's *distinct* assigned questions for the week —
+ * "the same problem assigned to all 205 students" is one question, not 205 (the exact
+ * rule campus-analysis.ts's `CampusQuestionWeek` already enforces for Coding Hours;
+ * mirrored here at the whole-cohort level, deliberately with no per-campus grouping —
+ * Infosys treats every enrolled student as one cohort, full stop).
+ * `profileNotLinked`/`dataUnavailable` students are reported separately and are never
+ * folded into `notAttempted` (§6/§9 of the brief).
  */
-export interface InfosysQuestion {
-  slug: string;
-  title: string;
-  weekNumber: number;
-  dayKeys: DayKey[];
-  outcome: 'SOLVED' | 'ATTEMPTED_NOT_SOLVED' | 'NOT_ATTEMPTED';
-  studentsAssigned: number;
-  studentsSolved: number;
-  studentsAttemptedNotSolved: number;
-  studentsNotAttempted: number;
-  studentsProfileNotLinked: number;
-  studentsDataUnavailable: number;
-}
-
-/**
- * `assigned = solved + attemptedNotSolved + notAttempted` holds by construction for
- * students with usable data; `profileNotLinked`/`dataUnavailable` students are
- * reported separately and are never folded into `notAttempted` (§6, §13).
- */
-export interface InfosysQuestionWeek {
+export interface InfosysCohortWeek {
   weekNumber: number;
   from: DayKey;
   to: DayKey;
@@ -283,38 +283,34 @@ export interface InfosysQuestionWeek {
   notAttempted: number;
   solvePercent: number | null;
   attemptPercent: number | null;
-  studentsActive: number;
 }
 
-export interface InfosysCampusSummary {
-  campusId: string;
-  campusName: string;
-  students: number;
+/** The whole Infosys cohort, one row — never broken down by campus. See the file
+ * banner: campus is informational only, and this type has no campus field at all so
+ * that stays true structurally rather than by convention. */
+export interface InfosysDashboardSummary {
+  totalStudents: number;
+  profilesLinked: number;
   assigned: number;
   solved: number;
   attemptedNotSolved: number;
   notAttempted: number;
   solvePercent: number | null;
   attemptPercent: number | null;
-  studentsImproving: number;
-  studentsStruggling: number;
-  studentsNotParticipating: number;
-  profilesNotLinked: number;
-  dataUnavailable: number;
   categories: {
     category: InfosysCategory;
     label: string;
     rule: string;
     students: number;
   }[];
-  weeks: InfosysQuestionWeek[];
+  weeks: InfosysCohortWeek[];
 }
 
-/** Checks the partition actually partitions for one campus-week — see
+/** Checks the partition actually partitions for one cohort-week — see
  * `assertQuestionTotalsReconcile` in campus-analysis.ts, the pattern this mirrors,
  * itself written after that exact invariant was found broken in production. */
 export function assertInfosysQuestionTotalsReconcile(
-  week: Pick<InfosysQuestionWeek, 'weekNumber' | 'assigned' | 'solved' | 'attemptedNotSolved' | 'notAttempted'>,
+  week: Pick<InfosysCohortWeek, 'weekNumber' | 'assigned' | 'solved' | 'attemptedNotSolved' | 'notAttempted'>,
 ): string | null {
   const parts = week.solved + week.attemptedNotSolved + week.notAttempted;
   if (parts === week.assigned) return null;
