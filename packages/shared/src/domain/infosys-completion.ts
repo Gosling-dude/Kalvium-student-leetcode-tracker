@@ -97,6 +97,6 @@ export function evaluateInfosysDay(
  * here, since `assigned` is deduplicated upstream by `InfosysAssignmentProblem`'s
  * `@@unique([infosysAssignmentId, problemId])` and this returns one outcome per
  * assigned problem row). */
-export function countSolved(outcomes: InfosysProblemOutcome[]): number {
+export function countInfosysSolved(outcomes: InfosysProblemOutcome[]): number {
   return outcomes.filter((o) => o.status === 'SOLVED').length;
 }

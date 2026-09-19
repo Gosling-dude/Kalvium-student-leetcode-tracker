@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { countSolved, evaluateInfosysDay, type InfosysAssignedProblemRef } from './infosys-completion';
+import { countInfosysSolved, evaluateInfosysDay, type InfosysAssignedProblemRef } from './infosys-completion';
 
 const TRACKING_START = new Date('2026-09-20T00:00:00.000Z');
 
@@ -86,7 +86,7 @@ describe('evaluateInfosysDay', () => {
     );
     expect(outcome!.status).toBe('SOLVED');
     expect(outcome!.attempts).toBe(10);
-    expect(countSolved([outcome!])).toBe(1);
+    expect(countInfosysSolved([outcome!])).toBe(1);
   });
 
   it('evaluates each assigned problem independently by canonical slug', () => {
@@ -117,7 +117,7 @@ describe('evaluateInfosysDay', () => {
     expect(outcome!.status).toBe('SOLVED');
   });
 
-  it('countSolved counts distinct SOLVED outcomes across the assigned set', () => {
+  it('countInfosysSolved counts distinct SOLVED outcomes across the assigned set', () => {
     const outcomes = evaluateInfosysDay(
       [twoSum, reverseString],
       [
@@ -126,6 +126,6 @@ describe('evaluateInfosysDay', () => {
       ],
       TRACKING_START,
     );
-    expect(countSolved(outcomes)).toBe(2);
+    expect(countInfosysSolved(outcomes)).toBe(2);
   });
 });
