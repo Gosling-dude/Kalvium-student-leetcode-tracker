@@ -784,13 +784,18 @@ export class DashboardService {
       byCampus.set(status.campusId, list);
     }
 
-    // Every active campus gets a row even on a day it had no work, so the dashboard shows
-    // "SRM — 0 assigned" rather than omitting the campus and looking like it does not exist.
-    const campuses = await this.prisma.campus.findMany({
-      where: { status: 'ACTIVE', ...(filterCampusId ? { id: filterCampusId } : {}) },
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-      select: { id: true, name: true, code: true },
-    });
+    // Every active *Coding-Hours* campus gets a row even on a day it had no work, so
+    // the dashboard shows "SRM — 0 assigned" rather than omitting the campus and
+    // looking like it does not exist. "Coding-Hours campus" is not every `Campus` row,
+    // though: Infosys-only campuses (zero Coding-Hours students, zero batches — see
+    // the schema.prisma section banner above `InfosysEnrollment`) share the same
+    // table, and calling this unfiltered showed all 10 of them as empty cards on the
+    // main dashboard, found live. Reuses `CampusesService.findAll`'s
+    // `hasCodingHoursActivity` option — the same, already-tested filter, not a second
+    // copy of it.
+    const campuses = (await this.campuses.findAll(false, null, true)).filter(
+      (c) => !filterCampusId || c.id === filterCampusId,
+    );
     for (const campus of campuses) {
       if (!byCampus.has(campus.id)) byCampus.set(campus.id, []);
     }

@@ -190,7 +190,13 @@ function makeService(
   };
   const assignmentsService = { findAllByDay: async () => assignments };
   // Placement lookups, only reached when there are unobserved students to place.
-  const campusesService = { campusOnDayForStudents: async () => new Map() };
+  // `findAll` backs the campus breakdown's "every active Coding-Hours campus gets a
+  // row" fallback (dashboard.service.ts's buildCampusBreakdown) — empty here, same as
+  // the raw `campus.findMany` mock above, since these fixtures carry no campus.
+  const campusesService = {
+    campusOnDayForStudents: async () => new Map(),
+    findAll: async () => [],
+  };
   const batchesService = { batchOnDayForStudents: async () => new Map() };
 
   const service = new DashboardService(
