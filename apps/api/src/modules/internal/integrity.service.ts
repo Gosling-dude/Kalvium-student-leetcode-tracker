@@ -358,9 +358,19 @@ export class IntegrityService {
       this.prisma.dailyStatus.count({
         where: { assignmentId: null, assignedCount: { gt: 0 } },
       }),
-      // An active student with no campus cannot be seen by any mentor and appears on no
-      // campus report — present in the database and absent from the programme.
-      this.prisma.student.count({ where: { status: 'ACTIVE', campusId: null } }),
+      // An active student with no Coding-Hours campus cannot be seen by any mentor and
+      // appears on no Coding-Hours campus report — present in the database and absent
+      // from the programme. Excludes Infosys-enrolled students: they are legitimately
+      // absent from Coding Hours (no campusId, no batch, nothing) because their campus
+      // lives in InfosysEnrollment.campusId instead — a separate program dimension by
+      // design (see the schema.prisma section banner above InfosysEnrollment). Giving
+      // them a Coding-Hours campusId just to satisfy this check would make them appear
+      // on Coding-Hours campus reports and leaderboards at campuses that may not even
+      // run Coding Hours, which is exactly the cross-program leak the two programs must
+      // not have.
+      this.prisma.student.count({
+        where: { status: 'ACTIVE', campusId: null, infosysEnrollment: { is: null } },
+      }),
       // A mentor with no grants sees no students. Correct as a rule, wrong as a state:
       // it means somebody has an account that shows them an empty system.
       this.prisma.user.count({ where: { role: 'MENTOR', mentorCampuses: { none: {} } } }),
