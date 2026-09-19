@@ -215,9 +215,12 @@ including the `Authorization` header.
    waiting
 5. A human opens **Email Reports**, reviews the draft, and clicks **Approve & Send**
 
-If `EMAIL_FROM` or `EMAIL_DEFAULT_TO` are not configured, the run logs a warning and
-skips — it does not fail loudly for what is an expected pre-configuration state, and it
-never falls back to sending without recipients.
+If `EMAIL_FROM` or `EMAIL_DEFAULT_TO` are not configured, `/internal/daily-report`
+answers `503 EMAIL_NOT_CONFIGURED` and the GitHub Action **fails the run** — it does not
+skip silently. This ran nightly in production for days returning `200` with an empty
+result, a green tick over an automation producing nothing every night, unnoticed; the
+workflow now treats a `503` as a hard failure specifically so a missing configuration is
+never mistaken for a healthy run. It never falls back to sending without recipients.
 
 ### GitHub Actions secrets
 
@@ -298,8 +301,10 @@ no `Assignment` row exists for that `dayKey`. Check the Assignments page for tha
 
 **The daily automation didn't run / nothing showed up as PENDING_APPROVAL** — check the
 `Daily Report Generation` GitHub Action run log. The most common cause is
-`EMAIL_FROM`/`EMAIL_DEFAULT_TO` not being set as repo secrets or API env vars, in which
-case the run intentionally skips (see [Daily automation](#daily-automation)).
+`EMAIL_FROM`/`EMAIL_DEFAULT_TO` not being set as **API env vars on the deployed
+backend** (not GitHub Action secrets — those are just `BACKEND_URL`/`CRON_SECRET`), in
+which case the run intentionally fails with `EMAIL_NOT_CONFIGURED` (see
+[Daily automation](#daily-automation)) rather than skipping silently.
 
 **Numbers in a sent email don't match today's dashboard** — expected. A `SENT`
 `EmailReport` stores exactly what was rendered at send time (`bodyHtml`, `snapshot`);
