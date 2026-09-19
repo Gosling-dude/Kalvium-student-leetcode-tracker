@@ -12,6 +12,7 @@ export * from './domain/password-policy';
 export * from './domain/campus';
 export * from './domain/campus-analysis';
 export * from './domain/infosys-analysis';
+export * from './domain/infosys-completion';
 export * from './domain/observability';
 export * from './domain/roster-normalisation';
 export * from './domain/baseline';
