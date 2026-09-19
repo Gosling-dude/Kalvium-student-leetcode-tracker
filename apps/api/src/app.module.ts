@@ -38,6 +38,7 @@ import { HealthModule } from './modules/health/health.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { InternalModule } from './modules/internal/internal.module';
 import { StudentPortalModule } from './modules/student-portal/student-portal.module';
+import { InfosysModule } from './modules/infosys/infosys.module';
 
 /**
  * Typed configuration and the program clock, available everywhere without an import.
@@ -96,6 +97,7 @@ class CoreModule {}
     HealthModule,
     InternalModule,
     StudentPortalModule,
+    InfosysModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
