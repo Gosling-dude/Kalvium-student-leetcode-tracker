@@ -29,6 +29,7 @@
     "db:import:infosys-roster": "tsx prisma/import-infosys-roster.ts",
     "db:reset": "prisma migrate reset --force",
     "smoke:provider": "tsx scripts/smoke-provider.ts",
+    "infosys:reconcile": "tsx scripts/infosys-reconcile.ts",
     "db:backfill:placements": "tsx scripts/backfill-first-placements.ts"
   },
   "prisma": {
