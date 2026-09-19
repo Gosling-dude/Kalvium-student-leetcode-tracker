@@ -19,6 +19,7 @@ import {
   Building2,
   CalendarDays,
   ClipboardCheck,
+  GraduationCap,
   LayoutDashboard,
   ListChecks,
   Mail,
@@ -51,6 +52,10 @@ const NAV = [
   // Separate from Analytics: that page answers "how is the programme trending", this one
   // answers "which students at which campus need a conversation, and on what evidence".
   { href: '/campus-analysis', label: 'Campus Analysis', icon: Building2 },
+  // A completely separate program from Coding Hours, deliberately its own top-level
+  // section rather than a tab under Campus Analysis or Assignments — one flat cohort,
+  // no campus selector, no shared scoring or leaderboard with Coding Hours (§11).
+  { href: '/infosys', label: 'Infosys Preparation', icon: GraduationCap },
   { href: '/admin', label: 'Admin', icon: Settings },
 ];
 
