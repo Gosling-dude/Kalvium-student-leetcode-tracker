@@ -30,7 +30,8 @@
     "db:reset": "prisma migrate reset --force",
     "smoke:provider": "tsx scripts/smoke-provider.ts",
     "infosys:reconcile": "tsx scripts/infosys-reconcile.ts",
-    "db:backfill:placements": "tsx scripts/backfill-first-placements.ts"
+    "db:backfill:placements": "tsx scripts/backfill-first-placements.ts",
+    "db:backfill:infosys-status": "tsx scripts/backfill-infosys-student-status.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

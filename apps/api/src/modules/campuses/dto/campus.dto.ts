@@ -62,6 +62,23 @@ export class ListCampusesQueryDto {
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
   includeArchived?: boolean;
+
+  /**
+   * Narrows to campuses with at least one active Coding-Hours student or batch.
+   *
+   * `Campus` is shared, program-agnostic infra (see the schema.prisma section banner
+   * above `InfosysEnrollment`) — Infosys campuses live in the same table but, by
+   * design, have no Coding-Hours students or batches at all. The Coding-Hours campus
+   * *filter picker* (`ScopeFilter`) opts into this so it never offers a campus that
+   * has nothing to filter by; admin campus-management views deliberately leave this
+   * off, because an admin managing campuses (or granting a mentor access) needs to
+   * see every campus that exists, Infosys-only ones included.
+   */
+  @ApiPropertyOptional({ description: 'Only campuses with active Coding-Hours students or batches' })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === true || value === 'true')
+  hasCodingHoursActivity?: boolean;
 }
 
 export class CreateCampusDto {

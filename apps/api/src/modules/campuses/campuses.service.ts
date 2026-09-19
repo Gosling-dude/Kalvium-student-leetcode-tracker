@@ -101,6 +101,7 @@ export class CampusesService {
   async findAll(
     includeArchived = false,
     viewerCampusIds: CampusScope = null,
+    hasCodingHoursActivity = false,
   ): Promise<CampusSummary[]> {
     const campuses = await this.prisma.campus.findMany({
       where: {
@@ -119,7 +120,15 @@ export class CampusesService {
       },
     });
 
-    return campuses.map((campus) =>
+    // See ListCampusesQueryDto.hasCodingHoursActivity: excludes campuses that exist
+    // only for Infosys (zero Coding-Hours students, zero batches) from the
+    // Coding-Hours filter picker, without touching admin campus-management views that
+    // deliberately still see every campus.
+    const filtered = hasCodingHoursActivity
+      ? campuses.filter((c) => c._count.students > 0 || c._count.batches > 0)
+      : campuses;
+
+    return filtered.map((campus) =>
       this.toSummary(campus, campus._count.students, campus._count.batches),
     );
   }

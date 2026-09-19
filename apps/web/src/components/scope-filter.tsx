@@ -89,8 +89,13 @@ export function ScopeFilterProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const { data: campuses, isLoading: campusesLoading } = useQuery({
-    queryKey: ['campuses'],
-    queryFn: api.campuses,
+    // Distinct cache key from the unfiltered admin listing (`['campuses']` elsewhere) —
+    // this is a genuinely different query, not the same data reused.
+    queryKey: ['campuses', 'coding-hours-activity'],
+    // Excludes campuses that exist only for Infosys Preparation (zero Coding-Hours
+    // students, zero batches) — this filter offers "which Coding-Hours campus do you
+    // want to see", and a campus with nothing to filter by is not an answer to that.
+    queryFn: () => api.campuses(true),
     // Campuses change when an admin onboards one, which is rare.
     staleTime: 5 * 60_000,
   });

@@ -54,7 +54,7 @@ export function MentorManagement() {
   const [form, setForm] = useState({ name: '', email: '', campusId: '' });
 
   const mentors = useQuery({ queryKey: ['admin', 'mentors'], queryFn: api.mentors });
-  const campuses = useQuery({ queryKey: ['campuses'], queryFn: api.campuses });
+  const campuses = useQuery({ queryKey: ['campuses'], queryFn: () => api.campuses() });
 
   const refresh = (): void => {
     void queryClient.invalidateQueries({ queryKey: ['admin', 'mentors'] });

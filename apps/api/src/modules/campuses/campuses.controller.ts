@@ -49,6 +49,7 @@ export class CampusesController {
     return this.campuses.findAll(
       query.includeArchived ?? false,
       await this.mentorScope.allowedCampusIds(user),
+      query.hasCodingHoursActivity ?? false,
     );
   }
 

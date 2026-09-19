@@ -36,6 +36,8 @@ import type {
   SquadLeaderboardRow,
   EmailReportRecord,
   ImportResult,
+  InfosysDashboardSummary,
+  InfosysStudentAnalysis,
   LeaderboardRow,
   LoginResponse,
   MentorDashboard,
@@ -53,6 +55,18 @@ import type {
 
 const BASE_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, '') ?? 'http://localhost:4000/api/v1';
+
+/** One Infosys day's problem set, as `InfosysAssignmentsService` returns it. */
+export interface InfosysAssignmentRecord {
+  id: string;
+  dayKey: string;
+  notes: string | null;
+  createdAt: string;
+  problems: {
+    position: number;
+    problem: { titleSlug: string; title: string; url: string };
+  }[];
+}
 
 const ACCESS_KEY = 'dsa.accessToken';
 const REFRESH_KEY = 'dsa.refreshToken';
@@ -200,7 +214,7 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   URL.revokeObjectURL(url);
 }
 
-function qs(params: Record<string, string | number | undefined | null>): string {
+function qs(params: Record<string, string | number | boolean | undefined | null>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== '') search.set(key, String(value));
@@ -229,7 +243,15 @@ export const api = {
 
   // --- Campuses --------------------------------------------------------------
 
-  campuses: () => apiFetch<CampusSummary[]>('/campuses'),
+  /**
+   * `hasCodingHoursActivity` excludes campuses that exist only for Infosys (zero
+   * Coding-Hours students, zero batches) — the Coding-Hours filter picker
+   * (`ScopeFilter`) passes `true` so it never offers a campus with nothing to filter
+   * by; admin campus-management views (`mentor-management.tsx`) call this with no
+   * arguments and deliberately still see every campus, Infosys-only ones included.
+   */
+  campuses: (hasCodingHoursActivity?: boolean) =>
+    apiFetch<CampusSummary[]>(`/campuses${qs({ hasCodingHoursActivity })}`),
 
   campusStats: (dayKey?: string) => apiFetch<CampusStats[]>(`/campuses/stats${qs({ dayKey })}`),
 
@@ -424,6 +446,22 @@ export const api = {
         }[];
       }[];
     }>(`/campus-analysis/students/${studentId}${qs(params)}`),
+
+  // --- Infosys Preparation -----------------------------------------------------
+  //
+  // A separate program, one flat cohort — no campus parameter on any of these. See
+  // packages/shared/src/domain/infosys-analysis.ts's header comment for why.
+
+  infosysDashboard: () => apiFetch<InfosysDashboardSummary>('/infosys/dashboard'),
+
+  infosysStudents: () => apiFetch<InfosysStudentAnalysis[]>('/infosys/students'),
+
+  infosysMe: () => apiFetch<InfosysStudentAnalysis>('/infosys/me'),
+
+  infosysAssignments: () => apiFetch<InfosysAssignmentRecord[]>('/infosys/assignments'),
+
+  createInfosysAssignment: (body: { dayKey: string; problemUrls: string[]; notes?: string }) =>
+    apiFetch<InfosysAssignmentRecord>('/infosys/assignments', { method: 'POST', body }),
 
   /** `studentIds` narrows the run to those students — used to re-sync one row on demand. */
   startSync: (body: { mode?: string; dayKey?: string; studentIds?: string[] } = {}) =>

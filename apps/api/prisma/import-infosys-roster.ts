@@ -24,6 +24,19 @@
  * identity data, and safe to correct later without affecting any matching logic (which
  * is keyed on email throughout).
  *
+ * `status: 'ARCHIVED'`, not `'ACTIVE'` — found live, the hard way: every Coding-Hours
+ * "current roster" surface (dashboard, leaderboard, campus-analysis, reports,
+ * analytics) filters on `Student.status: 'ACTIVE'` with no other discriminator, an
+ * invariant that held until this import created the first-ever `status: 'ACTIVE'`,
+ * `campusId: null` students in the system's history. `ACTIVE` silently inflated every
+ * one of those Coding-Hours aggregates with students who have no Coding-Hours
+ * campus, batch, or assignment at all. `ARCHIVED` is the status this codebase already
+ * excludes from every one of those views, comprehensively and consistently — reusing
+ * it closes the leak everywhere at once. It has no effect on Infosys: neither
+ * `InfosysRollupService` nor the sync-eligibility query in `sync.service.ts` reads
+ * `Student.status` (sync eligibility already includes any student with an
+ * `InfosysEnrollment` regardless of status).
+ *
  * ## Campus resolution
  *
  * A campus is one real institution, not a per-program label (see the schema banner).
@@ -239,12 +252,26 @@ async function main(): Promise<void> {
       if (match) {
         studentId = match.id;
       } else {
+        // ARCHIVED, not ACTIVE — a student who has never been part of Coding Hours
+        // must not count as one. `Student.status: 'ACTIVE'` is the base population
+        // filter for every Coding-Hours "current roster" surface (dashboard,
+        // leaderboard, campus-analysis, reports, analytics — verified, all of them),
+        // and a genuinely new Infosys-only student has `campusId: null` besides,
+        // which those queries never expected either. ARCHIVED is the one status this
+        // codebase already, comprehensively treats as excluded from every current
+        // Coding-Hours view, so reusing it here closes the leak everywhere at once
+        // instead of patching each of those files individually. It does not affect
+        // Infosys at all: InfosysRollupService and the widened sync-eligibility query
+        // (sync.service.ts) never read Student.status — sync eligibility already
+        // includes any student with an InfosysEnrollment regardless of status.
         const created = await prisma.student.create({
           data: {
             name: displayNameFromEmail(row.email),
             email: row.email,
             leetcodeUsername: null,
-            status: 'ACTIVE',
+            status: 'ARCHIVED',
+            archivedAt: new Date(),
+            archivedReason: 'Never enrolled in Coding Hours — Infosys Preparation only',
             syncState: { create: { status: 'PROFILE_MISSING' } },
           },
           select: { id: true },
