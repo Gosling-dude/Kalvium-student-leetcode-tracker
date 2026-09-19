@@ -178,11 +178,19 @@ export class InfosysAnalyticsService {
     return { assigned: problemIds.length, solved, attemptedNotSolved, notAttempted };
   }
 
-  /** Every Infosys student, whole cohort, no campus filter. */
+  /**
+   * Every Infosys student, whole cohort, no campus filter.
+   *
+   * Every enrolled student is listed here regardless of whether any assignment has
+   * been entered yet — "no InfosysAssignment exists" means no tracking window, which
+   * means every student's weeks/counts are empty, not that the roster itself is empty.
+   * Conflating the two produced a real bug: the student list showed 0 students in
+   * production while 205 were genuinely enrolled, simply because no assignment had
+   * been added yet.
+   */
   async studentAnalysis(): Promise<InfosysStudentAnalysis[]> {
     const period = await this.period();
-    if (!period) return [];
-    const weeks = analysisWeeks(period.from, period.to);
+    const weeks = period ? analysisWeeks(period.from, period.to) : [];
 
     const enrollments = await this.prisma.infosysEnrollment.findMany({ select: { studentId: true } });
     return this.studentAnalyses(
@@ -193,11 +201,12 @@ export class InfosysAnalyticsService {
   }
 
   /** One Infosys student, for a STUDENT-role caller viewing their own data, or an
-   * ADMIN/MENTOR looking one up directly. `null` if they are not Infosys-enrolled. */
+   * ADMIN/MENTOR looking one up directly. `null` if they are not Infosys-enrolled —
+   * never for "no assignment exists yet", which still returns the student with empty
+   * weeks (see `studentAnalysis`'s comment). */
   async studentAnalysisFor(studentId: string): Promise<InfosysStudentAnalysis | null> {
     const period = await this.period();
-    if (!period) return null;
-    const weeks = analysisWeeks(period.from, period.to);
+    const weeks = period ? analysisWeeks(period.from, period.to) : [];
     const [analysis] = await this.studentAnalyses([studentId], weeks, period);
     return analysis ?? null;
   }
@@ -205,7 +214,7 @@ export class InfosysAnalyticsService {
   private async studentAnalyses(
     studentIds: string[],
     weeks: { weekNumber: number; from: string; to: string }[],
-    period: { from: string; to: string },
+    period: { from: string; to: string } | null,
   ): Promise<InfosysStudentAnalysis[]> {
     if (studentIds.length === 0) return [];
 
@@ -220,19 +229,21 @@ export class InfosysAnalyticsService {
       },
     });
 
-    const statuses = await this.prisma.infosysDailyStatus.findMany({
-      where: { studentId: { in: studentIds }, dayKey: { gte: period.from, lte: period.to } },
-      select: {
-        studentId: true,
-        dayKey: true,
-        assignedCount: true,
-        solvedCount: true,
-        attemptedNotSolvedCount: true,
-        notAttemptedCount: true,
-        profileNotLinkedCount: true,
-        dataUnavailableCount: true,
-      },
-    });
+    const statuses = period
+      ? await this.prisma.infosysDailyStatus.findMany({
+          where: { studentId: { in: studentIds }, dayKey: { gte: period.from, lte: period.to } },
+          select: {
+            studentId: true,
+            dayKey: true,
+            assignedCount: true,
+            solvedCount: true,
+            attemptedNotSolvedCount: true,
+            notAttemptedCount: true,
+            profileNotLinkedCount: true,
+            dataUnavailableCount: true,
+          },
+        })
+      : [];
 
     const byStudent = new Map<string, typeof statuses>();
     for (const status of statuses) {
