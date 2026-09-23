@@ -25,13 +25,17 @@ const CATEGORY_TONE: Record<string, 'success' | 'warning' | 'danger' | 'neutral'
   NOT_PARTICIPATING: 'danger',
   DECLINING: 'danger',
   PROFILE_NOT_LINKED: 'neutral',
-  DATA_UNAVAILABLE: 'neutral',
 };
 
+/**
+ * Whether a profile has been *added*, never whether the last sync succeeded — a sync
+ * failure is an internal diagnostic (`InfosysProfileState: 'DATA_UNAVAILABLE'`, kept on
+ * `StudentSyncState` for troubleshooting), not a student-facing status. It never renders
+ * here; see the module banner on `infosys-analysis.ts`.
+ */
 function ProfileStatusBadge({ state }: { state: InfosysStudentAnalysis['profileState'] }) {
   if (state === 'PROFILE_NOT_LINKED') return <Badge tone="neutral">Profile not linked</Badge>;
-  if (state === 'DATA_UNAVAILABLE') return <Badge tone="warning">Data unavailable</Badge>;
-  return <Badge tone="success">OK</Badge>;
+  return <Badge tone="success">Linked</Badge>;
 }
 
 export default function InfosysStudentsPage() {

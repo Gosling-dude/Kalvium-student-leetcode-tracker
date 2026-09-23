@@ -33,17 +33,17 @@ describe('categoriseInfosysStudent', () => {
     expect(verdict.category).toBe('PROFILE_NOT_LINKED');
   });
 
-  it('DATA_UNAVAILABLE wins over any weekly figures', () => {
+  it('a DATA_UNAVAILABLE profile state reports as NOT_PARTICIPATING, never as its own category', () => {
     const verdict = categoriseInfosysStudent({
       weeks: [week(1, 4, 4, 0)],
       profileState: 'DATA_UNAVAILABLE',
     });
-    expect(verdict.category).toBe('DATA_UNAVAILABLE');
+    expect(verdict.category).toBe('NOT_PARTICIPATING');
   });
 
-  it('DATA_UNAVAILABLE when no questions have been assigned yet', () => {
+  it('reports NOT_PARTICIPATING when no questions have been assigned yet', () => {
     const verdict = categoriseInfosysStudent({ weeks: [], profileState: 'OK' });
-    expect(verdict.category).toBe('DATA_UNAVAILABLE');
+    expect(verdict.category).toBe('NOT_PARTICIPATING');
   });
 
   it('CONSISTENT_SOLVER: >=60% solved every observed week', () => {

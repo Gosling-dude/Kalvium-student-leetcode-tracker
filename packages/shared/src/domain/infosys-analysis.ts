@@ -12,13 +12,23 @@
  * without a deliberate decision is that every verdict comes from this one function, so
  * a summary card and its drill-down can never disagree (§12).
  *
- * Two categories are structural, not performance judgements, and are checked before
+ * One category is structural, not a performance judgement, and is checked before
  * anything else:
  *
  *  * `PROFILE_NOT_LINKED` — no LeetCode profile has been added yet. Never scored as
  *    "not participating"; §6 and §13 of the brief are explicit that this must never
  *    collapse into a zero.
- *  * `DATA_UNAVAILABLE` — a profile exists but could not be read reliably.
+ *
+ * A linked profile whose submissions could not be read reliably (a sync failure, or
+ * simply no assignment yet to judge against) is deliberately *not* a category of its
+ * own — an earlier version exposed this as `DATA_UNAVAILABLE`, which read to a
+ * non-technical viewer as a fourth kind of student outcome rather than what it was: an
+ * internal sync/diagnostic state. It reports as `NOT_PARTICIPATING` instead — "profile
+ * linked, no qualifying activity observed" is true in both cases, and the counts behind
+ * it are never fabricated (a sync failure still produces zero solved/attempted rows,
+ * per §6/§13, it is only the *label* shown for it that changed). The technical
+ * distinction is not lost: `InfosysProfileState` and `InfosysDailyStatus.dataUnavailableCount`
+ * still carry it for diagnostics, they are just never surfaced as a category.
  *
  * `TRYING_BUT_STRUGGLING` is the one category with no Coding-Hours analogue: a student
  * who attempts most assigned questions but rarely gets an accepted submission is a
@@ -53,8 +63,7 @@ export type InfosysCategory =
   | 'TRYING_BUT_STRUGGLING'
   | 'NOT_PARTICIPATING'
   | 'DECLINING'
-  | 'PROFILE_NOT_LINKED'
-  | 'DATA_UNAVAILABLE';
+  | 'PROFILE_NOT_LINKED';
 
 export const INFOSYS_CATEGORIES: InfosysCategory[] = [
   'CONSISTENT_SOLVER',
@@ -64,7 +73,6 @@ export const INFOSYS_CATEGORIES: InfosysCategory[] = [
   'DECLINING',
   'NOT_PARTICIPATING',
   'PROFILE_NOT_LINKED',
-  'DATA_UNAVAILABLE',
 ];
 
 export const INFOSYS_CATEGORY_LABELS: Record<InfosysCategory, string> = {
@@ -75,7 +83,6 @@ export const INFOSYS_CATEGORY_LABELS: Record<InfosysCategory, string> = {
   NOT_PARTICIPATING: 'Not Participating',
   DECLINING: 'Declining',
   PROFILE_NOT_LINKED: 'Profile Not Linked',
-  DATA_UNAVAILABLE: 'Data Unavailable',
 };
 
 export const INFOSYS_CATEGORY_RULES: Record<InfosysCategory, string> = {
@@ -84,9 +91,8 @@ export const INFOSYS_CATEGORY_RULES: Record<InfosysCategory, string> = {
   TRYING_BUT_STRUGGLING: `Attempted ${INFOSYS_STRUGGLING_ATTEMPT_THRESHOLD * 100}% or more of assigned questions in every observed week, but solved under ${INFOSYS_STRUGGLING_SOLVE_THRESHOLD * 100}%.`,
   IMPROVING: 'Share of questions solved in the second half of the period is higher than in the first.',
   DECLINING: 'Share of questions solved in the second half of the period is lower than in the first.',
-  NOT_PARTICIPATING: `Attempted under ${INFOSYS_NOT_PARTICIPATING_ATTEMPT_THRESHOLD * 100}% of assigned questions in every observed week.`,
+  NOT_PARTICIPATING: `Attempted under ${INFOSYS_NOT_PARTICIPATING_ATTEMPT_THRESHOLD * 100}% of assigned questions in every observed week (includes a linked profile with no qualifying activity, or no assignment yet to be judged against).`,
   PROFILE_NOT_LINKED: 'No LeetCode profile has been added for this student yet.',
-  DATA_UNAVAILABLE: 'A LeetCode profile is linked but reliable data could not be fetched.',
 };
 
 /** One week of one Infosys student, as the canonical daily rows add up to. */
@@ -167,9 +173,13 @@ export function categoriseInfosysStudent(input: InfosysCategoryInput): InfosysCa
     };
   }
   if (profileState === 'DATA_UNAVAILABLE') {
+    // A genuine sync failure — the profile is linked but could not be read reliably.
+    // Reported as NOT_PARTICIPATING (no category of its own; see the module banner),
+    // never as a fabricated solved/attempted figure: `weeks` here still carries whatever
+    // real 0s the rollup persisted for this profile state, unchanged.
     return {
       ...base,
-      category: 'DATA_UNAVAILABLE',
+      category: 'NOT_PARTICIPATING',
       because: 'A LeetCode profile is linked but their submissions could not be reliably read.',
     };
   }
@@ -177,7 +187,7 @@ export function categoriseInfosysStudent(input: InfosysCategoryInput): InfosysCa
   if (considered.length === 0) {
     return {
       ...base,
-      category: 'DATA_UNAVAILABLE',
+      category: 'NOT_PARTICIPATING',
       because: 'No Infosys questions have been assigned yet for this student to be judged against.',
     };
   }

@@ -34,7 +34,6 @@ const ALL_CATEGORIES: InfosysCategory[] = [
   'DECLINING',
   'NOT_PARTICIPATING',
   'PROFILE_NOT_LINKED',
-  'DATA_UNAVAILABLE',
 ];
 
 @Injectable()
@@ -203,8 +202,18 @@ export class InfosysAnalyticsService {
   /** One Infosys student, for a STUDENT-role caller viewing their own data, or an
    * ADMIN/MENTOR looking one up directly. `null` if they are not Infosys-enrolled —
    * never for "no assignment exists yet", which still returns the student with empty
-   * weeks (see `studentAnalysis`'s comment). */
+   * weeks (see `studentAnalysis`'s comment).
+   *
+   * The enrollment check is explicit here, not inferred from whether a row comes back:
+   * `studentAnalyses` looks students up by `Student.id` directly and has no idea whether
+   * an `InfosysEnrollment` exists, so a student removed from the active cohort (their
+   * `InfosysEnrollment` row deleted, per the 2026-09-23 reconciliation — the `Student`
+   * row itself is deliberately kept) would otherwise still come back here even though
+   * every other active-cohort view has already stopped counting them. */
   async studentAnalysisFor(studentId: string): Promise<InfosysStudentAnalysis | null> {
+    const enrollment = await this.prisma.infosysEnrollment.findUnique({ where: { studentId } });
+    if (!enrollment) return null;
+
     const period = await this.period();
     const weeks = period ? analysisWeeks(period.from, period.to) : [];
     const [analysis] = await this.studentAnalyses([studentId], weeks, period);
