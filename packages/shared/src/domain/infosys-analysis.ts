@@ -329,3 +329,57 @@ export function assertInfosysQuestionTotalsReconcile(
     `+ ${week.notAttempted} not attempted = ${parts}, but ${week.assigned} were assigned.`
   );
 }
+
+/* ------------------------------------------------------------------------- *
+ * The Daily Report — a wide, date-wise submission matrix, one row per active
+ * Infosys student, one column per *assigned* day (never a calendar day with no
+ * InfosysAssignment — that is how a day like 27 Sep, deliberately unassigned,
+ * stays absent rather than showing as a column of forced zeros). Declared here,
+ * not in the API module, for the same reason every other Infosys response shape
+ * is: the web client, the server, and the exported workbook all read from one
+ * definition, so the on-screen table and the download can never disagree (§14).
+ * ------------------------------------------------------------------------- */
+
+/** One assigned day, as a report column. */
+export interface InfosysDailyReportDay {
+  dayKey: DayKey;
+  weekNumber: number;
+  /** How many problems were assigned this day — the ceiling a cell's solved count
+   * can reach, and what "4 questions given" renders from in the exported header. */
+  assignedCount: number;
+}
+
+/** One week's worth of columns, and the merged header label above them — e.g.
+ * "Week 1 (21 Sep – 22 Sep)", built from the *assigned* days actually in the
+ * week, not the calendar week's full span. */
+export interface InfosysDailyReportWeek {
+  weekNumber: number;
+  label: string;
+  days: DayKey[];
+}
+
+/** One student's row. `daily` is keyed by `dayKey`; a day with no entry for this
+ * student never happens in practice (every enrolled student gets a row for every
+ * assigned day, per `InfosysRollupService`) but is read as 0, never fabricated as
+ * something else. `total` is the sum of every value in `daily`, always. */
+export interface InfosysDailyReportRow {
+  rank: number;
+  studentId: string;
+  name: string;
+  campusName: string | null;
+  category: InfosysCategory;
+  profileState: InfosysProfileState;
+  daily: Record<string, number>;
+  total: number;
+}
+
+export interface InfosysDailyReportResponse {
+  asOf: DayKey;
+  trackingStart: DayKey | null;
+  days: InfosysDailyReportDay[];
+  weeks: InfosysDailyReportWeek[];
+  /** Sorted by Total Solved descending, student name ascending as the tiebreak —
+   * computed once, here, so the on-screen table and the Excel export read the
+   * same order without either re-deriving it (§6). */
+  rows: InfosysDailyReportRow[];
+}

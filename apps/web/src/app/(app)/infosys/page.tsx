@@ -59,6 +59,12 @@ export default function InfosysDashboardPage() {
           >
             Student Analysis
           </Link>
+          <Link
+            href="/infosys/daily-report"
+            className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-surface-sunken)]"
+          >
+            Daily Report
+          </Link>
         </div>
       </div>
 

@@ -36,6 +36,8 @@ import type {
   SquadLeaderboardRow,
   EmailReportRecord,
   ImportResult,
+  InfosysCategory,
+  InfosysDailyReportResponse,
   InfosysDashboardSummary,
   InfosysStudentAnalysis,
   LeaderboardRow,
@@ -462,6 +464,19 @@ export const api = {
 
   createInfosysAssignment: (body: { dayKey: string; problemUrls: string[]; notes?: string }) =>
     apiFetch<InfosysAssignmentRecord>('/infosys/assignments', { method: 'POST', body }),
+
+  updateInfosysStudent: (
+    studentId: string,
+    body: { name?: string; email?: string; campusId?: string; leetcodeProfileUrl?: string },
+  ) => apiFetch<InfosysStudentAnalysis>(`/infosys/students/${studentId}`, { method: 'PATCH', body }),
+
+  infosysDailyReport: (params: { asOf: string; campus?: string | null; category?: InfosysCategory | null }) =>
+    apiFetch<InfosysDailyReportResponse>(
+      `/infosys/daily-report${qs({ asOf: params.asOf, campus: params.campus, category: params.category })}`,
+    ),
+
+  infosysDailyReportExportPath: (params: { asOf: string; campus?: string | null; category?: InfosysCategory | null }) =>
+    `/infosys/daily-report/export${qs({ asOf: params.asOf, campus: params.campus, category: params.category })}`,
 
   /** `studentIds` narrows the run to those students — used to re-sync one row on demand. */
   startSync: (body: { mode?: string; dayKey?: string; studentIds?: string[] } = {}) =>
