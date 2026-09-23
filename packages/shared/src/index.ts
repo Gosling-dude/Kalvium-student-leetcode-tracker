@@ -11,6 +11,7 @@ export * from './domain/batch';
 export * from './domain/password-policy';
 export * from './domain/campus';
 export * from './domain/campus-analysis';
+export * from './domain/campus-daily-report';
 export * from './domain/infosys-analysis';
 export * from './domain/infosys-completion';
 export * from './domain/observability';

@@ -20,6 +20,7 @@ import { assertQuestionTotalsReconcile } from '@dsa/shared';
 
 import { CampusAnalysisService } from './campus-analysis.service';
 import { MentorScopeService } from '../campuses/mentor-scope.service';
+import { CampusesService } from '../campuses/campuses.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import type { RequestUser } from '../../common/decorators';
 
@@ -41,10 +42,13 @@ const STUDENT_COUNT = 10;
 const ist = (day: string, hhmm: string): Date => new Date(`${day}T${hhmm}:00${IST}`);
 
 const time = new ProgramTimeService({ program: { timezone: 'Asia/Kolkata' } } as never);
+const mentorScope = new MentorScopeService(prisma as never);
+const cache = { remember: (_key: string, _ttl: number, fn: () => unknown) => fn() } as never;
 const service = new CampusAnalysisService(
   prisma as never,
   time,
-  new MentorScopeService(prisma as never),
+  mentorScope,
+  new CampusesService(prisma as never, time, cache, mentorScope),
 );
 
 const admin = { id: '', email: 'a@x.invalid', name: 'A', role: 'ADMIN', studentId: null } as RequestUser;

@@ -15,9 +15,10 @@
  * reads them as a score.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronRight, ExternalLink } from 'lucide-react';
+import Link from 'next/link';
+import { ChevronRight, ExternalLink, Pencil } from 'lucide-react';
 import type { CampusCategory } from '@dsa/shared';
 
 import { api } from '@/lib/api';
@@ -33,6 +34,7 @@ import {
   Td,
   Th,
 } from '@/components/ui';
+import { EditStudentDialog, type EditableStudent } from '@/components/edit-student-dialog';
 
 /** Categories that describe performance, against those that describe our own coverage. */
 const PERFORMANCE: CampusCategory[] = [
@@ -53,15 +55,35 @@ const percent = (value: number | null): string =>
 export default function CampusAnalysisPage() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [campusFilter, setCampusFilter] = useState('ALL');
+  const [batchFilter, setBatchFilter] = useState('ALL');
+  const [squadFilter, setSquadFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
   const [open, setOpen] = useState<{ campusId: string; category: CampusCategory } | null>(null);
   const [openWeek, setOpenWeek] = useState<{ campusId: string; weekNumber: number } | null>(null);
   const [student, setStudent] = useState<string | null>(null);
+  const [editing, setEditing] = useState<EditableStudent | null>(null);
 
   const range = { from: from || undefined, to: to || undefined };
 
+  // Coding-Hours-active campuses only (`hasCodingHoursActivity`) — the same picker
+  // every other Coding-Hours screen already uses, so it can never offer a campus this
+  // page itself would then refuse (see `CampusAnalysisService.scopeFor`).
+  const campusOptions = useQuery({ queryKey: ['campuses', 'coding-hours-activity'], queryFn: () => api.campuses(true) });
+  const studentFilters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
+
+  const batchOptions = useMemo(
+    () => (studentFilters.data?.batches ?? []).filter((b) => campusFilter === 'ALL' || b.campusId === campusFilter),
+    [studentFilters.data, campusFilter],
+  );
+  const squadOptions = useMemo(
+    () => (studentFilters.data?.squads ?? []).filter((s) => campusFilter === 'ALL' || s.campusId === campusFilter),
+    [studentFilters.data, campusFilter],
+  );
+
   const summary = useQuery({
-    queryKey: ['campus-analysis', from, to],
-    queryFn: () => api.campusAnalysis(range),
+    queryKey: ['campus-analysis', from, to, campusFilter],
+    queryFn: () => api.campusAnalysis({ ...range, campusId: campusFilter === 'ALL' ? undefined : campusFilter }),
   });
 
   if (summary.isLoading) {
@@ -87,7 +109,62 @@ export default function CampusAnalysisPage() {
             student has ever solved it, whenever that was.
           </p>
         </div>
-        <div className="flex items-end gap-2">
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs text-[var(--color-fg-muted)]">
+            Campus
+            <select
+              value={campusFilter}
+              onChange={(e) => setCampusFilter(e.target.value)}
+              className="mt-1 block rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm"
+            >
+              <option value="ALL">All</option>
+              {(campusOptions.data ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.code}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-[var(--color-fg-muted)]">
+            Batch
+            <select
+              value={batchFilter}
+              onChange={(e) => setBatchFilter(e.target.value)}
+              className="mt-1 block rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm"
+            >
+              <option value="ALL">All</option>
+              {batchOptions.map((b) => (
+                <option key={b.id} value={b.name}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-[var(--color-fg-muted)]">
+            Squad
+            <select
+              value={squadFilter}
+              onChange={(e) => setSquadFilter(e.target.value)}
+              className="mt-1 block rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm"
+            >
+              <option value="ALL">All</option>
+              {squadOptions.map((s) => (
+                <option key={s.id} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-[var(--color-fg-muted)]">
+            Student search
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Name or email"
+              className="mt-1 block rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm"
+            />
+          </label>
           <label className="text-xs text-[var(--color-fg-muted)]">
             From
             <input
@@ -106,17 +183,27 @@ export default function CampusAnalysisPage() {
               className="mt-1 block rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface-raised)] px-2 py-1.5 text-sm"
             />
           </label>
-          {(from || to) && (
+          {(from || to || search || campusFilter !== 'ALL' || batchFilter !== 'ALL' || squadFilter !== 'ALL') && (
             <Button
               variant="ghost"
               onClick={() => {
                 setFrom('');
                 setTo('');
+                setSearch('');
+                setCampusFilter('ALL');
+                setBatchFilter('ALL');
+                setSquadFilter('ALL');
               }}
             >
               Reset
             </Button>
           )}
+          <Link
+            href="/campus-analysis/daily-report"
+            className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-surface-sunken)]"
+          >
+            Daily Report
+          </Link>
         </div>
       </div>
 
@@ -287,6 +374,10 @@ export default function CampusAnalysisPage() {
               category={open.category}
               range={range}
               onPickStudent={setStudent}
+              onEditStudent={setEditing}
+              search={search}
+              batchFilter={batchFilter}
+              squadFilter={squadFilter}
             />
           ) : null}
         </Card>
@@ -295,6 +386,8 @@ export default function CampusAnalysisPage() {
       {student ? (
         <StudentDetail studentId={student} range={range} onClose={() => setStudent(null)} />
       ) : null}
+
+      <EditStudentDialog student={editing} open={editing !== null} onClose={() => setEditing(null)} />
     </div>
   );
 }
@@ -433,11 +526,19 @@ function CategoryDetail({
   category,
   range,
   onPickStudent,
+  onEditStudent,
+  search,
+  batchFilter,
+  squadFilter,
 }: {
   campusId: string;
   category: CampusCategory;
   range: { from?: string; to?: string };
   onPickStudent: (id: string) => void;
+  onEditStudent: (student: EditableStudent) => void;
+  search: string;
+  batchFilter: string;
+  squadFilter: string;
 }) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['campus-analysis-category', campusId, category, range.from, range.to],
@@ -448,17 +549,31 @@ function CategoryDetail({
   if (error) return <div className="px-5 py-4"><ErrorState error={error} onRetry={() => void refetch()} /></div>;
   if (!data) return null;
 
+  // Batch/squad/search narrow this drill-down's rows only — the query above still fetches
+  // the whole category, so a summary card's count and this list agree with each other
+  // (the invariant the file banner describes), even while fewer rows are shown.
+  const needle = search.trim().toLowerCase();
+  const students = data.students.filter((s) => {
+    if (needle && !s.name.toLowerCase().includes(needle)) return false;
+    if (batchFilter !== 'ALL' && s.batch !== batchFilter) return false;
+    if (squadFilter !== 'ALL' && s.squad !== squadFilter) return false;
+    return true;
+  });
+
   const weekCount = data.students[0]?.weeks.length ?? 0;
 
   return (
     <div className="border-t border-[var(--color-border)] bg-[var(--color-surface-sunken)] px-5 py-4">
       <h3 className="text-sm font-semibold">{data.label}</h3>
-      <p className="mt-0.5 text-xs text-[var(--color-fg-muted)]">{data.rule}</p>
+      <p className="mt-0.5 text-xs text-[var(--color-fg-muted)]">
+        {data.rule} · showing {students.length} of {data.students.length}
+      </p>
 
       <TableShell>
         <thead>
           <tr>
             <Th>Student</Th>
+            <Th>Batch</Th>
             <Th>Squad</Th>
             {Array.from({ length: weekCount }, (_, i) => (
               <Th key={i} className="text-right">
@@ -473,7 +588,7 @@ function CategoryDetail({
           </tr>
         </thead>
         <tbody>
-          {data.students.map((s) => (
+          {students.map((s) => (
             <tr key={s.studentId}>
               <Td className="whitespace-nowrap">
                 <span className="font-medium">{s.name}</span>
@@ -487,8 +602,11 @@ function CategoryDetail({
                     {s.leetcodeUsername}
                     <ExternalLink className="ml-1 h-3 w-3" />
                   </a>
-                ) : null}
+                ) : (
+                  <span className="ml-2 text-xs text-[var(--color-fg-subtle)]">Profile not linked</span>
+                )}
               </Td>
+              <Td className="text-xs text-[var(--color-fg-muted)]">{s.batch ?? '—'}</Td>
               <Td className="text-xs text-[var(--color-fg-muted)]">{s.squad ?? '—'}</Td>
               {s.weeks.map((w) => (
                 <Td key={w.weekNumber} className="text-right tabular-nums">
@@ -507,10 +625,18 @@ function CategoryDetail({
               <Td className="min-w-[18rem] text-xs text-[var(--color-fg-muted)]">
                 {s.dataAvailable ? s.verdict.because : s.dataIssue}
               </Td>
-              <Td className="w-px">
+              <Td className="w-px whitespace-nowrap">
                 <Button variant="ghost" onClick={() => onPickStudent(s.studentId)}>
                   Detail
                 </Button>
+                <button
+                  type="button"
+                  aria-label={`Edit ${s.name}`}
+                  onClick={() => onEditStudent({ studentId: s.studentId, name: s.name })}
+                  className="ml-1 rounded-md p-1.5 text-[var(--color-fg-subtle)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-fg)]"
+                >
+                  <Pencil className="size-3.5" aria-hidden />
+                </button>
               </Td>
             </tr>
           ))}

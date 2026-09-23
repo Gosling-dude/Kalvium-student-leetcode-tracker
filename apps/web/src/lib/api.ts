@@ -14,6 +14,7 @@ import type {
   CampusAnalysisPeriod,
   CampusAnalysisSummary,
   CampusCategory,
+  CampusDailyReportResponse,
   CampusQuestion,
   StudentAnalysis,
   AssignmentAudienceChangeEntry,
@@ -305,6 +306,8 @@ export const api = {
   students: (params: Record<string, string | number | undefined>) =>
     apiFetch<Paginated<StudentSummary>>(`/students${qs(params)}`),
 
+  student: (id: string) => apiFetch<StudentSummary>(`/students/${id}`),
+
   studentProfile: (id: string) => apiFetch<StudentProfile>(`/students/${id}/profile`),
 
   studentFilters: () =>
@@ -393,6 +396,42 @@ export const api = {
     apiFetch<{ period: CampusAnalysisPeriod; campuses: CampusAnalysisSummary[] }>(
       `/campus-analysis/summary${qs(params)}`,
     ),
+
+  campusDailyReport: (params: {
+    asOf: string;
+    campus?: string | null;
+    batch?: string | null;
+    squad?: string | null;
+    category?: CampusCategory | null;
+    search?: string | null;
+  }) =>
+    apiFetch<CampusDailyReportResponse>(
+      `/campus-analysis/daily-report${qs({
+        asOf: params.asOf,
+        campus: params.campus,
+        batch: params.batch,
+        squad: params.squad,
+        category: params.category,
+        search: params.search,
+      })}`,
+    ),
+
+  campusDailyReportExportPath: (params: {
+    asOf: string;
+    campus?: string | null;
+    batch?: string | null;
+    squad?: string | null;
+    category?: CampusCategory | null;
+    search?: string | null;
+  }) =>
+    `/campus-analysis/daily-report/export${qs({
+      asOf: params.asOf,
+      campus: params.campus,
+      batch: params.batch,
+      squad: params.squad,
+      category: params.category,
+      search: params.search,
+    })}`,
 
   campusAnalysisCategory: (
     campusId: string,

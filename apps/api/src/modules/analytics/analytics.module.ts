@@ -5,6 +5,8 @@ import { CurrentUser, type RequestUser } from '../../common/decorators';
 import { AnalyticsService } from './analytics.service';
 import { CampusAnalysisController } from './campus-analysis.controller';
 import { CampusAnalysisService } from './campus-analysis.service';
+import { CampusDailyReportController } from './campus-daily-report.controller';
+import { CampusDailyReportService } from './campus-daily-report.service';
 import { BatchesModule } from '../batches/batches.module';
 import { CampusesModule } from '../campuses/campuses.module';
 import { CampusesService } from '../campuses/campuses.service';
@@ -57,8 +59,8 @@ export class AnalyticsController {
 
 @Module({
   imports: [BatchesModule, CampusesModule],
-  controllers: [AnalyticsController, CampusAnalysisController],
-  providers: [AnalyticsService, CampusAnalysisService],
+  controllers: [AnalyticsController, CampusAnalysisController, CampusDailyReportController],
+  providers: [AnalyticsService, CampusAnalysisService, CampusDailyReportService],
   exports: [AnalyticsService, CampusAnalysisService],
 })
 export class AnalyticsModule {}

@@ -45,6 +45,7 @@ import {
 import { PrismaService } from '../../infra/prisma/prisma.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import { MentorScopeService, type CampusScope } from '../campuses/mentor-scope.service';
+import { CampusesService } from '../campuses/campuses.service';
 import type { RequestUser } from '../../common/decorators';
 
 /**
@@ -65,6 +66,7 @@ export class CampusAnalysisService {
     private readonly prisma: PrismaService,
     private readonly time: ProgramTimeService,
     private readonly mentorScope: MentorScopeService,
+    private readonly campuses: CampusesService,
   ) {}
 
   /**
@@ -399,11 +401,22 @@ export class CampusAnalysisService {
     return this.tally([...bySlug.values()]);
   }
 
-  /** The campuses this user may read, as ids. Throws only when they may read none. */
+  /**
+   * The campuses this user may read, as ids. Throws only when they may read none.
+   *
+   * "Every campus" here means every campus with real Coding-Hours activity (an active
+   * student or an active batch) — `CampusesService.findAll`'s already-tested
+   * `hasCodingHoursActivity` filter, the same one the Coding-Hours campus picker and the
+   * main Dashboard's per-campus card grid already use (see `aedec6e`'s fix for the
+   * identical bug on the Dashboard). A campus that exists only for a different program
+   * (Infosys Preparation — zero Coding-Hours students, zero batches) must not turn into
+   * an empty "0 active students" card here either; nothing about that campus's own,
+   * unrelated data is touched by excluding it from this list.
+   */
   private async scopeFor(user: RequestUser, requestedCampusId?: string): Promise<string[]> {
     const allowed: CampusScope = await this.mentorScope.allowedCampusIds(user);
-    const all = await this.prisma.campus.findMany({ select: { id: true }, orderBy: { code: 'asc' } });
-    const everything = all.map((c) => c.id);
+    const active = await this.campuses.findAll(false, null, true);
+    const everything = active.map((c) => c.id);
 
     const visible = allowed === null ? everything : everything.filter((id) => allowed.includes(id));
     if (visible.length === 0) {
@@ -533,6 +546,23 @@ export class CampusAnalysisService {
         .filter((a) => a.verdict.category === category)
         .sort((a, b) => b.solved - a.solved || a.name.localeCompare(b.name)),
     };
+  }
+
+  /**
+   * Every student across every category, for whichever campuses this user may read (all
+   * of them, scoped, if `campusId` is omitted) — the same `weeklyRowsFor` rows `drillDown`
+   * filters down to one category, exposed here unfiltered for a caller that needs the
+   * whole cohort's category alongside it (the Daily Report's category filter) without a
+   * second implementation of "which students, which category".
+   */
+  async allStudents(
+    user: RequestUser,
+    options: { from?: string; to?: string; campusId?: string } = {},
+  ): Promise<{ period: CampusAnalysisPeriod; students: StudentAnalysis[] }> {
+    const period = await this.resolvePeriod(options.from, options.to);
+    const campusIds = await this.scopeFor(user, options.campusId);
+    const analyses = await this.weeklyRowsFor(period, { campusIds });
+    return { period, students: analyses };
   }
 
   /**

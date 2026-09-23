@@ -20,6 +20,7 @@ import { CAMPUS_CATEGORIES } from '@dsa/shared';
 
 import { CampusAnalysisService } from './campus-analysis.service';
 import { MentorScopeService } from '../campuses/mentor-scope.service';
+import { CampusesService } from '../campuses/campuses.service';
 import { ProgramTimeService } from '../../common/services/program-time.service';
 import type { RequestUser } from '../../common/decorators';
 
@@ -37,7 +38,9 @@ const ist = (day: string, hhmm: string): Date => new Date(`${day}T${hhmm}:00${IS
 
 const time = new ProgramTimeService({ program: { timezone: 'Asia/Kolkata' } } as never);
 const scope = new MentorScopeService(prisma as never);
-const service = new CampusAnalysisService(prisma as never, time, scope);
+const cache = { remember: (_key: string, _ttl: number, fn: () => unknown) => fn() } as never;
+const campuses = new CampusesService(prisma as never, time, cache, scope);
+const service = new CampusAnalysisService(prisma as never, time, scope, campuses);
 
 const admin: RequestUser = { id: '', email: 'a@x.invalid', name: 'Admin', role: 'ADMIN', studentId: null } as RequestUser;
 let mentorOfA: RequestUser;
