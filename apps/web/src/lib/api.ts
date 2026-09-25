@@ -15,6 +15,9 @@ import type {
   CampusAnalysisSummary,
   CampusCategory,
   CampusDailyReportResponse,
+  AttemptsAnalysisResponse,
+  AttemptsStudentResponse,
+  AttemptView,
   CampusQuestion,
   StudentAnalysis,
   AssignmentAudienceChangeEntry,
@@ -215,6 +218,19 @@ export async function downloadFile(path: string, fallbackName: string): Promise<
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+export interface CampusAttemptsParams {
+  campus?: string | null;
+  batch?: string | null;
+  squad?: string | null;
+  from?: string | null;
+  to?: string | null;
+  problem?: string | null;
+  difficulty?: string | null;
+  view?: AttemptView | null;
+  minAttempts?: number | null;
+  search?: string | null;
 }
 
 function qs(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -432,6 +448,16 @@ export const api = {
       category: params.category,
       search: params.search,
     })}`,
+
+  /** Campus Analysis -> Attempts Analysis. The page, the drill-down and both exports share one server computation. */
+  campusAttempts: (params: CampusAttemptsParams) =>
+    apiFetch<AttemptsAnalysisResponse>(`/campus-analysis/attempts${qs({ ...params })}`),
+
+  campusAttemptsExportPath: (params: CampusAttemptsParams, mode: 'view' | 'unsolved') =>
+    `/campus-analysis/attempts/export${qs({ ...params, mode })}`,
+
+  campusAttemptsStudent: (studentId: string, params: { from?: string | null; to?: string | null } = {}) =>
+    apiFetch<AttemptsStudentResponse>(`/campus-analysis/attempts/students/${studentId}${qs(params)}`),
 
   campusAnalysisCategory: (
     campusId: string,

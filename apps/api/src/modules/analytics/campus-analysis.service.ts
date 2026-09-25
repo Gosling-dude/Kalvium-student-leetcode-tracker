@@ -434,6 +434,15 @@ export class CampusAnalysisService {
     return [requestedCampusId];
   }
 
+  /**
+   * `scopeFor`, for sibling services (Attempts Analysis) that read other tables but must
+   * answer "which campuses" exactly as this screen does — same active-campus filter, same
+   * mentor grants, same not-found for a campus outside them.
+   */
+  campusScope(user: RequestUser, requestedCampusId?: string): Promise<string[]> {
+    return this.scopeFor(user, requestedCampusId);
+  }
+
   /** Campus cards: one row per campus, with the category counts that open a drill-down. */
   async summary(
     user: RequestUser,

@@ -204,6 +204,12 @@ export default function CampusAnalysisPage() {
           >
             Daily Report
           </Link>
+          <Link
+            href="/campus-analysis/attempts"
+            className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-surface-sunken)]"
+          >
+            Attempts Analysis
+          </Link>
         </div>
       </div>
 
