@@ -5,10 +5,15 @@ name: Scheduled LeetCode Sync
 #
 # LeetCode's public submission list returns only the 20 most recent entries, so a
 # once-a-day sync can permanently miss submissions from very active students. This runs
-# every 3 hours for that reason. Cron here is UTC.
+# every 3 hours for that reason, and additionally every hour through the Coding-Hours
+# day (03:30-13:30 UTC = 09:00-19:00 IST). A 3-hour gap still overflowed the window on
+# busy days: against LeetCode's own per-day calendar, SRM students lost 12 submissions on
+# 5 student-days in Aug-Sep 2026, four of them with exactly 20 rows mirrored — the
+# signature of more than 20 submissions between two syncs. Cron here is UTC.
 on:
   schedule:
     - cron: '0 */3 * * *'
+    - cron: '30 3-13 * * *'
   workflow_dispatch: {} # allow manual runs from the Actions tab
 
 # Never let two syncs overlap: a slow run must not be lapped by the next schedule.

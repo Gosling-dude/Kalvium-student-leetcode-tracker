@@ -4,7 +4,7 @@ import type { Response } from 'express';
 import { ATTEMPT_VIEWS, type AttemptView } from '@dsa/shared';
 
 import { CurrentUser, Roles, type RequestUser } from '../../common/decorators';
-import { CampusAttemptsService, type AttemptsFilters } from './campus-attempts.service';
+import { CampusAttemptsService, type AttemptsExportMode, type AttemptsFilters } from './campus-attempts.service';
 
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const DIFFICULTIES = ['EASY', 'MEDIUM', 'HARD'] as const;
@@ -21,8 +21,8 @@ function parseFilters(query: Record<string, string | undefined>): AttemptsFilter
   if (difficulty && !DIFFICULTIES.includes(difficulty as never)) {
     throw new BadRequestException(`difficulty must be one of ${DIFFICULTIES.join(', ')}.`);
   }
-  const minAttempts = query.minAttempts ? Number.parseInt(query.minAttempts, 10) : null;
-  if (minAttempts !== null && (!Number.isFinite(minAttempts) || minAttempts < 1)) {
+  const minAttempts = query.minAttempts ? Number(query.minAttempts) : null;
+  if (minAttempts !== null && (!Number.isInteger(minAttempts) || minAttempts < 1)) {
     throw new BadRequestException('minAttempts must be a positive integer.');
   }
   return {
@@ -35,6 +35,7 @@ function parseFilters(query: Record<string, string | undefined>): AttemptsFilter
     difficulty: difficulty as AttemptsFilters['difficulty'],
     view: view as AttemptView | null,
     minAttempts,
+    multipleAttempts: query.multipleAttempts === 'true',
     search: query.search || null,
   };
 }
@@ -51,8 +52,9 @@ export class CampusAttemptsController {
     summary: 'Assigned Coding-Hours problems attempted during their assignment period, with outcomes',
     description:
       'One row per student x assigned problem x assignment day, from the mirrored submissions (no live ' +
-      'LeetCode call). Attempts count submissions on the assignment day itself; failed attempts stop at ' +
-      'the first accepted. Default view is Attempted But Not Solved.',
+      'LeetCode call). Attempts count submissions from the assignment day until the same problem is next ' +
+      'assigned to the student; failed attempts stop at the first accepted. Default view is Attempted But ' +
+      'Not Solved.',
   })
   analysis(@CurrentUser() user: RequestUser, @Query() query: Record<string, string | undefined>) {
     return this.attempts.analysis(user, parseFilters(query));
@@ -60,18 +62,19 @@ export class CampusAttemptsController {
 
   @Get('export')
   @Roles('ADMIN', 'MENTOR', 'VIEWER')
-  @ApiOperation({ summary: 'The current view as .xlsx; mode=unsolved exports Attempted But Not Solved only' })
+  @ApiOperation({ summary: 'The current view as .xlsx; mode=unsolved / mode=multiple force those cuts' })
   async export(
     @CurrentUser() user: RequestUser,
     @Query() query: Record<string, string | undefined>,
     @Res() res: Response,
   ): Promise<void> {
-    const mode = query.mode === 'unsolved' ? 'unsolved' : 'view';
+    const mode: AttemptsExportMode =
+      query.mode === 'unsolved' || query.mode === 'multiple' ? query.mode : 'view';
     const buffer = await this.attempts.buildWorkbook(user, parseFilters(query), mode);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${mode === 'unsolved' ? 'unsolved-attempts' : 'attempts-analysis'}.xlsx"`,
+      `attachment; filename="${{ view: 'attempts-analysis', unsolved: 'unsolved-attempts', multiple: 'multiple-attempts' }[mode]}.xlsx"`,
     );
     res.send(buffer);
   }

@@ -35,6 +35,7 @@ import {
   type CampusAnalysisPeriod,
   type CampusAnalysisSummary,
   type CampusCategory,
+  type CampusOutcomeTally,
   type CampusQuestion,
   type CampusQuestionWeek,
   type DayKey,
@@ -56,7 +57,7 @@ import type { RequestUser } from '../../common/decorators';
  * render as a zero. `PROFILE_MISSING` is *not* here — that student has no LeetCode handle
  * at all, which is a roster gap the mentor can act on, and is reported as its own thing.
  */
-const UNRELIABLE_SYNC_STATES = new Set(['NEVER_SYNCED', 'USER_NOT_FOUND', 'PROFILE_PRIVATE', 'RATE_LIMITED', 'PROVIDER_ERROR', 'TIMEOUT']);
+export const UNRELIABLE_SYNC_STATES = new Set(['NEVER_SYNCED', 'USER_NOT_FOUND', 'PROFILE_PRIVATE', 'RATE_LIMITED', 'PROVIDER_ERROR', 'TIMEOUT']);
 
 @Injectable()
 export class CampusAnalysisService {
@@ -265,6 +266,7 @@ export class CampusAnalysisService {
         dayKeys: string[];
         solvedStudents: bigint;
         attemptedStudents: bigint;
+        noDataStudents: bigint;
         targetedStudents: bigint;
       }[]
     >`
@@ -282,19 +284,39 @@ export class CampusAnalysisService {
         WHERE a."campusId" = ANY(${campusIds}::uuid[])
         GROUP BY 1, 2, 3
       ),
-      outcomes AS (
+      -- One row per student per question per week, so a student set the same question
+      -- twice in a week is still one pair, and solved beats attempted.
+      per_student AS (
         SELECT a."campusId",
                w.week_number,
                lower(p."titleSlug") AS slug,
-               count(DISTINCT ds."studentId") FILTER (WHERE dps."status" = 'ACCEPTED')               AS solved_students,
-               count(DISTINCT ds."studentId") FILTER (WHERE dps."status" = 'ATTEMPTED_NOT_ACCEPTED') AS attempted_students,
-               count(DISTINCT ds."studentId")                                                        AS targeted_students
+               ds."studentId",
+               bool_or(dps."status" = 'ACCEPTED')               AS solved,
+               bool_or(dps."status" = 'ATTEMPTED_NOT_ACCEPTED') AS attempted
         FROM "daily_statuses" ds
         JOIN "assignments" a ON a.id = ds."assignmentId"
         JOIN wk w ON ds."dayKey" >= w.from_day AND ds."dayKey" <= w.to_day
         JOIN "daily_problem_statuses" dps ON dps."dailyStatusId" = ds.id
         JOIN "problems" p ON p.id = dps."problemId"
         WHERE a."campusId" = ANY(${campusIds}::uuid[])
+        GROUP BY 1, 2, 3, 4
+      ),
+      outcomes AS (
+        SELECT ps."campusId",
+               ps.week_number,
+               ps.slug,
+               count(*) FILTER (WHERE ps.solved)                        AS solved_students,
+               count(*) FILTER (WHERE NOT ps.solved AND ps.attempted)   AS attempted_students,
+               -- No evidence *and* no readable LeetCode data: unknown, not "not attempted".
+               count(*) FILTER (
+                 WHERE NOT ps.solved AND NOT ps.attempted
+                   AND (st."leetcodeUsername" IS NULL
+                        OR coalesce(ss."status"::text, 'NEVER_SYNCED') = ANY(${[...UNRELIABLE_SYNC_STATES]}::text[]))
+               )                                                        AS no_data_students,
+               count(*)                                                 AS targeted_students
+        FROM per_student ps
+        JOIN "students" st ON st.id = ps."studentId"
+        LEFT JOIN "student_sync_states" ss ON ss."studentId" = ps."studentId"
         GROUP BY 1, 2, 3
       )
       SELECT asg."campusId"                        AS "campusId",
@@ -304,6 +326,7 @@ export class CampusAnalysisService {
              asg.day_keys                          AS "dayKeys",
              coalesce(o.solved_students, 0)        AS "solvedStudents",
              coalesce(o.attempted_students, 0)     AS "attemptedStudents",
+             coalesce(o.no_data_students, 0)       AS "noDataStudents",
              coalesce(o.targeted_students, 0)      AS "targetedStudents"
       FROM assigned asg
       LEFT JOIN outcomes o
@@ -317,6 +340,7 @@ export class CampusAnalysisService {
     for (const row of rows) {
       const solvedStudents = Number(row.solvedStudents);
       const attemptedStudents = Number(row.attemptedStudents);
+      const noDataStudents = Number(row.noDataStudents);
       const studentsAssigned = Number(row.targetedStudents);
       const list = byCampus.get(row.campusId) ?? [];
       list.push({
@@ -331,33 +355,35 @@ export class CampusAnalysisService {
         studentsAssigned,
         studentsSolved: solvedStudents,
         studentsAttemptedNotSolved: attemptedStudents,
-        studentsNotAttempted: Math.max(0, studentsAssigned - solvedStudents - attemptedStudents),
+        studentsNotAttempted: Math.max(0, studentsAssigned - solvedStudents - attemptedStudents - noDataStudents),
+        studentsNoData: noDataStudents,
       });
       byCampus.set(row.campusId, list);
     }
     return byCampus;
   }
 
-  /** Roll a set of questions into the three counts and their percentages. */
-  private tally(questions: CampusQuestion[]): {
-    assigned: number;
-    solved: number;
-    attemptedNotSolved: number;
-    notAttempted: number;
-    solvePercent: number | null;
-    attemptPercent: number | null;
-    notAttemptedPercent: number | null;
-  } {
-    const assigned = questions.length;
-    const solved = questions.filter((q) => q.outcome === 'SOLVED').length;
-    const attemptedNotSolved = questions.filter((q) => q.outcome === 'ATTEMPTED_NOT_SOLVED').length;
-    const notAttempted = questions.filter((q) => q.outcome === 'NOT_ATTEMPTED').length;
-    const share = (n: number): number | null => (assigned === 0 ? null : n / assigned);
+  /**
+   * Roll a set of questions into a `CampusOutcomeTally`: distinct questions for
+   * `assigned`/`questionsSolved`, student x question pairs for the outcomes.
+   */
+  private tally(questions: CampusQuestion[], distinct: CampusQuestion[] = questions): CampusOutcomeTally {
+    const sum = (pick: (q: CampusQuestion) => number) => questions.reduce((total, q) => total + pick(q), 0);
+    const solved = sum((q) => q.studentsSolved);
+    const attemptedNotSolved = sum((q) => q.studentsAttemptedNotSolved);
+    const notAttempted = sum((q) => q.studentsNotAttempted);
+    const noData = sum((q) => q.studentsNoData);
+    const studentQuestions = sum((q) => q.studentsAssigned);
+    const evaluated = studentQuestions - noData;
+    const share = (n: number): number | null => (evaluated <= 0 ? null : n / evaluated);
     return {
-      assigned,
+      assigned: distinct.length,
+      questionsSolved: distinct.filter((q) => q.outcome === 'SOLVED').length,
+      studentQuestions,
       solved,
       attemptedNotSolved,
       notAttempted,
+      noData,
       solvePercent: share(solved),
       attemptPercent: share(solved + attemptedNotSolved),
       notAttemptedPercent: share(notAttempted),
@@ -379,13 +405,11 @@ export class CampusAnalysisService {
   }
 
   /**
-   * Period totals, deduplicated across weeks.
-   *
-   * Not the sum of the weekly tallies: a problem set in week 2 and again in week 5 is one
-   * question over the period. Summing the columns would re-introduce the double counting
-   * this whole change removes, one level up.
+   * Period totals. Questions are deduplicated across weeks — a problem set in week 2 and
+   * again in week 5 is one question over the period — while the student x question
+   * outcomes add every week's pairs, because each week's setting was its own piece of work.
    */
-  private tallyPeriod(questions: CampusQuestion[]) {
+  private tallyPeriod(questions: CampusQuestion[]): CampusOutcomeTally {
     const bySlug = new Map<string, CampusQuestion>();
     for (const q of questions) {
       const existing = bySlug.get(q.slug);
@@ -398,7 +422,7 @@ export class CampusAnalysisService {
         bySlug.set(q.slug, q);
       }
     }
-    return this.tally([...bySlug.values()]);
+    return this.tally(questions, [...bySlug.values()]);
   }
 
   /**

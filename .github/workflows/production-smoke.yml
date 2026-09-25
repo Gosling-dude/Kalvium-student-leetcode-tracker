@@ -32,7 +32,12 @@ on:
     - cron: '*/30 * * * *'
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      attempts_student_id:
+        description: 'Optional student uuid for the Attempts Analysis check (counts and problem slugs only)'
+        required: false
+        default: ''
 
 concurrency:
   group: production-smoke
@@ -197,7 +202,7 @@ jobs:
           # Authorization is enforced server-side or it is not enforced. Hiding a nav item
           # is not a control, so the check that matters is what an unauthenticated caller
           # actually receives from the endpoints holding student data.
-          for path in students leaderboard assignments baseline-tests reports/daily admin/mentors internal/integrity; do
+          for path in students leaderboard assignments baseline-tests reports/daily admin/mentors internal/integrity internal/attempts-check campus-analysis/attempts; do
             code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "${base}/${path}" || echo "000")
             case "$code" in
               401|403) echo "  OK   ${path} -> ${code}" ;;
@@ -317,4 +322,62 @@ jobs:
               print("::warning::No active students in production.")
 
           print("\nAll integrity checks passed.")
+          PY
+
+      - name: Attempts Analysis cross-check
+        if: env.SKIP_ASSERTIONS != '1'
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          STUDENT_ID: ${{ github.event.inputs.attempts_student_id }}
+        run: |
+          set -euo pipefail
+          base="${BACKEND_URL%/}"
+          query=""
+          [ -n "${STUDENT_ID:-}" ] && query="?studentId=${STUDENT_ID}"
+
+          code=$(curl -sS -o /tmp/attempts.json -w '%{http_code}' \
+            --connect-timeout 20 --max-time 180 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${base}/api/v1/internal/attempts-check${query}" || echo "000")
+          if [ "$code" != "200" ]; then
+            echo "::error::attempts-check endpoint returned ${code}"
+            cat /tmp/attempts.json || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+
+          # Aggregates only — this log is public. The endpoint never returns a name.
+          r = json.load(open('/tmp/attempts.json'))
+          print(f"Last good sync       {r['lastSuccessfulSyncAt']}")
+          print(f"Active campuses      {r['activeCampusCodes']}")
+          print(f"Service              {r['service']}")
+          print(f"Independent SQL      {r['independent']}")
+          for c in r['byCampus']:
+              print(f"  {c['campusCode']:<10} ANS {c['attemptedNotSolved']:>4}  solved-after-attempts {c['solvedAfterAttempts']:>4}  "
+                    f"failed {c['totalFailedAttempts']:>5}  ANS 5+ {c['attemptedNotSolved5Plus']:>3}  rows' campuses {c['campusCodesInRows']}")
+          print("Campus Analysis weekly (student x question, ever-solved):")
+          for w in r['weekly']:
+              print(f"  {w['campusCode']:<10} questions {w['questionsAssigned']:>4}  pairs {w['studentQuestions']:>6}  solved {w['solved']:>5}  "
+                    f"attempted-not-solved {w['attemptedNotSolved']:>4}  not attempted {w['notAttempted']:>6}  no data {w['noData']:>4}  "
+                    f"weeks with ANS {w['weeksWithAttemptedNotSolved']}/{w['weeksWithQuestions']}")
+          if r.get('student'):
+              print(f"Student {r['student']['studentId']}: {r['student']['stats']}")
+              for key in ('attemptedNotSolved', 'solvedAfterAttempts'):
+                  for row in r['student'][key]:
+                      print(f"  {key:<20} {row}")
+
+          errors = []
+          if not r['agree']:
+              errors.append('Attempts Analysis disagrees with the independent SQL implementation of the same rules.')
+          for c in r['byCampus']:
+              if any(code != c['campusCode'] for code in c['campusCodesInRows']):
+                  errors.append(f"{c['campusCode']} filter returned rows from {c['campusCodesInRows']}.")
+          for e in errors:
+              print(f"::error::{e}")
+          if errors:
+              sys.exit(1)
+          print("\nAttempts Analysis matches the independent calculation.")
           PY

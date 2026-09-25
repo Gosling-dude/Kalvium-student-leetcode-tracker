@@ -10,8 +10,10 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { BaselineTestsModule } from '../baseline-tests/baseline-tests.module';
 import { StudentsModule } from '../students/students.module';
 import { CampusesModule } from '../campuses/campuses.module';
+import { AnalyticsModule } from '../analytics/analytics.module';
 import { CronTasksService } from './cron-tasks.service';
 import { IntegrityService } from './integrity.service';
+import { AttemptsCheckService } from './attempts-check.service';
 import { InternalController } from './internal.controller';
 
 /**
@@ -35,9 +37,11 @@ import { InternalController } from './internal.controller';
     // on why a public repository cannot carry the data itself.
     StudentsModule,
     CampusesModule,
+    // Read-only: the Attempts Analysis cross-check runs the real service.
+    AnalyticsModule,
   ],
   controllers: [InternalController],
-  providers: [CronTasksService, IntegrityService],
+  providers: [CronTasksService, IntegrityService, AttemptsCheckService],
   exports: [CronTasksService, IntegrityService],
 })
 export class InternalModule {}

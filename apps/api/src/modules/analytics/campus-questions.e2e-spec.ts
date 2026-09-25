@@ -224,16 +224,20 @@ describe('campus questions are counted once, however many students received them
     expect((await summary()).weeks.find((w) => w.weekNumber === 1)!.assigned).toBe(before);
   });
 
-  it('classifies each question by what the students it was set for did', async () => {
+  it('counts outcomes per student x question, not per question', async () => {
+    // 11 students x 4 questions. Before 2026-09-25 a question was "attempted, not solved"
+    // only if *nobody* had solved it, which hid every failing student at a real campus.
     const week1 = (await summary()).weeks.find((w) => w.weekNumber === 1)!;
-    // alpha solved by someone, repeat solved by one; beta attempted by nobody who passed;
-    // gamma never touched.
-    expect(week1.solved).toBe(2);
-    expect(week1.attemptedNotSolved).toBe(1);
-    expect(week1.notAttempted).toBe(1);
+    expect(week1.studentQuestions).toBe(44);
+    expect(week1.solved).toBe(4); // alpha x3, repeat x1
+    expect(week1.attemptedNotSolved).toBe(2); // beta x2
+    expect(week1.notAttempted).toBe(38);
+    expect(week1.noData).toBe(0);
+    // The question-level "did anyone solve it" figure is still there, still ever-solved.
+    expect(week1.questionsSolved).toBe(2);
   });
 
-  it('holds solved + attempted + not attempted = assigned, every week', async () => {
+  it('holds solved + attempted + not attempted + no data = student x question pairs, every week', async () => {
     for (const week of (await summary()).weeks) {
       expect(assertQuestionTotalsReconcile(week), `week ${week.weekNumber}`).toBeNull();
     }
@@ -250,21 +254,25 @@ describe('campus questions are counted once, however many students received them
   it('treats a question solved in any week as solved for the period', async () => {
     const campus = await summary();
     // `repeat` went unsolved in week 2 but was solved in week 1.
-    expect(campus.weeks.find((w) => w.weekNumber === 2)!.solved).toBe(0);
-    expect(campus.solved).toBe(2);
+    expect(campus.weeks.find((w) => w.weekNumber === 2)!.questionsSolved).toBe(0);
+    expect(campus.questionsSolved).toBe(2);
+    // Pair outcomes add each week's pairs: week 1's four, week 2's none.
+    expect(campus.solved).toBe(4);
   });
 
   it('keeps the student completion rate, which the question counts cannot express', async () => {
     const week1 = (await summary()).weeks.find((w) => w.weekNumber === 1)!;
-    // Two of four questions were solved by somebody — but hardly anybody solved them.
-    expect(week1.solvePercent).toBe(0.5);
+    // Two of four questions were solved by somebody — but hardly anybody solved them, and
+    // the solve rate now says so directly.
+    expect(week1.questionsSolved / week1.assigned).toBe(0.5);
+    expect(week1.solvePercent).toBeCloseTo(4 / 44);
     expect(week1.studentCompletionPercent).toBeLessThan(0.15);
   });
 
   it('reports percentages that sum to one across the three outcomes', async () => {
     const week1 = (await summary()).weeks.find((w) => w.weekNumber === 1)!;
-    expect(week1.attemptPercent).toBeCloseTo(0.75);
-    expect((week1.solvePercent ?? 0) + (week1.notAttemptedPercent ?? 0)).toBeCloseTo(0.75);
+    expect(week1.attemptPercent).toBeCloseTo(6 / 44);
+    expect((week1.attemptPercent ?? 0) + (week1.notAttemptedPercent ?? 0)).toBeCloseTo(1);
   });
 });
 

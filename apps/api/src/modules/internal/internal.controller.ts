@@ -18,6 +18,7 @@ import {
   Get,
   HttpCode,
   Post,
+  Query,
   ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ import { Public } from '../../common/decorators';
 import { CronSecretGuard } from '../../common/guards/cron-secret.guard';
 import { CronTasksService } from './cron-tasks.service';
 import { IntegrityService } from './integrity.service';
+import { AttemptsCheckService } from './attempts-check.service';
 import { StudentImportService } from '../students/student-import.service';
 import { CampusesService } from '../campuses/campuses.service';
 
@@ -40,6 +42,7 @@ export class InternalController {
   constructor(
     private readonly tasks: CronTasksService,
     private readonly integrity: IntegrityService,
+    private readonly attemptsCheck: AttemptsCheckService,
     private readonly importer: StudentImportService,
     private readonly campuses: CampusesService,
   ) {}
@@ -199,6 +202,18 @@ export class InternalController {
   @HttpCode(200)
   integrityReport() {
     return this.integrity.report();
+  }
+
+  /**
+   * Attempts Analysis against an independent SQL implementation of the same rules, on
+   * the live database. Aggregates only; `studentId` narrows one student to counts and
+   * problem slugs, never a name or handle. Read-only.
+   */
+  @Get('attempts-check')
+  @HttpCode(200)
+  attemptsCheckReport(@Query('studentId') studentId?: string) {
+    if (studentId && !/^[0-9a-f-]{36}$/i.test(studentId)) throw new BadRequestException('studentId must be a uuid.');
+    return this.attemptsCheck.report(studentId);
   }
 
   @Post('sync')

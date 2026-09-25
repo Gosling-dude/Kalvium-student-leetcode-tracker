@@ -333,29 +333,54 @@ export interface CampusQuestion {
   studentsSolved: number;
   studentsAttemptedNotSolved: number;
   studentsNotAttempted: number;
+  /** Targeted students with no evidence and no readable LeetCode data — never counted as
+   * "not attempted", because that would be a zero nobody measured. */
+  studentsNoData: number;
 }
 
 /**
- * A campus's week, counted in questions.
+ * The outcome counts a week (or the period) reports, in **student x question** units.
  *
- * `assigned = solved + attemptedNotSolved + notAttempted` holds by construction: the
- * three outcomes partition the distinct questions set that week, so the identity is not
- * something a caller has to check. `assertQuestionTotalsReconcile` checks it anyway,
- * because "by construction" is a claim about the code as written, not as edited.
+ * The first version counted questions: a question was "attempted, not solved" only when
+ * *no* targeted student had solved it. At a campus of 20-140 students somebody always
+ * had, so the column read 0 for every campus and every week while individual students
+ * were plainly failing questions. The outcome of a question is a property of each
+ * student who was set it, so these count those pairs, from the same ever-solved
+ * per-problem statuses the rest of Campus Analysis reads. `assigned` stays a count of
+ * distinct questions — never students x questions — and `questionsSolved` keeps the
+ * question-level "did anyone solve it" figure.
+ *
+ * `solved + attemptedNotSolved + notAttempted + noData = studentQuestions`, and the
+ * percentages are over `studentQuestions - noData`.
  */
-export interface CampusQuestionWeek {
-  weekNumber: number;
-  from: DayKey;
-  to: DayKey;
-  /** Distinct LeetCode problems set for this campus this week. Never students x questions. */
+export interface CampusOutcomeTally {
+  /** Distinct LeetCode problems set. Never students x questions. */
   assigned: number;
+  /** Distinct problems at least one targeted student has ever solved. */
+  questionsSolved: number;
+  /** Student x question pairs evaluated (each student set each question). */
+  studentQuestions: number;
   solved: number;
   attemptedNotSolved: number;
   notAttempted: number;
+  noData: number;
   solvePercent: number | null;
-  /** (solved + attemptedNotSolved) / assigned — how much of the week was engaged with. */
+  /** (solved + attemptedNotSolved) / evaluated pairs. */
   attemptPercent: number | null;
   notAttemptedPercent: number | null;
+}
+
+/**
+ * A campus's week: distinct questions set, and what the students set them did.
+ *
+ * The outcome counts partition the week's student x question pairs by construction;
+ * `assertQuestionTotalsReconcile` checks it anyway, because "by construction" is a claim
+ * about the code as written, not as edited.
+ */
+export interface CampusQuestionWeek extends CampusOutcomeTally {
+  weekNumber: number;
+  from: DayKey;
+  to: DayKey;
   /**
    * Share of the week's set work the campus actually completed, per student.
    *
@@ -377,27 +402,18 @@ export interface CampusQuestionWeek {
   studentsObserved: number;
 }
 
-export interface CampusAnalysisSummary {
+export interface CampusAnalysisSummary extends CampusOutcomeTally {
   campusId: string;
   campusCode: string;
   campusName: string;
   activeStudents: number;
   studentsWithUsableData: number;
 
-  /**
-   * Distinct questions across the whole period, not the sum of the weekly figures.
-   *
-   * A problem set in two different weeks is one question here and one in each of those
-   * weeks, so the weekly column does not add up to this — correctly. Adding them would
-   * re-introduce the double counting at a different scale.
+  /*
+   * Period figures: `assigned`/`questionsSolved` are distinct questions over the whole
+   * period (a problem set in two weeks is one question), while the student x question
+   * counts add every week's pairs.
    */
-  assigned: number;
-  solved: number;
-  attemptedNotSolved: number;
-  notAttempted: number;
-  solvePercent: number | null;
-  attemptPercent: number | null;
-  notAttemptedPercent: number | null;
   /** See `CampusQuestionWeek.studentCompletionPercent`. */
   studentCompletionPercent: number | null;
 
@@ -421,12 +437,13 @@ export interface CampusAnalysisSummary {
  * with the discrepancy named.
  */
 export function assertQuestionTotalsReconcile(
-  week: Pick<CampusQuestionWeek, 'weekNumber' | 'assigned' | 'solved' | 'attemptedNotSolved' | 'notAttempted'>,
+  week: Pick<CampusQuestionWeek, 'weekNumber' | 'studentQuestions' | 'solved' | 'attemptedNotSolved' | 'notAttempted' | 'noData'>,
 ): string | null {
-  const parts = week.solved + week.attemptedNotSolved + week.notAttempted;
-  if (parts === week.assigned) return null;
+  const parts = week.solved + week.attemptedNotSolved + week.notAttempted + week.noData;
+  if (parts === week.studentQuestions) return null;
   return (
     `Week ${week.weekNumber}: ${week.solved} solved + ${week.attemptedNotSolved} attempted ` +
-    `+ ${week.notAttempted} not attempted = ${parts}, but ${week.assigned} were assigned.`
+    `+ ${week.notAttempted} not attempted + ${week.noData} no data = ${parts}, but ` +
+    `${week.studentQuestions} student-question pairs were set.`
   );
 }

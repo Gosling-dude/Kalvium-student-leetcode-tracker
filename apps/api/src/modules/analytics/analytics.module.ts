@@ -63,6 +63,6 @@ export class AnalyticsController {
   imports: [BatchesModule, CampusesModule],
   controllers: [AnalyticsController, CampusAnalysisController, CampusDailyReportController, CampusAttemptsController],
   providers: [AnalyticsService, CampusAnalysisService, CampusDailyReportService, CampusAttemptsService],
-  exports: [AnalyticsService, CampusAnalysisService],
+  exports: [AnalyticsService, CampusAnalysisService, CampusAttemptsService],
 })
 export class AnalyticsModule {}

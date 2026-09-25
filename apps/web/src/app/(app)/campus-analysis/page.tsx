@@ -230,18 +230,23 @@ export default function CampusAnalysisPage() {
           />
 
           {/*
-            Questions, not student-question pairs. These are distinct LeetCode problems
-            over the whole period, so a problem set in two weeks counts once here and once
-            in each of those weeks — the weekly column does not add up to this, correctly.
+            "Questions" figures are distinct LeetCode problems over the whole period, so a
+            problem set in two weeks counts once here. The outcome figures are student x
+            question: each student set a question contributes one solved / attempted /
+            not-attempted verdict, from the same ever-solved statuses as everywhere else.
           */}
           <div className="grid grid-cols-2 gap-x-8 gap-y-3 border-b border-[var(--color-border)] px-5 py-4 sm:grid-cols-4">
             <Figure label="Questions assigned" value={campus.assigned} />
-            <Figure label="Questions solved" value={campus.solved} />
-            <Figure label="Solve rate" value={percent(campus.solvePercent)} />
+            <Figure label="Questions solved" value={campus.questionsSolved} hint="By at least one student" />
             <Figure
-              label="Avg student completion"
-              value={percent(campus.studentCompletionPercent)}
-              hint="Share of set work the average student completed"
+              label="Student solve rate"
+              value={percent(campus.solvePercent)}
+              hint={`${campus.solved} of ${campus.studentQuestions - campus.noData} student × question`}
+            />
+            <Figure
+              label="Attempted, not solved"
+              value={campus.attemptedNotSolved}
+              hint="Student × question, tried without an accepted solution"
             />
           </div>
 
@@ -249,6 +254,10 @@ export default function CampusAnalysisPage() {
             <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-fg-muted)]">
               By week
             </h3>
+            <p className="mt-1 text-xs text-[var(--color-fg-muted)]">
+              Questions assigned are distinct problems. Solved, attempted and not attempted count each student
+              set each question{campus.noData > 0 ? `; ${campus.noData} pairs of students with unreadable LeetCode data are left out` : ''}.
+            </p>
             <TableShell>
               <thead>
                 <tr>
@@ -260,7 +269,6 @@ export default function CampusAnalysisPage() {
                   <Th className="text-right">Solve %</Th>
                   <Th className="text-right">Attempt %</Th>
                   <Th className="text-right">Not attempted %</Th>
-                  <Th className="text-right">Avg student completion</Th>
                   <Th className="text-right">Students active</Th>
                   <Th />
                 </tr>
@@ -281,7 +289,6 @@ export default function CampusAnalysisPage() {
                     <Td className="text-right tabular-nums">{percent(week.solvePercent)}</Td>
                     <Td className="text-right tabular-nums">{percent(week.attemptPercent)}</Td>
                     <Td className="text-right tabular-nums">{percent(week.notAttemptedPercent)}</Td>
-                    <Td className="text-right tabular-nums">{percent(week.studentCompletionPercent)}</Td>
                     <Td className="text-right tabular-nums">
                       {week.studentsActive} / {week.studentsObserved}
                     </Td>
@@ -450,6 +457,7 @@ function QuestionDetail({
             <Th className="text-right">Solved</Th>
             <Th className="text-right">Attempted, not solved</Th>
             <Th className="text-right">Not attempted</Th>
+            <Th className="text-right">No data</Th>
           </tr>
         </thead>
         <tbody>
@@ -479,6 +487,7 @@ function QuestionDetail({
               <Td className="text-right tabular-nums">{q.studentsSolved}</Td>
               <Td className="text-right tabular-nums">{q.studentsAttemptedNotSolved}</Td>
               <Td className="text-right tabular-nums">{q.studentsNotAttempted}</Td>
+              <Td className="text-right tabular-nums">{q.studentsNoData}</Td>
             </tr>
           ))}
         </tbody>

@@ -230,6 +230,7 @@ export interface CampusAttemptsParams {
   difficulty?: string | null;
   view?: AttemptView | null;
   minAttempts?: number | null;
+  multipleAttempts?: boolean | null;
   search?: string | null;
 }
 
@@ -453,7 +454,7 @@ export const api = {
   campusAttempts: (params: CampusAttemptsParams) =>
     apiFetch<AttemptsAnalysisResponse>(`/campus-analysis/attempts${qs({ ...params })}`),
 
-  campusAttemptsExportPath: (params: CampusAttemptsParams, mode: 'view' | 'unsolved') =>
+  campusAttemptsExportPath: (params: CampusAttemptsParams, mode: 'view' | 'unsolved' | 'multiple') =>
     `/campus-analysis/attempts/export${qs({ ...params, mode })}`,
 
   campusAttemptsStudent: (studentId: string, params: { from?: string | null; to?: string | null } = {}) =>

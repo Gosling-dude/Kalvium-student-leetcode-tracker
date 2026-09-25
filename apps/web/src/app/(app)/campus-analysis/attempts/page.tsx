@@ -3,11 +3,12 @@
 /**
  * Campus Analysis — Attempts Analysis.
  *
- * Which students submitted an assigned Coding-Hours problem on its assignment day and
- * still have no accepted solution. Everything shown — the summary, the table, the
- * student drill-down and both Excel exports — is `api.campusAttempts*`, one server
- * computation over the mirrored submissions (see `campus-attempts.service.ts`). This page
- * only chooses filters and renders; it never counts anything itself.
+ * How many times each student submitted each assigned Coding-Hours problem during its
+ * assignment period (the assignment day until the same problem is next assigned to them),
+ * and whether they got an accepted solution. Everything shown — the summary, the table,
+ * the student drill-down and all three Excel exports — is `api.campusAttempts*`, one
+ * server computation over the mirrored submissions (see `campus-attempts.service.ts`).
+ * This page only chooses filters and renders; it never counts anything itself.
  */
 
 import { Fragment, useState } from 'react';
@@ -21,7 +22,7 @@ import {
   ATTEMPT_VIEWS,
   DEFAULT_ATTEMPT_VIEW,
   MIN_ATTEMPT_OPTIONS,
-  type AttemptRow,
+  type AttemptOutcome,
   type AttemptView,
 } from '@dsa/shared';
 
@@ -45,23 +46,26 @@ import {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function formatDay(dayKey: string): string {
-  const [, month, day] = dayKey.split('-');
-  return `${day} ${MONTHS[Number(month) - 1]}`;
+  const [year, month, day] = dayKey.split('-');
+  return `${day} ${MONTHS[Number(month) - 1]} ${year}`;
 }
 
-/** "20 Sep 10:12", in program time — the same shape the Excel export writes. */
+const TIME_FORMAT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Kolkata',
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+/** "20 Sep 2026 10:12", in program time — the same shape the Excel export writes. */
 function formatAttempt(iso: string | null): string {
   if (!iso) return '—';
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Kolkata',
-    day: '2-digit',
-    month: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date(iso));
+  const parts = TIME_FORMAT.formatToParts(new Date(iso));
   const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
-  return `${get('day')} ${get('month')} ${get('hour')}:${get('minute')}`;
+  return `${get('day')} ${get('month')} ${get('year')} ${get('hour')}:${get('minute')}`;
 }
 
 function formatSeconds(iso: string): string {
@@ -82,6 +86,15 @@ const STATUS_LABELS: Record<string, string> = {
   UNKNOWN: 'No verdict reported',
 };
 
+const OUTCOME_TONES: Record<AttemptOutcome, 'success' | 'danger' | 'warning' | 'neutral'> = {
+  ATTEMPTED_NOT_SOLVED: 'danger',
+  SOLVED_AFTER_ATTEMPTS: 'warning',
+  SOLVED_FIRST_ATTEMPT: 'success',
+  SOLVED_BEFORE_ASSIGNMENT: 'neutral',
+  NOT_ATTEMPTED: 'neutral',
+  NO_DATA: 'neutral',
+};
+
 function ProfileLink({ username, url }: { username: string | null; url: string | null }) {
   if (!url) return <span className="text-xs font-normal text-[var(--color-fg-subtle)]">Profile not linked</span>;
   return (
@@ -91,9 +104,8 @@ function ProfileLink({ username, url }: { username: string | null; url: string |
   );
 }
 
-function OutcomeBadge({ row }: { row: Pick<AttemptRow, 'outcome'> }) {
-  const tone = row.outcome === 'SOLVED_AFTER_ATTEMPTS' ? 'success' : row.outcome === 'ATTEMPTED_NOT_SOLVED' ? 'danger' : 'neutral';
-  return <Badge tone={tone}>{ATTEMPT_OUTCOME_LABELS[row.outcome]}</Badge>;
+function OutcomeBadge({ outcome }: { outcome: AttemptOutcome }) {
+  return <Badge tone={OUTCOME_TONES[outcome]}>{ATTEMPT_OUTCOME_LABELS[outcome]}</Badge>;
 }
 
 function StudentDrillDown({
@@ -112,13 +124,14 @@ function StudentDrillDown({
     queryKey: ['campus-attempts-student', studentId, from, to],
     queryFn: () => api.campusAttemptsStudent(studentId, { from: from || null, to: to || null }),
   });
+  const stats = detail.data?.stats;
 
   return (
     <Modal
       open
       onClose={onClose}
       size="xl"
-      title={detail.data ? `Student: ${detail.data.student.name}` : 'Student'}
+      title={detail.data ? detail.data.student.name : 'Student'}
       description={
         detail.data ? (
           <span>
@@ -133,71 +146,107 @@ function StudentDrillDown({
         <Skeleton className="h-48 w-full" />
       ) : detail.error ? (
         <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />
-      ) : !detail.data || detail.data.rows.length === 0 ? (
-        <EmptyState title="No attempts" description="This student made no submission to an assigned problem on its assignment day in this period." />
+      ) : !detail.data || !stats || detail.data.rows.length === 0 ? (
+        <EmptyState title="No assigned problems" description="No Coding-Hours problem was assigned to this student in this period." />
       ) : (
-        <div className="overflow-x-auto">
-          <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Click a problem to see the submissions behind it.</p>
-          <TableShell>
-            <thead>
-              <tr>
-                <Th>Problem</Th>
-                <Th>Assignment Date</Th>
-                <Th className="text-right">Attempts</Th>
-                <Th>Solved</Th>
-                <Th className="text-right">Failed</Th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.data.rows.map((row) => {
-                const key = `${row.dayKey}|${row.titleSlug}`;
-                const open = expanded === key;
-                return (
-                  <Fragment key={key}>
-                    <tr
-                      className="cursor-pointer hover:bg-[var(--color-surface-sunken)]"
-                      onClick={() => setExpanded(open ? null : key)}
-                      aria-expanded={open}
-                    >
-                      <Td className="font-medium">{row.title}</Td>
-                      <Td>{formatDay(row.dayKey)}</Td>
-                      <Td className="text-right tabular-nums">{row.attempts}</Td>
-                      <Td>{row.solved ? 'Yes' : 'No'}</Td>
-                      <Td className="text-right tabular-nums">{row.failedAttempts}</Td>
-                    </tr>
-                    {open ? (
-                      <tr>
-                        <td colSpan={5} className="bg-[var(--color-surface-sunken)] px-4 py-3">
-                          <table className="w-full text-xs">
-                            <thead>
-                              <tr className="text-left text-[var(--color-fg-muted)]">
-                                <th className="py-1 pr-4 font-medium">#</th>
-                                <th className="py-1 pr-4 font-medium">Submission time</th>
-                                <th className="py-1 pr-4 font-medium">Result</th>
-                                <th className="py-1 pr-4 font-medium">Language</th>
-                                <th className="py-1 font-medium">Submission ID</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {row.submissions.map((s, i) => (
-                                <tr key={s.providerSubmissionId}>
-                                  <td className="py-1 pr-4 tabular-nums">{i + 1}</td>
-                                  <td className="py-1 pr-4 tabular-nums">{formatSeconds(s.submittedAt)}</td>
-                                  <td className="py-1 pr-4">{STATUS_LABELS[s.status] ?? s.status}</td>
-                                  <td className="py-1 pr-4">{s.language ?? '—'}</td>
-                                  <td className="py-1 tabular-nums">{s.providerSubmissionId}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
+        <div className="space-y-4">
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+            {(
+              [
+                ['Assigned problems', stats.assignedProblems],
+                ['Attempted', stats.attempted],
+                ['Solved', stats.solved],
+                ['Attempted not solved', stats.attemptedNotSolved],
+                ['Solved after attempts', stats.solvedAfterAttempts],
+                ['Total attempts', stats.totalAttempts],
+                ['Total failed attempts', stats.totalFailedAttempts],
+                [
+                  'Avg attempts per solved problem',
+                  stats.averageAttemptsPerSolvedProblem === null ? '—' : stats.averageAttemptsPerSolvedProblem.toFixed(2),
+                ],
+              ] as const
+            ).map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-xs text-[var(--color-fg-muted)]">{label}</dt>
+                <dd className="font-semibold tabular-nums">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className="overflow-x-auto">
+            <p className="mb-2 text-xs text-[var(--color-fg-muted)]">Click a problem to see the submissions behind it.</p>
+            <TableShell>
+              <thead>
+                <tr>
+                  <Th>Problem</Th>
+                  <Th>Assignment Date</Th>
+                  <Th className="text-right">Attempts</Th>
+                  <Th className="text-right">Failed</Th>
+                  <Th>First Accepted</Th>
+                  <Th>Outcome</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {detail.data.rows.map((row) => {
+                  const key = `${row.dayKey}|${row.titleSlug}`;
+                  const open = expanded === key;
+                  return (
+                    <Fragment key={key}>
+                      <tr
+                        className="cursor-pointer hover:bg-[var(--color-surface-sunken)]"
+                        onClick={() => setExpanded(open ? null : key)}
+                        aria-expanded={open}
+                      >
+                        <Td className="font-medium">{row.title}</Td>
+                        <Td className="whitespace-nowrap">{formatDay(row.dayKey)}</Td>
+                        <Td className="text-right tabular-nums">{row.attempts}</Td>
+                        <Td className="text-right tabular-nums">{row.failedAttempts}</Td>
+                        <Td className="whitespace-nowrap tabular-nums">{formatAttempt(row.firstAcceptedAt)}</Td>
+                        <Td>
+                          <OutcomeBadge outcome={row.outcome} />
+                        </Td>
                       </tr>
-                    ) : null}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </TableShell>
+                      {open ? (
+                        <tr>
+                          <td colSpan={6} className="bg-[var(--color-surface-sunken)] px-4 py-3">
+                            <p className="mb-2 text-xs text-[var(--color-fg-muted)]">
+                              Period: {formatDay(row.dayKey)} –{' '}
+                              {row.windowEndDayKey ? formatDay(row.windowEndDayKey) : 'now (not assigned again)'}
+                            </p>
+                            {row.submissions.length === 0 ? (
+                              <p className="text-xs">No submission to this problem in its period.</p>
+                            ) : (
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-left text-[var(--color-fg-muted)]">
+                                    <th className="py-1 pr-4 font-medium">#</th>
+                                    <th className="py-1 pr-4 font-medium">Submission time</th>
+                                    <th className="py-1 pr-4 font-medium">Result</th>
+                                    <th className="py-1 pr-4 font-medium">Language</th>
+                                    <th className="py-1 font-medium">Submission ID</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {row.submissions.map((s, i) => (
+                                    <tr key={s.providerSubmissionId}>
+                                      <td className="py-1 pr-4 tabular-nums">{i + 1}</td>
+                                      <td className="py-1 pr-4 tabular-nums">{formatSeconds(s.submittedAt)}</td>
+                                      <td className="py-1 pr-4">{STATUS_LABELS[s.status] ?? s.status}</td>
+                                      <td className="py-1 pr-4">{s.language ?? '—'}</td>
+                                      <td className="py-1 tabular-nums">{s.providerSubmissionId}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </TableShell>
+          </div>
         </div>
       )}
     </Modal>
@@ -213,10 +262,11 @@ export default function CampusAttemptsPage() {
   const [problem, setProblem] = useState('ALL');
   const [difficulty, setDifficulty] = useState('ALL');
   const [view, setView] = useState<AttemptView>(DEFAULT_ATTEMPT_VIEW);
-  const [minAttempts, setMinAttempts] = useState(1);
+  const [minAttempts, setMinAttempts] = useState(0);
+  const [multipleAttempts, setMultipleAttempts] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedStudent, setSelectedStudent] = useState<string | null>(null);
-  const [exporting, setExporting] = useState<'view' | 'unsolved' | null>(null);
+  const [exporting, setExporting] = useState<'view' | 'unsolved' | 'multiple' | null>(null);
 
   const campusOptions = useQuery({ queryKey: ['campuses', 'coding-hours-activity'], queryFn: () => api.campuses(true) });
   const studentFilters = useQuery({ queryKey: ['students', 'filters'], queryFn: api.studentFilters });
@@ -230,7 +280,8 @@ export default function CampusAttemptsPage() {
     problem: problem === 'ALL' ? null : problem,
     difficulty: difficulty === 'ALL' ? null : difficulty,
     view,
-    minAttempts: view === 'NOT_ATTEMPTED' ? null : minAttempts,
+    minAttempts: minAttempts || null,
+    multipleAttempts: multipleAttempts || null,
     search: search || null,
   };
 
@@ -242,12 +293,12 @@ export default function CampusAttemptsPage() {
   const batchOptions = (studentFilters.data?.batches ?? []).filter((b) => campus === 'ALL' || b.campusId === campus);
   const squadOptions = (studentFilters.data?.squads ?? []).filter((s) => campus === 'ALL' || s.campusId === campus);
 
-  const handleExport = async (mode: 'view' | 'unsolved'): Promise<void> => {
+  const handleExport = async (mode: 'view' | 'unsolved' | 'multiple'): Promise<void> => {
     setExporting(mode);
     try {
       await downloadFile(
         api.campusAttemptsExportPath(params, mode),
-        mode === 'unsolved' ? 'unsolved-attempts.xlsx' : 'attempts-analysis.xlsx',
+        { view: 'attempts-analysis.xlsx', unsolved: 'unsolved-attempts.xlsx', multiple: 'multiple-attempts.xlsx' }[mode],
       );
     } catch (error) {
       toast.error('Export failed', { description: error instanceof Error ? error.message : undefined });
@@ -272,9 +323,10 @@ export default function CampusAttemptsPage() {
             /
           </p>
           <h1 className="text-lg font-semibold tracking-tight">Attempts Analysis</h1>
-          <p className="mt-1 max-w-2xl text-xs text-[var(--color-fg-muted)]">
-            Submissions to each assigned Coding-Hours problem on its assignment day, from the mirrored LeetCode
-            data. Failed attempts are the non-accepted submissions before the first accepted one.
+          <p className="mt-1 max-w-3xl text-xs text-[var(--color-fg-muted)]">
+            Submissions to each assigned Coding-Hours problem from its assignment day until the same problem is
+            assigned to that student again, from the mirrored LeetCode data. Failed attempts are the non-accepted
+            submissions before the first accepted one.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -286,16 +338,30 @@ export default function CampusAttemptsPage() {
             <Download className="size-3.5" aria-hidden />
             Export Unsolved Attempts
           </Button>
+          <Button onClick={() => void handleExport('multiple')} loading={exporting === 'multiple'}>
+            <Download className="size-3.5" aria-hidden />
+            Export Multiple Attempts
+          </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-        <StatTile label="Students attempted but not solved" value={summary?.studentsAttemptedNotSolved ?? '—'} />
-        <StatTile label="Assigned problems attempted" value={summary?.assignedProblemsAttempted ?? '—'} hint="Student × problem" />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+        <StatTile
+          label="Attempted but not solved"
+          value={summary?.attemptedNotSolved ?? '—'}
+          hint={summary ? `${summary.studentsAttemptedNotSolved} students` : undefined}
+        />
+        <StatTile label="Assigned problems attempted" value={summary?.assignedProblemsAttempted ?? '—'} />
         <StatTile label="Total failed attempts" value={summary?.totalFailedAttempts ?? '—'} />
-        <StatTile label="Students with 3+ attempts, no AC" value={summary?.studentsWith3PlusNoAc ?? '—'} />
-        <StatTile label="Students with 5+ attempts, no AC" value={summary?.studentsWith5PlusNoAc ?? '—'} />
+        <StatTile label="Solved after multiple attempts" value={summary?.solvedAfterMultipleAttempts ?? '—'} />
+        <StatTile label="Problems with 2+ attempts" value={summary?.problemsWith2PlusAttempts ?? '—'} />
+        <StatTile label="Problems with 3+ attempts" value={summary?.problemsWith3PlusAttempts ?? '—'} />
+        <StatTile label="Problems with 5+ attempts" value={summary?.problemsWith5PlusAttempts ?? '—'} />
       </div>
+      <p className="-mt-3 text-xs text-[var(--color-fg-muted)]">
+        Counts are student × assigned problem, over every outcome for the current campus, batch, squad, date,
+        problem, difficulty and search filters.
+      </p>
 
       <Card>
         <div className="flex flex-wrap items-end gap-3 p-4">
@@ -315,13 +381,8 @@ export default function CampusAttemptsPage() {
             <label htmlFor="att-min" className={labelClass}>
               Minimum Attempts
             </label>
-            <select
-              id="att-min"
-              className={selectClass}
-              value={minAttempts}
-              disabled={view === 'NOT_ATTEMPTED'}
-              onChange={(e) => setMinAttempts(Number(e.target.value))}
-            >
+            <select id="att-min" className={selectClass} value={minAttempts} onChange={(e) => setMinAttempts(Number(e.target.value))}>
+              <option value={0}>Any</option>
               {MIN_ATTEMPT_OPTIONS.map((n) => (
                 <option key={n} value={n}>
                   {n}+
@@ -329,6 +390,17 @@ export default function CampusAttemptsPage() {
               ))}
             </select>
           </div>
+          <label className="flex items-center gap-2 pb-1.5 text-sm">
+            <input
+              type="checkbox"
+              checked={multipleAttempts}
+              onChange={(e) => {
+                setMultipleAttempts(e.target.checked);
+                if (e.target.checked) setView('ALL');
+              }}
+            />
+            Multiple attempts to solve
+          </label>
           <div className="space-y-1">
             <label htmlFor="att-campus" className={labelClass}>
               Campus
@@ -439,8 +511,8 @@ export default function CampusAttemptsPage() {
       ) : (
         <Card>
           <CardHeader
-            title={`${report.data.rows.length} rows · ${ATTEMPT_VIEW_LABELS[view]}`}
-            description="Sorted by failed attempts, then attempts, then student name. Click a student for their problems."
+            title={`${report.data.rows.length} rows · ${multipleAttempts ? 'Multiple attempts to solve' : ATTEMPT_VIEW_LABELS[view]}`}
+            description="Sorted by failed attempts, then attempts, then student name. Click a student for their problem history."
           />
           <div className="overflow-x-auto">
             <TableShell>
@@ -454,10 +526,11 @@ export default function CampusAttemptsPage() {
                   <Th>Difficulty</Th>
                   <Th>Assignment Date</Th>
                   <Th className="text-right">Attempts</Th>
-                  <Th>Solved</Th>
                   <Th className="text-right">Failed Attempts</Th>
                   <Th>First Attempt</Th>
+                  <Th>First Accepted</Th>
                   <Th>Last Attempt</Th>
+                  <Th>Outcome</Th>
                 </tr>
               </thead>
               <tbody>
@@ -491,10 +564,13 @@ export default function CampusAttemptsPage() {
                     <Td>{row.difficulty ? <DifficultyBadge difficulty={row.difficulty} /> : '—'}</Td>
                     <Td className="whitespace-nowrap">{formatDay(row.dayKey)}</Td>
                     <Td className="text-right tabular-nums">{row.attempts}</Td>
-                    <Td>{row.attempts === 0 ? <OutcomeBadge row={row} /> : row.solved ? 'Yes' : 'No'}</Td>
                     <Td className="text-right font-semibold tabular-nums">{row.failedAttempts}</Td>
                     <Td className="whitespace-nowrap tabular-nums">{formatAttempt(row.firstAttemptAt)}</Td>
+                    <Td className="whitespace-nowrap tabular-nums">{formatAttempt(row.firstAcceptedAt)}</Td>
                     <Td className="whitespace-nowrap tabular-nums">{formatAttempt(row.lastAttemptAt)}</Td>
+                    <Td>
+                      <OutcomeBadge outcome={row.outcome} />
+                    </Td>
                   </tr>
                 ))}
               </tbody>
